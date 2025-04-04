@@ -8,6 +8,8 @@ from protocol import send_message, recv_message
 class Client:
     def listen_for_messages(self, ssock):
         """后台线程：持续监听并打印来自服务器的消息和文件"""
+        if not os.path.exists("files"):
+            os.makedirs("files")
         while True:
             header, data = recv_message(ssock)
             if header is None:  # 新增检查

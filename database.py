@@ -2,6 +2,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 import os
+import logging
 
 class Database:
     def __init__(self,db_name="users.db"):
@@ -76,9 +77,9 @@ class Database:
                     VALUES (?, ?, ?, ?, ?)
                 ''', (sender, receiver, message_type, content, filename))
                 conn.commit()
-                print(f"已保存离线消息：{sender} -> {receiver}, 类型={message_type}")
+                logging.info(f"已保存离线消息：{sender} -> {receiver}, 类型={message_type}")
         except Exception as e:
-            print(f"保存离线消息失败: {e}")  # 捕获并打印异常
+            logging.info(f"保存离线消息失败: {e}")  # 捕获并打印异常
 
     def get_offline_messages(self, receiver):
         """获取指定用户的离线消息并删除已读消息"""

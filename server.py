@@ -69,24 +69,24 @@ class Server:
                         # 上锁
                         with self.client_map_lock:
                             self.client_map[username] = ssock
+
+                        # 用户登录/注册成功后，检查并发送离线消息
+                        messages = self.db.get_offline_messages(username)
+                        if messages:
+                            for msg in messages:
+                                sender, msg_type, content, filename = msg
+                                if msg_type == "chat":
+                                    send_message(ssock, "chat", content.decode('utf-8'),
+                                            extra_headers={"from": sender, "history": "true"})
+                                elif msg_type == "file":
+                                    send_message(ssock, "file", content,
+                                            extra_headers={"from": sender, "filename": filename,"history": "true"})
                     else:
                         send_message(ssock, "error", "错误：密码错误")
                         ssock.close()
                         return
 
                 while True:
-                    # 用户登录/注册成功后，检查并发送离线消息
-                    messages = self.db.get_offline_messages(username)
-                    if messages:
-                        for msg in messages:
-                            sender, msg_type, content, filename = msg
-                            if msg_type == "chat":
-                                send_message(ssock, "chat", content.decode('utf-8'),
-                                             extra_headers={"from": sender, "history": "true"})
-                            elif msg_type == "file":
-                                send_message(ssock, "file", content,
-                                             extra_headers={"from": sender, "filename": filename, "history": "true"})
-
                     header, data = recv_message(ssock)
                     if not header or not data:  # 新增对 header 和 data 的检查
                         logging.info("客户端主动断开连接")
@@ -169,6 +169,9 @@ class Server:
             client_socket.close()
 
     def build_listen(self):
+        # 确保 files 目录存在
+        if not os.path.exists("files"):
+            os.makedirs("files")
         # 生成SSL上下文
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain("SSL/tsetcn.crt", "SSL/tsetcn.pem")
