@@ -20,19 +20,31 @@ class Client:
                 break
             msg_type = header.get("type")
             if msg_type == "chat":
-                if "from" in header:
-                    print(f"来自 {header['from']} 的消息: {data.decode('utf-8')}")
+                if "history" in header:
+                    print(f"[历史消息] 来自 {header['from']}: {data.decode('utf-8')}")
                 else:
-                    print("服务器:", data.decode("utf-8"))
+                    if "from" in header:
+                        print(f"来自 {header['from']} 的消息: {data.decode('utf-8')}")
+                    else:
+                        print("服务器:", data.decode("utf-8"))
             elif msg_type == "file":
                 filename = header.get("filename", "received_file")
-                filesize = header.get("filesize", 0)
-                print(f"开始接收文件 {filename} ({filesize} bytes)...")
-                file_path = f"files/recv_{filename}"
-                # 直接使用 data 写入文件，无需循环 recv
-                with open(file_path, 'wb') as f:
-                    f.write(data)  # data 是完整的文件内容
-                print(f"文件 {filename} 已接收，保存在 {file_path}")
+                if "history" in header:
+                    print(f"[历史文件] 来自 {header['from']}: {filename}")
+                    # 保存文件逻辑
+                    file_path = f"files/recv_{filename}"
+                    with open(file_path, 'wb') as f:
+                        f.write(data)  # data 是完整的文件内容
+                    print(f"[历史文件] {filename} 已保存至 {file_path}")
+                else:
+                    #filename = header.get("filename", "received_file")
+                    filesize = header.get("filesize", 0)
+                    print(f"开始接收文件 {filename} ({filesize} bytes)...")
+                    file_path = f"files/recv_{filename}"
+                    # 直接使用 data 写入文件，无需循环 recv
+                    with open(file_path, 'wb') as f:
+                        f.write(data)  # data 是完整的文件内容
+                    print(f"文件 {filename} 已接收，保存在 {file_path}")
             else:
                 print("未知消息类型", header)
         print("连接断开")

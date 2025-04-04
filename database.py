@@ -1,15 +1,17 @@
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
+import os
 
 class Database:
     def __init__(self,db_name="users.db"):
         self.db_name=db_name
+        print(f"数据库路径: {os.path.abspath(self.db_name)}")#用于确认数据库位置
         self._init_db()
 
     @contextmanager
     def _get_connection(self):
-        conn=sqlite3.connect(self.db_name)
+        conn=sqlite3.connect(self.db_name,check_same_thread=False)#启用多线程
         try:
             yield conn
         finally:
@@ -26,6 +28,18 @@ class Database:
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS offline_messages (
+                        id INTEGER PRIMARY KEY,
+                        sender TEXT NOT NULL,
+                        receiver TEXT NOT NULL,
+                        message_type TEXT NOT NULL,  -- 'chat' 或 'file'
+                        content BLOB NOT NULL,
+                        filename TEXT,               -- 仅文件类型需要
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')  # 新增离线消息表
             conn.commit()
 
     def add_user(self,username,password_hash):
@@ -51,3 +65,36 @@ class Database:
 
     def user_exists(self,username):
         return self.get_user(username)
+
+    def save_offline_message(self, sender, receiver, message_type, content, filename=None):
+        """保存离线消息"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO offline_messages (sender, receiver, message_type, content, filename)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (sender, receiver, message_type, content, filename))
+                conn.commit()
+                print(f"已保存离线消息：{sender} -> {receiver}, 类型={message_type}")
+        except Exception as e:
+            print(f"保存离线消息失败: {e}")  # 捕获并打印异常
+
+    def get_offline_messages(self, receiver):
+        """获取指定用户的离线消息并删除已读消息"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            # 查询消息
+            cursor.execute('''
+                SELECT sender, message_type, content, filename 
+                FROM offline_messages 
+                WHERE receiver = ?
+            ''', (receiver,))
+            messages = cursor.fetchall()
+            # 删除已读消息
+            cursor.execute('''
+                DELETE FROM offline_messages 
+                WHERE receiver = ?
+            ''', (receiver,))
+            conn.commit()
+            return messages

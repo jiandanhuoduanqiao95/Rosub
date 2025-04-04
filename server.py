@@ -75,6 +75,18 @@ class Server:
                         return
 
                 while True:
+                    # 用户登录/注册成功后，检查并发送离线消息
+                    messages = self.db.get_offline_messages(username)
+                    if messages:
+                        for msg in messages:
+                            sender, msg_type, content, filename = msg
+                            if msg_type == "chat":
+                                send_message(ssock, "chat", content.decode('utf-8'),
+                                             extra_headers={"from": sender, "history": "true"})
+                            elif msg_type == "file":
+                                send_message(ssock, "file", content,
+                                             extra_headers={"from": sender, "filename": filename, "history": "true"})
+
                     header, data = recv_message(ssock)
                     if not header or not data:  # 新增对 header 和 data 的检查
                         logging.info("客户端主动断开连接")
@@ -89,14 +101,19 @@ class Server:
 
                         message = data.decode("utf-8")
                         logging.info(f"来自 {username} 发往 {target} 的聊天消息: {message}")
-                        if target in self.client_map:
-                            with self.client_map_lock:  # 加锁
-                                recipient_socket = self.client_map.get(target)
-                                # 转发消息给目标用户，同时附加发送者信息
-                                send_message(recipient_socket, "chat", message, extra_headers={"from": username})
-                                # send_message(ssock, "chat", f"消息已发送给 {target}")
+                        #if target in self.client_map:
+                        with self.client_map_lock:  # 加锁
+                            recipient_socket=self.client_map.get(target)
+                        if recipient_socket:
+                            #接收方在线则直接转发
+                            # 转发消息给目标用户，同时附加发送者信息
+                            send_message(recipient_socket, "chat", message, extra_headers={"from": username})
+                            # send_message(ssock, "chat", f"消息已发送给 {target}")
                         else:
-                            send_message(ssock, "chat", f"错误：用户 {target} 不在线")
+                            #接收方离线则保存到数据库
+                            self.db.save_offline_message(username,target,"chat",message.encode('utf-8'))
+                            send_message(ssock,"chat",f"用户{target}离线，消息已保存")
+
                         if message.lower() == "quit":
                             break
 
@@ -106,12 +123,14 @@ class Server:
                             recipient_socket = self.client_map.get(target)
                             target_online = recipient_socket is not None
                         if not target_online:
-                            send_message(ssock, "chat", f"错误：用户{target}不在线")
+                            #接收方离线，保存文件信息到数据库
+                            filename=header.get("filename","received_file")
+                            self.db.save_offline_message(
+                                username,target,"file",data,
+                                filename=filename
+                            )
+                            send_message(ssock,"chat",f"用户{target}离线，文件已保存")
                             continue
-                        #检查用户是否在线
-                        # if target_online not in self.client_map:
-                        #     send_message(ssock, "chat", f"错误：用户 {target} 不在线")
-                        #     continue  # 直接跳过文件接收
 
                         filename = header.get("filename", "received_file")
                         file_data=data#data已经通过协议接收完整的文件内容
