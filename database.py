@@ -26,6 +26,7 @@ class Database:
                         id INTEGER PRIMARY KEY,
                         username TEXT UNIQUE NOT NULL,
                         password_hash TEXT NOT NULL,
+                        is_admin BOOLEAN DEFAULT FALSE,  -- 新增管理员标识
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -56,13 +57,13 @@ class Database:
             except sqlite3.IntegrityError:
                 return False#用户名重复
 
-    def get_user(self,username):
+    def get_user(self, username):
         with self._get_connection() as conn:
-            cursor=conn.cursor()
+            cursor = conn.cursor()
             cursor.execute('''
-                SELECT password_hash FROM users WHERE username = ?
-            ''',(username,))
-            return cursor.fetchone()# 返回 (password_hash,) 或 None
+                SELECT password_hash, is_admin FROM users WHERE username = ?
+            ''', (username,))
+            return cursor.fetchone()  # 返回 (password_hash, is_admin) 或 None
 
     def user_exists(self,username):
         return self.get_user(username)
@@ -99,3 +100,15 @@ class Database:
             ''', (receiver,))
             conn.commit()
             return messages
+
+    def get_all_users(self):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT username, is_admin FROM users')
+            return cursor.fetchall()
+
+    def delete_user(self, username):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM users WHERE username = ?', (username,))
+            conn.commit()

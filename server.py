@@ -6,6 +6,7 @@ import threading
 import logging
 import bcrypt
 from database import Database
+import json
 
 # 配置日志记录
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -61,10 +62,14 @@ class Server:
                         send_message(ssock,"error","错误，用户不存在")
                         ssock.close()
                         return
-                    stored_hash=user_data[0]
+                    stored_hash, is_admin = user_data  # 假设 get_user 返回 (password_hash, is_admin)
                     #检验密码
                     if bcrypt.checkpw(password.encode('utf-8'), stored_hash):
-                        send_message(ssock, "chat", "登录成功")
+                        # 检查是否为管理员
+                        if is_admin:
+                            send_message(ssock, "admin_auth", "管理员登录成功")
+                        else:
+                            send_message(ssock, "chat", "登录成功")
                         #self.client_map[username] = ssock
                         # 上锁
                         with self.client_map_lock:
@@ -152,6 +157,21 @@ class Server:
                             logging.error(f"接收文件失败: {e}")
                             #continue
                         logging.info(f"文件 {filename} 已接收完毕，保存为 {file_path}")
+                    elif msg_type == "admin_command":
+                        command = header.get("action")
+                        if command == "list_users":
+                            users = self.db.get_all_users()
+                            users_list = [[user[0], bool(user[1])] for user in users]  # 转换为列表格式
+                            send_message(ssock, "admin_response", json.dumps(users_list))
+                        elif command == "delete_user":
+                            target_user = data.decode("utf-8")
+                            self.db.delete_user(target_user)
+                            logging.info(f"管理员 {username} 删除用户: {target_user}")
+                            send_message(ssock, "admin_response", f"用户 {target_user} 已删除")
+                        elif command == "exit":
+                            # 无需返回数据，直接退出循环
+                            send_message(ssock, "admin_response", "退出成功")
+                            break
                     else:
                         logging.warning(f"未知消息类型来自 {username}")
         except ssl.SSLError as e:
