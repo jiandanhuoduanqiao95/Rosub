@@ -168,6 +168,24 @@ class Server:
                             self.db.delete_user(target_user)
                             logging.info(f"管理员 {username} 删除用户: {target_user}")
                             send_message(ssock, "admin_response", f"用户 {target_user} 已删除")
+                        elif command == "announcement":
+                            # 获取公告内容
+                            announcement_msg = data.decode("utf-8")
+                            # 向所有在线用户发送公告
+                            with self.client_map_lock:
+                                for user, sock in self.client_map.items():
+                                    try:
+                                        send_message(sock, "chat", announcement_msg,
+                                                     extra_headers={"from": "[系统公告]"})
+                                    except Exception as e:
+                                        logging.error(f"向用户 {user} 发送公告失败: {e}")
+                            # 关键修复：发送确认消息给管理员客户端
+                            try:
+                                #send_message(ssock, "admin_response", "公告发送成功")
+                                continue
+                            except Exception as e:
+                                logging.error(f"向管理员发送确认失败: {e}")
+
                         elif command == "exit":
                             # 无需返回数据，直接退出循环
                             send_message(ssock, "admin_response", "退出成功")

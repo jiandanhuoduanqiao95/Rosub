@@ -94,27 +94,42 @@ class Client:
             elif header.get("type") == "admin_auth":
                 print("管理员登录成功！")
                 while True:
-                    action = input("请选择操作: [1]查看用户列表 [2]删除用户 [3]退出: ")
+                    action = input("请选择操作: [1]查看用户列表 [2]删除用户 [3]发送全局公告 [4]退出: ")
                     if action == "1":
                         send_message(ssock, "admin_command", "list_users", extra_headers={"action": "list_users"})
                         header, data = recv_message(ssock)
                         if header.get("type") == "admin_response":
-                            users = json.loads(data.decode("utf-8"))
-                            print("用户列表:")
-                            for user in users:
-                                print(f"用户名: {user[0]}, 管理员: {bool(user[1])}")
-                        else:
-                            print("错误:", data.decode("utf-8") if data else "无响应数据")
+                            try:
+                                users = json.loads(data.decode("utf-8"))
+                                print("用户列表:")
+                                for user in users:
+                                    print(f"用户名: {user[0]}, 管理员: {'是' if user[1] else '否'}")
+                            except json.JSONDecodeError:
+                                print("服务器返回的数据格式无效:", data.decode("utf-8"))
                     elif action == "2":
                         target = input("请输入要删除的用户名: ")
                         send_message(ssock, "admin_command", target, extra_headers={"action": "delete_user"})
+                        header, data = recv_message(ssock)
+                        if header.get("type") == "admin_response":
+                            print("服务器:", data.decode("utf-8"))
                     elif action == "3":
+                        message = input("请输入全局公告内容: ")
+                        send_message(ssock, "admin_command", message, extra_headers={"action": "announcement"})
+                        header, data = recv_message(ssock)
+                        # if header.get("type") == "admin_response":
+                        #     response = data.decode("utf-8").strip()
+                        #     if response == "公告发送成功":
+                        #         print("公告已成功发送")
+                        #     else:
+                        #         print("服务器:", response)
+                        # else:
+                        #     print("公告发送失败")
+                    elif action == "4":
                         send_message(ssock, "admin_command", "exit", extra_headers={"action": "exit"})
-                        # 显式关闭连接并重启客户端
                         ssock.close()
                         print("已退出管理员模式，重新连接...")
-                        self.send_message_and_file()  # 重新初始化连接
-                        return  # 终止当前会话
+                        self.send_message_and_file()
+                        return
             print("服务器:", data.decode("utf-8"))
 
             # 启动后台线程，持续监听来自服务器的消息（包括转发的消息和文件）

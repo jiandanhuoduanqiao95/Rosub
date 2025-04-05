@@ -7,7 +7,7 @@ import logging
 class Database:
     def __init__(self,db_name="users.db"):
         self.db_name=db_name
-        print(f"数据库路径: {os.path.abspath(self.db_name)}")#用于确认数据库位置
+        #print(f"数据库路径: {os.path.abspath(self.db_name)}")#用于确认数据库位置
         self._init_db()
 
     @contextmanager
