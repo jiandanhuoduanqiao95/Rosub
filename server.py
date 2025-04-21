@@ -160,14 +160,33 @@ class Server:
                     elif msg_type == "admin_command":
                         command = header.get("action")
                         if command == "list_users":
-                            users = self.db.get_all_users()
-                            users_list = [[user[0], bool(user[1])] for user in users]  # 转换为列表格式
+                            # 获取当前用户的管理员状态
+                            user_data = self.db.get_user(username)  # 使用当前连接的用户名
+                            if not user_data:
+                                send_message(ssock, "error", "用户信息错误")
+                                return
+                            # 解包用户数据（假设返回格式为(password_hash, is_admin)）
+                            stored_hash, is_admin = user_data
+                            # 获取全部用户
+                            all_users = self.db.get_all_users()
+                            # 根据权限过滤用户
+                            if is_admin:
+                                filtered_users = all_users
+                            else:
+                                filtered_users = [user for user in all_users if not user[1]]  # 筛选非管理员
+                            # 构造返回数据
+                            users_list = [[user[0], bool(user[1])] for user in filtered_users]
                             send_message(ssock, "admin_response", json.dumps(users_list))
                         elif command == "delete_user":
                             target_user = data.decode("utf-8")
-                            self.db.delete_user(target_user)
-                            logging.info(f"管理员 {username} 删除用户: {target_user}")
-                            send_message(ssock, "admin_response", f"用户 {target_user} 已删除")
+                            if self.db.delete_user(target_user):
+                                # 删除成功后返回最新用户列表
+                                users = self.db.get_all_users()
+                                users_list = [[user[0], bool(user[1])] for user in users]
+                                send_message(ssock, "admin_response", json.dumps(users_list))
+                                logging.info(f"管理员 {username} 删除用户: {target_user}")
+                            else:
+                                send_message(ssock, "error", f"删除用户 {target_user} 失败")
                         elif command == "announcement":
                             # 获取公告内容
                             announcement_msg = data.decode("utf-8")

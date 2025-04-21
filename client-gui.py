@@ -116,14 +116,14 @@ class Client:
                         message = input("请输入全局公告内容: ")
                         send_message(ssock, "admin_command", message, extra_headers={"action": "announcement"})
                         header, data = recv_message(ssock)
-                        # if header.get("type") == "admin_response":
-                        #     response = data.decode("utf-8").strip()
-                        #     if response == "公告发送成功":
-                        #         print("公告已成功发送")
-                        #     else:
-                        #         print("服务器:", response)
-                        # else:
-                        #     print("公告发送失败")
+                        if header.get("type") == "admin_response":
+                            response = data.decode("utf-8").strip()
+                            if response == "公告发送成功":
+                                print("公告已成功发送")
+                            else:
+                                print("服务器:", response)
+                        else:
+                            print("公告发送失败")
                     elif action == "4":
                         send_message(ssock, "admin_command", "exit", extra_headers={"action": "exit"})
                         ssock.close()
