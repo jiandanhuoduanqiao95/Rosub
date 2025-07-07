@@ -6,7 +6,7 @@
 import json
 import struct
 
-def send_message(sock, msg_type, content, extra_headers=None):
+def send_message(sock, msg_type, content, extra_headers=None, chunk_size=1024*1024*4):
     """
     发送消息：
     - sock: 已连接的socket
@@ -30,10 +30,13 @@ def send_message(sock, msg_type, content, extra_headers=None):
     # 发送消息头
     sock.sendall(header_json)
     # 发送消息体
-    sock.sendall(content_bytes)
+    #sock.sendall(content_bytes)
+    # 分块发送
+    for i in range(0, len(content_bytes), chunk_size):
+        sock.sendall(content_bytes[i:i + chunk_size])
 
 
-def recv_message(sock):
+def recv_message(sock,chunk_size=1024*1024*4):
     """
     接收消息：
     返回：(header字典, 消息体字节流)
@@ -46,10 +49,12 @@ def recv_message(sock):
     header_json = recvall(sock, header_len)
     header = json.loads(header_json.decode('utf-8'))
     length = header.get('length', 0)
-    content_bytes = recvall(sock, length)
-    if header.get("type") in ("register", "login"):
-        if "password" not in header:
-            raise ValueError("认证消息必须包含 'password' 字段")
+    content_bytes = b''
+    while len(content_bytes) < length:
+        packet = recvall(sock, min(chunk_size, length - len(content_bytes)))
+        if not packet:
+            return None, None
+        content_bytes += packet
     return header, content_bytes
 
 def recvall(sock, n):
