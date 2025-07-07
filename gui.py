@@ -36,10 +36,19 @@ class ClientGUI:
 
     def setup_chat_ui(self):
         self.chat_frame = ttk.Frame(self.root)
-        self.user_list = ttk.Treeview(self.chat_frame, columns=('status'), show='tree')
-        self.user_list.heading('#0', text='好友列表')
+        tree_frame = ttk.Frame(self.chat_frame)
+        tree_frame.grid(row=0, column=0, rowspan=3, padx=5, pady=5, sticky='ns')
+        self.user_list = ttk.Treeview(tree_frame, columns=('username', 'status'), show='headings', height=20)
+        self.user_list.heading('username', text='好友')
         self.user_list.heading('status', text='状态')
-        self.user_list.grid(row=0, column=0, rowspan=3, padx=5, pady=5, sticky='ns')
+        self.user_list.column('username', width=150, anchor='center', minwidth=150)
+        self.user_list.column('status', width=80, anchor='center', minwidth=80)
+        style = ttk.Style()
+        style.configure("Treeview", rowheight=25, font=('Arial', 10))
+        self.user_list.pack(side='left', fill='both', expand=True)
+        scrollbar = ttk.Scrollbar(tree_frame, orient='vertical', command=self.user_list.yview)
+        scrollbar.pack(side='right', fill='y')
+        self.user_list.configure(yscrollcommand=scrollbar.set)
         self.chat_text = tk.Text(self.chat_frame, width=50, height=20, state='disabled')
         self.chat_text.grid(row=0, column=1, columnspan=2, padx=5, pady=5)
         self.msg_entry = ttk.Entry(self.chat_frame, width=40)
@@ -80,7 +89,7 @@ class ClientGUI:
     def show_admin_panel(self):
         admin_win = tk.Toplevel(self.root)
         admin_win.title("管理员面板")
-        ttk.Button(admin_win, text="查看好友列表", command=self.list_users).pack(pady=5)
+        ttk.Button(admin_win, text="查看所有用户", command=self.list_users).pack(pady=5)
         ttk.Button(admin_win, text="删除用户", command=self.delete_user).pack(pady=5)
         ttk.Button(admin_win, text="发送公告", command=self.send_announcement).pack(pady=5)
 
@@ -149,18 +158,56 @@ class ClientGUI:
                 users = json.loads(data.decode())
                 self.user_list.delete(*self.user_list.get_children())
                 self.client_map.clear()
-                for user in users:
-                    self.client_map[user[0]] = True
-                    status = '在线' if user[0] in self.client_map else '离线'
-                    self.user_list.insert('', 'end', text=user[0], values=(status))
-                self.append_chat("好友列表已刷新")
+                response_type = header.get("response_type", "list_friends")
+                if response_type == "list_friends":
+                    for user, is_online in users:
+                        self.client_map[user] = {'is_online': is_online, 'is_admin': False}
+                        status = '在线' if is_online else '离线'
+                        self.user_list.insert('', 'end', values=(user, status))
+                    self.append_chat("好友列表已刷新")
+                elif response_type == "list_users":
+                    for user, is_online, is_admin in users:
+                        self.client_map[user] = {'is_online': is_online, 'is_admin': is_admin}
+                        status = '在线' if is_online else '离线'
+                        admin_status = '是' if is_admin else '否'
+                        self.user_list.insert('', 'end', values=(user, status))
+                    action_result = header.get("action_result")
+                    if action_result:
+                        self.append_chat(action_result)
+                    else:
+                        self.append_chat("用户列表已刷新")
             except json.JSONDecodeError:
-                self.append_chat("好友列表解析失败")
+                self.append_chat("用户列表解析失败")
         elif msg_type == "error":
             self.append_chat(f"错误: {data.decode()}")
 
+    def show_all_users(self):
+        users_win = tk.Toplevel(self.root)
+        users_win.title("所有用户")
+        users_win.geometry("300x400")
+        ttk.Label(users_win, text="所有注册用户").pack(pady=5)
+        tree = ttk.Treeview(users_win, columns=('username', 'status', 'admin'), show='headings')
+        tree.heading('username', text='用户名')
+        tree.heading('status', text='状态')
+        tree.heading('admin', text='管理员')
+        tree.column('username', width=100, anchor='center')
+        tree.column('status', width=60, anchor='center')
+        tree.column('admin', width=60, anchor='center')
+        tree.pack(fill='both', expand=True, padx=5, pady=5)
+        try:
+            send_message(self.ssock, "admin_command", "", extra_headers={"action": "list_users"})
+            self.root.after(100, lambda: self.populate_users(tree))
+        except Exception as e:
+            messagebox.showerror("失败", f"请求用户列表失败: {e}")
+
+    def populate_users(self, tree):
+        tree.delete(*tree.get_children())
+        for user, info in self.client_map.items():
+            status = '在线' if info['is_online'] else '离线'
+            admin_status = '是' if info['is_admin'] else '否'
+            tree.insert('', 'end', values=(user, status, admin_status))
+
     def show_friend_requests(self, requests):
-        """显示好友请求列表，允许接受或拒绝"""
         requests_win = tk.Toplevel(self.root)
         requests_win.title("好友请求")
         requests_win.geometry("300x400")
@@ -204,7 +251,7 @@ class ClientGUI:
         if not selected:
             messagebox.showwarning("提示", "请选择接收好友")
             return
-        target = self.user_list.item(selected[0])['text']
+        target = self.user_list.item(selected[0])['values'][0]
         try:
             send_message(self.ssock, "chat", msg, extra_headers={"to": target})
             self.append_chat(f"我 -> {target}: {msg}")
@@ -220,7 +267,7 @@ class ClientGUI:
         if not selected:
             messagebox.showwarning("提示", "请选择接收好友")
             return
-        target = self.user_list.item(selected[0])['text']
+        target = self.user_list.item(selected[0])['values'][0]
         filename = os.path.basename(filepath)
         try:
             with open(filepath, 'rb') as f:
@@ -261,15 +308,16 @@ class ClientGUI:
 
     def refresh_user_list(self):
         try:
-            send_message(self.ssock, "admin_command", "list_users", extra_headers={"action": "list_users"})
+            send_message(self.ssock, "list_friends", "")
         except Exception as e:
             self.update_status(f"刷新好友列表失败: {e}")
 
     def list_users(self):
         try:
-            send_message(self.ssock, "admin_command", "list_users", extra_headers={"action": "list_users"})
+            send_message(self.ssock, "admin_command", "", extra_headers={"action": "list_users"})
+            self.root.after(100, self.show_all_users)
         except Exception as e:
-            messagebox.showerror("失败", f"请求好友列表失败: {e}")
+            messagebox.showerror("失败", f"请求用户列表失败: {e}")
 
     def delete_user(self):
         target = tk.simpledialog.askstring("删除用户", "输入要删除的用户名:")

@@ -82,9 +82,6 @@ class Server:
 
                     if msg_type == "chat":
                         target = header.get("to")
-                        if not target:
-                            send_message(ssock, "chat", "错误，未指定接收者")
-                            continue
                         if not self.db.is_friend(username, target):
                             send_message(ssock, "error", f"错误：{target} 不是您的好友")
                             continue
@@ -151,6 +148,13 @@ class Server:
                         pending_requests = self.db.get_pending_friend_requests(username)
                         send_message(ssock, "list_friend_requests", json.dumps(pending_requests))
 
+                    elif msg_type == "list_friends":
+                        users = self.db.get_friends(username)
+                        with self.client_map_lock:
+                            users_list = [[user, user in self.client_map] for user in users]
+                        send_message(ssock, "admin_response", json.dumps(users_list), extra_headers={"response_type": "list_friends"})
+                        logging.info(f"用户 {username} 请求好友列表")
+
                     elif msg_type == "accept_friend":
                         requester = header.get("from")
                         if not self.db.has_pending_request(requester, username):
@@ -174,17 +178,23 @@ class Server:
                         logging.info(f"好友请求拒绝：{requester} -> {username}")
 
                     elif msg_type == "admin_command":
+                        if not self.db.get_user(username)[1]:
+                            send_message(ssock, "error", "无管理员权限")
+                            continue
                         command = header.get("action")
                         if command == "list_users":
-                            users = self.db.get_friends(username)
-                            users_list = [[user, False] for user in users]
-                            send_message(ssock, "admin_response", json.dumps(users_list))
+                            users = self.db.get_all_users()
+                            with self.client_map_lock:
+                                users_list = [[user, user in self.client_map, is_admin] for user, is_admin in users]
+                            send_message(ssock, "admin_response", json.dumps(users_list), extra_headers={"response_type": "list_users"})
                         elif command == "delete_user":
                             target_user = data.decode("utf-8")
                             if self.db.delete_user(target_user):
-                                users = self.db.get_friends(username)
-                                users_list = [[user, False] for user in users]
-                                send_message(ssock, "admin_response", json.dumps(users_list))
+                                users = self.db.get_all_users()
+                                with self.client_map_lock:
+                                    users_list = [[user, user in self.client_map, is_admin] for user, is_admin in users]
+                                send_message(ssock, "admin_response", json.dumps(users_list),
+                                             extra_headers={"response_type": "list_users", "action_result": f"删除用户 {target_user} 成功"})
                                 logging.info(f"管理员 {username} 删除用户: {target_user}")
                             else:
                                 send_message(ssock, "error", f"删除用户 {target_user} 失败")

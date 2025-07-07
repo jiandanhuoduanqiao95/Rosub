@@ -118,8 +118,12 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM friends WHERE user1 = ? OR user2 = ?', (username, username))
+            friends_deleted = cursor.rowcount
             cursor.execute('DELETE FROM users WHERE username = ?', (username,))
+            users_deleted = cursor.rowcount
             conn.commit()
+            return users_deleted > 0 or friends_deleted > 0
+
 
     def add_friend_request(self, requester, target):
         try:
