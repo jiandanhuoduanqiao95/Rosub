@@ -343,6 +343,7 @@ class ClientGUI:
         try:
             if self.ssock:
                 send_message(self.ssock, "chat", "quit")
+                self.ssock.unwrap()  # 正确关闭 SSL 会话
                 self.ssock.close()
         except Exception:
             pass

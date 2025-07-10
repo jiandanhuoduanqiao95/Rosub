@@ -121,6 +121,8 @@ class Server:
                             send_message(recipient_socket, "file", file_data,
                                          extra_headers={"from": username, "filename": filename, "filesize": len(file_data)})
                             logging.info(f"文件 {filename} 已接收并转发")
+                            #删除中转文件
+                            os.remove(file_path)
                         except Exception as e:
                             logging.error(f"接收文件失败: {e}")
 
