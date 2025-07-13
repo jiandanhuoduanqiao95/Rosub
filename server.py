@@ -264,10 +264,19 @@ class Server:
                             send_message(ssock, "error", "只能撤回自己的消息")
                             logging.warning(f"撤回消息失败: 用户 {username} 尝试撤回非自己的消息 {message_id}")
                             continue
-                        message_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
-                        if datetime.now() - message_time > timedelta(minutes=2):
-                            send_message(ssock, "error", "消息超过2分钟，无法撤回")
-                            logging.warning(f"撤回消息失败: 消息 {message_id} 超过2分钟")
+                        try:
+                            # 直接解析时间戳，数据库格式为 'YYYY-MM-DD HH:MM:SS'
+                            message_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                            current_time = datetime.utcnow()  # 使用 UTC 时间，与数据库时间戳一致
+                            time_diff = current_time - message_time
+                            logging.info(f"撤回消息时间检查: 消息ID={message_id}, 原始时间戳={timestamp}, 解析时间={message_time}, 当前时间={current_time}, 时间差={time_diff.total_seconds()}秒")
+                            if time_diff > timedelta(minutes=2):
+                                send_message(ssock, "error", f"消息超过2分钟，无法撤回 (时间差: {time_diff.total_seconds()}秒)")
+                                logging.warning(f"撤回消息失败: 消息 {message_id} 超过2分钟, 时间差={time_diff.total_seconds()}秒")
+                                continue
+                        except ValueError as e:
+                            send_message(ssock, "error", f"消息时间格式错误: {e}")
+                            logging.error(f"撤回消息失败: 消息 {message_id} 时间格式错误: {e}")
                             continue
                         if status == 'recalled':
                             send_message(ssock, "error", "消息已被撤回")

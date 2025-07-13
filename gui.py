@@ -58,6 +58,7 @@ class ClientGUI:
         self.user_list.configure(yscrollcommand=scrollbar.set)
         self.chat_text = tk.Text(self.chat_frame, width=50, height=20, state='disabled')
         self.chat_text.grid(row=0, column=1, columnspan=2, padx=5, pady=5)
+        self.chat_text.bind("<Button-1>", self.on_chat_text_click)
         self.msg_entry = ttk.Entry(self.chat_frame, width=40)
         self.msg_entry.grid(row=1, column=1, padx=5, pady=5)
         self.file_btn = ttk.Button(self.chat_frame, text="发送文件", command=self.send_file)
@@ -138,26 +139,46 @@ class ClientGUI:
                 self.update_status(f"接收错误: {str(e)}")
                 break
 
-    def update_message_status_in_chat(self, message_id, new_status):
+    def update_message_status_in_chat(self, message_id, new_status, sender=None):
         """更新聊天窗口中指定消息的状态"""
         if message_id in self.message_lines:
             line_number = self.message_lines[message_id]
             self.chat_text.config(state='normal')
-            # 获取该行的内容
-            line_content = self.chat_text.get(f"{line_number}.0", f"{line_number}.end")
-            # 替换状态（假设状态格式为 [sent] 或 [delivered]）
-            if "[sent]" in line_content:
-                new_content = line_content.replace("[sent]", f"[{new_status}]")
-            elif "[delivered]" in line_content:
-                new_content = line_content.replace("[delivered]", f"[{new_status}]")
+            if new_status == "recalled":
+                new_content = f"{sender or '消息'}: 消息已被撤回 ({message_id})"
+                self.chat_text.delete(f"{line_number}.0", f"{line_number}.end")
+                self.chat_text.insert(f"{line_number}.0", new_content + "\n", f"clickable_message_{message_id}")
             else:
-                new_content = line_content  # 如果状态未找到，保持不变
-            # 删除旧行，插入新行
-            self.chat_text.delete(f"{line_number}.0", f"{line_number}.end")
-            self.chat_text.insert(f"{line_number}.0", new_content)
+                line_content = self.chat_text.get(f"{line_number}.0", f"{line_number}.end")
+                if "[sent]" in line_content:
+                    new_content = line_content.replace("[sent]", f"[{new_status}]")
+                elif "[delivered]" in line_content:
+                    new_content = line_content.replace("[delivered]", f"[{new_status}]")
+                else:
+                    new_content = line_content
+                self.chat_text.delete(f"{line_number}.0", f"{line_number}.end")
+                self.chat_text.insert(f"{line_number}.0", new_content + "\n", f"clickable_message_{message_id}")
             self.chat_text.config(state='disabled')
             self.chat_text.see('end')
             logging.info(f"更新消息状态: {message_id} -> {new_status}")
+
+    def on_chat_text_click(self, event):
+        """处理聊天窗口的点击事件"""
+        index = self.chat_text.index(f"@{event.x},{event.y}")
+        tags = self.chat_text.tag_names(index)
+        for tag in tags:
+            if tag.startswith("clickable_message_"):
+                message_id = tag[len("clickable_message_"):]
+                line_number = self.message_lines.get(message_id)
+                if line_number:
+                    line_content = self.chat_text.get(f"{line_number}.0", f"{line_number}.end")
+                    if line_content.startswith("我 ->") or line_content.startswith("已发送文件"):
+                        if messagebox.askyesno("确认撤回", f"是否撤回消息 {message_id}？"):
+                            self.recall_message(message_id)
+                    else:
+                        messagebox.showwarning("提示", "只能撤回自己的消息")
+                    return
+        messagebox.showinfo("提示", "请点击一条消息以撤回")
 
     def process_message(self, header, data):
         msg_type = header.get("type")
@@ -169,7 +190,6 @@ class ClientGUI:
                 return
             sender = header.get("from", "服务器")
             tag = "[历史]" if "history" in header else ""
-            # 接收方强制显示 [delivered]，忽略服务器提供的 status
             status = "delivered" if sender != "服务器" else ""
             if msg_type == "chat":
                 msg = data.decode()
@@ -182,7 +202,7 @@ class ClientGUI:
                     self.message_status[message_id] = status
                     self.chat_text.config(state='normal')
                     line_number = int(float(self.chat_text.index('end-1c')))
-                    self.chat_text.insert('end', f"{tag}{sender}: {msg} [{status}] ({message_id})\n")
+                    self.chat_text.insert('end', f"{tag}{sender}: {msg} [{status}] ({message_id})\n", f"clickable_message_{message_id}")
                     self.chat_text.config(state='disabled')
                     self.chat_text.see('end')
                     self.message_lines[message_id] = line_number
@@ -195,7 +215,7 @@ class ClientGUI:
                 self.message_status[message_id] = status
                 self.chat_text.config(state='normal')
                 line_number = int(float(self.chat_text.index('end-1c')))
-                self.chat_text.insert('end', f"{tag}{sender}: 收到文件: {filename}，已保存至 {file_path} [{status}] ({message_id})\n")
+                self.chat_text.insert('end', f"{tag}{sender}: 收到文件: {filename}，已保存至 {file_path} [{status}] ({message_id})\n", f"clickable_message_{message_id}")
                 self.chat_text.config(state='disabled')
                 self.chat_text.see('end')
                 self.message_lines[message_id] = line_number
@@ -253,9 +273,13 @@ class ClientGUI:
                 logging.error("用户列表解析失败")
         elif msg_type == "recall":
             message_id = header.get("message_id")
-            self.message_status[message_id] = "recalled"
-            self.update_message_status_in_chat(message_id, "recalled")
-            self.append_chat(f"消息 {message_id} 已被撤回")
+            sender = header.get("from", "未知用户")
+            if message_id in self.message_status:
+                self.message_status[message_id] = "recalled"
+                self.update_message_status_in_chat(message_id, "recalled", sender=sender)
+                logging.info(f"处理撤回消息: {message_id} from {sender}")
+            else:
+                logging.warning(f"撤回消息失败: 消息ID={message_id} 不存在")
         elif msg_type == "error":
             self.append_chat(f"错误: {data.decode()}")
 
@@ -336,7 +360,7 @@ class ClientGUI:
             self.message_status[message_id] = "sent"
             self.chat_text.config(state='normal')
             line_number = int(float(self.chat_text.index('end-1c')))
-            self.chat_text.insert('end', f"我 -> {target}: {msg} [sent] ({message_id})\n")
+            self.chat_text.insert('end', f"我 -> {target}: {msg} [sent] ({message_id})\n", f"clickable_message_{message_id}")
             self.chat_text.config(state='disabled')
             self.chat_text.see('end')
             self.message_lines[message_id] = line_number
@@ -365,7 +389,7 @@ class ClientGUI:
                 self.message_status[message_id] = "sent"
                 self.chat_text.config(state='normal')
                 line_number = int(float(self.chat_text.index('end-1c')))
-                self.chat_text.insert('end', f"已发送文件: {filename} 给 {target} [sent] ({message_id})\n")
+                self.chat_text.insert('end', f"已发送文件: {filename} 给 {target} [sent] ({message_id})\n", f"clickable_message_{message_id}")
                 self.chat_text.config(state='disabled')
                 self.chat_text.see('end')
                 self.message_lines[message_id] = line_number
@@ -374,9 +398,9 @@ class ClientGUI:
             messagebox.showerror("发送失败", str(e))
             logging.error(f"发送文件失败: {str(e)}")
 
-    def recall_message(self):
-        message_id = tk.simpledialog.askstring("撤回消息", "输入要撤回的消息ID:")
+    def recall_message(self, message_id=None):
         if not message_id:
+            messagebox.showinfo("提示", "请点击一条消息以撤回")
             return
         try:
             send_message(self.ssock, "recall", "", extra_headers={"message_id": message_id})
