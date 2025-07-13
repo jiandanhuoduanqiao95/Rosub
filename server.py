@@ -76,6 +76,13 @@ class Server:
                             elif msg_type == "file":
                                 send_message(ssock, "file", content,
                                              extra_headers={"from": sender, "filename": filename, "history": "true", "message_id": message_id, "status": status})
+                            # 通知发送方消息已送达（如果发送方在线）
+                            with self.client_map_lock:
+                                sender_socket = self.client_map.get(sender)
+                            if sender_socket:
+                                send_message(sender_socket, "status_update", "",
+                                             extra_headers={"message_id": message_id, "status": "delivered"})
+                                logging.info(f"通知发送方: 消息ID={message_id}, 状态=delivered, 目标={sender}")
                         # 清理已送达的消息
                         self.db.cleanup_delivered_messages(username)
                         pending_requests = self.db.get_pending_friend_requests(username)
@@ -170,7 +177,7 @@ class Server:
                             send_message(ssock, "error", "好友请求发送失败，可能已存在")
                             logging.error(f"好友请求发送失败：{username} -> {target}")
 
-                    elif msg_type == " list_friend_requests":
+                    elif msg_type == "list_friend_requests":
                         pending_requests = self.db.get_pending_friend_requests(username)
                         send_message(ssock, "list_friend_requests", json.dumps(pending_requests))
                         logging.info(f"发送好友请求列表: 用户={username}, 请求数={len(pending_requests)}")
