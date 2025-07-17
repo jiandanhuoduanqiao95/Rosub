@@ -194,12 +194,14 @@ class ClientGUI:
         while True:
             try:
                 header, data = recv_message(self.ssock)
-                if header is None:
+                if header is None:  # 服务器连接断开
                     self.update_status("服务器连接已断开")
+                    self.logout()  # 自动退出登录
                     break
                 self.process_message(header, data)
             except Exception as e:
                 self.update_status(f"接收错误: {str(e)}")
+                self.logout()  # 自动退出登录
                 break
 
     def update_message_status_in_chat(self, message_id, new_status, sender=None):
@@ -276,8 +278,9 @@ class ClientGUI:
                     tag_name = "announcement" if sender == "[系统公告]" else None
                     self.append_chat("服务器", f"{tag}{sender}: {msg}", tag=tag_name)
                     if sender == "[系统公告]":
-                        self.switch_chat_window("服务器")
-                        messagebox.showinfo("系统公告", f"收到新公告: {msg}")
+                        # 确保在主线程中执行 UI 操作
+                        self.root.after(0, lambda: self.switch_chat_window("服务器"))
+                        self.root.after(0, lambda: messagebox.showinfo("系统公告", f"收到新公告: {msg}"))
                 else:
                     self.message_status[message_id] = status
                     self.append_chat(sender, f"{tag}{sender}: {msg} [{status}] ({message_id})", tag=f"clickable_message_{message_id}")

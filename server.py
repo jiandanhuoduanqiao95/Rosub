@@ -123,9 +123,14 @@ class Server:
                         with self.client_map_lock:
                             recipient_socket = self.client_map.get(target)
                         if recipient_socket:
-                            send_message(recipient_socket, "chat", message,
-                                         extra_headers={"from": username, "message_id": message_id, "status": "sent"})
-                            logging.info(f"消息已转发: {username} -> {target}, 消息ID={message_id}")
+                            try:
+                                send_message(recipient_socket, "chat", message,
+                                             extra_headers={"from": username, "message_id": message_id, "status": "sent"})
+                                logging.info(f"消息已转发: {username} -> {target}, 消息ID={message_id}")
+                            except Exception as e:
+                                logging.error(f"发送消息失败: {username} -> {target}, 消息ID={message_id}, 错误={e}")
+                                with self.client_map_lock:
+                                    self.client_map.pop(target, None)
                         else:
                             send_message(ssock, "chat", f"用户 {target} 离线，消息已保存")
                             logging.info(f"用户 {target} 离线，消息已保存: 消息ID={message_id}")
@@ -153,9 +158,14 @@ class Server:
                         with self.client_map_lock:
                             recipient_socket = self.client_map.get(target)
                         if recipient_socket:
-                            send_message(recipient_socket, "file_request", "",
-                                         extra_headers={"from": username, "filename": filename, "filesize": filesize, "message_id": message_id})
-                            logging.info(f"文件请求已发送: {username} -> {target}, 文件名={filename}, 消息ID={message_id}")
+                            try:
+                                send_message(recipient_socket, "file_request", "",
+                                             extra_headers={"from": username, "filename": filename, "filesize": filesize, "message_id": message_id})
+                                logging.info(f"文件请求已发送: {username} -> {target}, 文件名={filename}, 消息ID={message_id}")
+                            except Exception as e:
+                                logging.error(f"发送文件请求失败: {username} -> {target}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
+                                with self.client_map_lock:
+                                    self.client_map.pop(target, None)
                         else:
                             send_message(ssock, "chat", f"用户 {target} 离线，文件请求已保存")
                             logging.info(f"用户 {target} 离线，文件请求已保存: 文件名={filename}, 消息ID={message_id}")
@@ -179,18 +189,33 @@ class Server:
                         if response == "accept":
                             self.db.save_offline_message(sender, receiver, "file", file_data, filename=filename, message_id=message_id)
                             if sender_socket:
-                                send_message(sender_socket, "chat", f"用户 {receiver} 已接受文件 {filename}")
-                                logging.info(f"通知发送方: {receiver} 接受文件 {filename}, 消息ID={message_id}")
+                                try:
+                                    send_message(sender_socket, "chat", f"用户 {receiver} 已接受文件 {filename}")
+                                    logging.info(f"通知发送方: {receiver} 接受文件 {filename}, 消息ID={message_id}")
+                                except Exception as e:
+                                    logging.error(f"通知发送方失败: {receiver} 接受文件 {filename}, 消息ID={message_id}, 错误={e}")
+                                    with self.client_map_lock:
+                                        self.client_map.pop(sender, None)
                             if self.client_map.get(receiver):
-                                send_message(self.client_map[receiver], "file", file_data,
-                                             extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id, "status": "sent"})
-                                logging.info(f"文件已传输: {sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}")
+                                try:
+                                    send_message(self.client_map[receiver], "file", file_data,
+                                                 extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id, "status": "sent"})
+                                    logging.info(f"文件已传输: {sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}")
+                                except Exception as e:
+                                    logging.error(f"传输文件失败: {sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
+                                    with self.client_map_lock:
+                                        self.client_map.pop(receiver, None)
                             self.db.delete_file_request(message_id)
                             logging.info(f"文件请求已删除: 消息ID={message_id}")
                         else:
                             if sender_socket:
-                                send_message(sender_socket, "chat", f"用户 {receiver} 已拒绝文件 {filename}")
-                                logging.info(f"通知发送方: {receiver} 拒绝文件 {filename}, 消息ID={message_id}")
+                                try:
+                                    send_message(sender_socket, "chat", f"用户 {receiver} 已拒绝文件 {filename}")
+                                    logging.info(f"通知发送方: {receiver} 拒绝文件 {filename}, 消息ID={message_id}")
+                                except Exception as e:
+                                    logging.error(f"通知发送方失败: {receiver} 拒绝文件 {filename}, 消息ID={message_id}, 错误={e}")
+                                    with self.client_map_lock:
+                                        self.client_map.pop(sender, None)
                             self.db.delete_file_request(message_id)
                             logging.info(f"文件请求已删除: 消息ID={message_id}")
 
@@ -208,8 +233,14 @@ class Server:
                             with self.client_map_lock:
                                 recipient_socket = self.client_map.get(target)
                             if recipient_socket:
-                                send_message(recipient_socket, "friend_request", f"来自 {username} 的好友请求",
-                                             extra_headers={"from": username})
+                                try:
+                                    send_message(recipient_socket, "friend_request", f"来自 {username} 的好友请求",
+                                                 extra_headers={"from": username})
+                                    logging.info(f"好友请求已发送: {username} -> {target}")
+                                except Exception as e:
+                                    logging.error(f"发送好友请求通知失败: {username} -> {target}, 错误={e}")
+                                    with self.client_map_lock:
+                                        self.client_map.pop(target, None)
                             send_message(ssock, "chat", f"好友请求已发送给 {target}")
                             logging.info(f"好友请求发送：{username} -> {target}")
                         else:
@@ -239,7 +270,13 @@ class Server:
                         with self.client_map_lock:
                             requester_socket = self.client_map.get(requester)
                         if requester_socket:
-                            send_message(requester_socket, "chat", f"{username} 已接受您的好友请求")
+                            try:
+                                send_message(requester_socket, "chat", f"{username} 已接受您的好友请求")
+                                logging.info(f"通知请求者: {username} 接受好友请求")
+                            except Exception as e:
+                                logging.error(f"通知请求者失败: {username} 接受好友请求, 错误={e}")
+                                with self.client_map_lock:
+                                    self.client_map.pop(requester, None)
                         logging.info(f"好友请求接受：{requester} <-> {username}")
 
                     elif msg_type == "reject_friend":
@@ -279,6 +316,7 @@ class Server:
                         elif command == "announcement":
                             announcement_msg = data.decode("utf-8")
                             with self.client_map_lock:
+                                invalid_clients = []
                                 for user, sock in self.client_map.items():
                                     try:
                                         send_message(sock, "chat", announcement_msg,
@@ -286,6 +324,9 @@ class Server:
                                         logging.info(f"向用户 {user} 发送公告")
                                     except Exception as e:
                                         logging.error(f"向用户 {user} 发送公告失败: {e}")
+                                        invalid_clients.append(user)
+                                for user in invalid_clients:
+                                    self.client_map.pop(user, None)
                         elif command == "exit":
                             send_message(ssock, "admin_response", "退出成功")
                             logging.info(f"管理员 {username} 退出")
@@ -326,8 +367,13 @@ class Server:
                                 with self.client_map_lock:
                                     recipient_socket = self.client_map.get(receiver)
                                 if recipient_socket:
-                                    send_message(recipient_socket, "recall", "", extra_headers={"message_id": message_id, "from": username})
-                                    logging.info(f"通知接收方: 消息ID={message_id}, 撤回者={username}")
+                                    try:
+                                        send_message(recipient_socket, "recall", "", extra_headers={"message_id": message_id, "from": username})
+                                        logging.info(f"通知接收方: 消息ID={message_id}, 撤回者={username}")
+                                    except Exception as e:
+                                        logging.error(f"通知接收方失败: 消息ID={message_id}, 撤回者={username}, 错误={e}")
+                                        with self.client_map_lock:
+                                            self.client_map.pop(receiver, None)
                                 send_message(ssock, "chat", f"消息 {message_id} 已撤回")
                                 logging.info(f"消息撤回成功：{username} 撤回了消息 {message_id}")
                             else:
@@ -343,8 +389,14 @@ class Server:
                             with self.client_map_lock:
                                 recipient_socket = self.client_map.get(receiver)
                             if recipient_socket:
-                                send_message(recipient_socket, "chat", f"文件请求 {filename} 已被 {username} 撤回",
-                                             extra_headers={"message_id": message_id})
+                                try:
+                                    send_message(recipient_socket, "chat", f"文件请求 {filename} 已被 {username} 撤回",
+                                                 extra_headers={"message_id": message_id})
+                                    logging.info(f"通知接收方: 文件请求 {filename} 已被 {username} 撤回")
+                                except Exception as e:
+                                    logging.error(f"通知接收方失败: 文件请求 {filename}, 消息ID={message_id}, 错误={e}")
+                                    with self.client_map_lock:
+                                        self.client_map.pop(receiver, None)
                             send_message(ssock, "chat", f"文件请求 {filename} 已撤回")
                             logging.info(f"文件请求撤回成功：{username} 撤回了文件请求 {message_id}")
 
@@ -359,9 +411,14 @@ class Server:
                             with self.client_map_lock:
                                 sender_socket = self.client_map.get(target)
                             if sender_socket:
-                                send_message(sender_socket, "status_update", "",
-                                             extra_headers={"message_id": message_id, "status": "delivered"})
-                                logging.info(f"发送状态更新: 消息ID={message_id}, 状态=delivered, 目标={target}")
+                                try:
+                                    send_message(sender_socket, "status_update", "",
+                                                 extra_headers={"message_id": message_id, "status": "delivered"})
+                                    logging.info(f"发送状态更新: 消息ID={message_id}, 状态=delivered, 目标={target}")
+                                except Exception as e:
+                                    logging.error(f"发送状态更新失败: 消息ID={message_id}, 目标={target}, 错误={e}")
+                                    with self.client_map_lock:
+                                        self.client_map.pop(target, None)
                             logging.info(f"消息回执：{message_id} 已送达")
                         else:
                             send_message(ssock, "error", f"消息 {message_id} 回执失败")
