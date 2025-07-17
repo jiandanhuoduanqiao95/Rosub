@@ -22,6 +22,9 @@ class ClientGUI:
         self.client_map = {}
         self.message_status = {}  # 存储消息状态 {message_id: status}
         self.message_lines = {}   # 存储消息ID与聊天窗口行号的映射 {message_id: line_number}
+        self.chat_windows = {}    # 存储每个好友的聊天窗口 {friend: Text}
+        self.chat_histories = {}  # 存储每个好友的聊天记录 {friend: list of messages}
+        self.current_friend = None  # 当前选中的好友
         self.setup_login_ui()
         self.setup_chat_ui()
         self.show_login()
@@ -56,17 +59,29 @@ class ClientGUI:
         scrollbar = ttk.Scrollbar(tree_frame, orient='vertical', command=self.user_list.yview)
         scrollbar.pack(side='right', fill='y')
         self.user_list.configure(yscrollcommand=scrollbar.set)
-        self.chat_text = tk.Text(self.chat_frame, width=50, height=20, state='disabled')
-        self.chat_text.grid(row=0, column=1, columnspan=2, padx=5, pady=5)
-        self.chat_text.bind("<Button-1>", self.on_chat_text_click)
+        self.user_list.bind('<<TreeviewSelect>>', self.on_user_select)
+
+        # 当前聊天对象标签
+        self.current_friend_label = ttk.Label(self.chat_frame, text="未选择好友")
+        self.current_friend_label.grid(row=0, column=1, columnspan=2, pady=5, sticky='w')
+
+        # 聊天窗口容器
+        self.chat_container = ttk.Frame(self.chat_frame)
+        self.chat_container.grid(row=1, column=1, columnspan=2, padx=5, pady=5, sticky='nsew')
+
+        # 预创建“服务器”窗口并设置公告样式
+        self.create_chat_window("服务器")
+        self.chat_windows["服务器"].tag_configure("announcement", font=('Arial', 10, 'bold'), foreground="red")  # 公告消息加粗且红色
+
+        # 输入区域
         self.msg_entry = ttk.Entry(self.chat_frame, width=40)
-        self.msg_entry.grid(row=1, column=1, padx=5, pady=5)
+        self.msg_entry.grid(row=2, column=1, padx=5, pady=5)
         self.file_btn = ttk.Button(self.chat_frame, text="发送文件", command=self.send_file)
-        self.file_btn.grid(row=1, column=2, padx=5)
+        self.file_btn.grid(row=2, column=2, padx=5)
         self.send_btn = ttk.Button(self.chat_frame, text="发送", command=self.send_chat)
-        self.send_btn.grid(row=2, column=1, columnspan=2, pady=5)
+        self.send_btn.grid(row=3, column=1, columnspan=2, pady=5)
         self.recall_btn = ttk.Button(self.chat_frame, text="撤回消息", command=self.recall_message)
-        self.recall_btn.grid(row=3, column=1, columnspan=2, pady=5)
+        self.recall_btn.grid(row=4, column=1, columnspan=2, pady=5)
         self.refresh_btn = ttk.Button(self.chat_frame, text="刷新好友", command=self.refresh_user_list)
         self.refresh_btn.grid(row=2, column=0, padx=5)
         self.add_friend_btn = ttk.Button(self.chat_frame, text="添加好友", command=self.add_friend)
@@ -79,6 +94,46 @@ class ClientGUI:
         self.status_var = tk.StringVar()
         self.status_bar = ttk.Label(self.chat_frame, textvariable=self.status_var)
         self.status_bar.grid(row=6, columnspan=3, sticky='ew')
+
+    def create_chat_window(self, friend):
+        """为指定好友创建聊天窗口"""
+        if friend not in self.chat_windows:
+            chat_text = tk.Text(self.chat_container, width=50, height=20, state='disabled')
+            chat_text.bind("<Button-1>", self.on_chat_text_click)
+            self.chat_windows[friend] = chat_text
+            self.chat_histories[friend] = []
+            # 加载历史消息（如果有）
+            if friend in self.chat_histories:
+                chat_text.config(state='normal')
+                for msg in self.chat_histories[friend]:
+                    chat_text.insert('end', msg['text'], msg.get('tag'))
+                chat_text.config(state='disabled')
+                chat_text.see('end')
+        return self.chat_windows[friend]
+
+    def switch_chat_window(self, friend):
+        """切换到指定好友的聊天窗口"""
+        if friend == self.current_friend:
+            return
+        # 隐藏当前聊天窗口
+        if self.current_friend and self.current_friend in self.chat_windows:
+            self.chat_windows[self.current_friend].grid_forget()
+        # 显示新聊天窗口
+        self.current_friend = friend
+        self.current_friend_label.config(text=f"与 {friend} 的聊天")
+        chat_window = self.create_chat_window(friend)
+        chat_window.grid(row=0, column=0, sticky='nsew')
+        chat_window.config(state='normal')
+        chat_window.see('end')
+        chat_window.config(state='disabled')
+        logging.info(f"切换到聊天窗口: {friend}")
+
+    def on_user_select(self, event):
+        """处理好友列表选择事件"""
+        selected = self.user_list.selection()
+        if selected:
+            friend = self.user_list.item(selected[0])['values'][0]
+            self.switch_chat_window(friend)
 
     def show_login(self):
         self.chat_frame.grid_forget()
@@ -140,38 +195,48 @@ class ClientGUI:
                 break
 
     def update_message_status_in_chat(self, message_id, new_status, sender=None):
-        """更新聊天窗口中指定消息的状态"""
+        """更新指定好友聊天窗口中消息的状态"""
         if message_id in self.message_lines:
-            line_number = self.message_lines[message_id]
-            self.chat_text.config(state='normal')
+            friend, line_number = self.message_lines[message_id]
+            if friend not in self.chat_windows:
+                return
+            chat_text = self.chat_windows[friend]
+            chat_text.config(state='normal')
             if new_status == "recalled":
                 new_content = f"{sender or '消息'}: 消息已被撤回 ({message_id})"
-                self.chat_text.delete(f"{line_number}.0", f"{line_number}.end")
-                self.chat_text.insert(f"{line_number}.0", new_content + "\n", f"clickable_message_{message_id}")
+                chat_text.delete(f"{line_number}.0", f"{line_number}.end")
+                chat_text.insert(f"{line_number}.0", new_content + "\n", f"clickable_message_{message_id}")
             else:
-                line_content = self.chat_text.get(f"{line_number}.0", f"{line_number}.end")
+                line_content = chat_text.get(f"{line_number}.0", f"{line_number}.end")
                 if "[sent]" in line_content:
                     new_content = line_content.replace("[sent]", f"[{new_status}]")
                 elif "[delivered]" in line_content:
                     new_content = line_content.replace("[delivered]", f"[{new_status}]")
                 else:
                     new_content = line_content
-                self.chat_text.delete(f"{line_number}.0", f"{line_number}.end")
-                self.chat_text.insert(f"{line_number}.0", new_content + "\n", f"clickable_message_{message_id}")
-            self.chat_text.config(state='disabled')
-            self.chat_text.see('end')
-            logging.info(f"更新消息状态: {message_id} -> {new_status}")
+                chat_text.delete(f"{line_number}.0", f"{line_number}.end")
+                chat_text.insert(f"{line_number}.0", new_content + "\n", f"clickable_message_{message_id}")
+            chat_text.config(state='disabled')
+            chat_text.see('end')
+            logging.info(f"更新消息状态: {message_id} -> {new_status} 在 {friend} 的窗口")
 
     def on_chat_text_click(self, event):
         """处理聊天窗口的点击事件"""
-        index = self.chat_text.index(f"@{event.x},{event.y}")
-        tags = self.chat_text.tag_names(index)
+        if not self.current_friend or self.current_friend not in self.chat_windows:
+            return
+        chat_text = self.chat_windows[self.current_friend]
+        index = chat_text.index(f"@{event.x},{event.y}")
+        tags = chat_text.tag_names(index)
         for tag in tags:
             if tag.startswith("clickable_message_"):
                 message_id = tag[len("clickable_message_"):]
-                line_number = self.message_lines.get(message_id)
+                line_number = None
+                for friend, ln in self.message_lines.items():
+                    if friend[0] == self.current_friend and ln[1] == int(float(chat_text.index(index).split('.')[0])):
+                        line_number = ln[1]
+                        break
                 if line_number:
-                    line_content = self.chat_text.get(f"{line_number}.0", f"{line_number}.end")
+                    line_content = chat_text.get(f"{line_number}.0", f"{line_number}.end")
                     if line_content.startswith("我 ->") or line_content.startswith("已发送文件"):
                         if messagebox.askyesno("确认撤回", f"是否撤回消息 {message_id}？"):
                             self.recall_message(message_id)
@@ -188,7 +253,7 @@ class ClientGUI:
             sender = header.get("from", "未知用户")
             filename = header.get("filename", "unknown_file")
             filesize = header.get("filesize", "未知大小")
-            self.append_chat(f"收到文件传输请求: {sender} 希望发送文件 {filename} ({filesize} bytes)")
+            self.append_chat("服务器", f"收到文件传输请求: {sender} 希望发送文件 {filename} ({filesize} bytes)")
             threading.Thread(target=self.handle_file_request, args=(sender, filename, filesize, message_id), daemon=True).start()
         elif msg_type in ("chat", "file"):
             if "history" in header and message_id in self.message_lines:
@@ -196,22 +261,26 @@ class ClientGUI:
                 return
             sender = header.get("from", "服务器")
             tag = "[历史]" if "history" in header else ""
-            status = "delivered" if sender != "服务器" else ""
+            status = "delivered" if sender != "服务器" and sender != "[系统公告]" else ""
             if msg_type == "chat":
                 msg = data.decode()
-                if sender == "服务器":
-                    self.chat_text.config(state='normal')
-                    self.chat_text.insert('end', f"{tag}{sender}: {msg}\n")
-                    self.chat_text.config(state='disabled')
-                    self.chat_text.see('end')
+                if sender == "服务器" or sender == "[系统公告]":
+                    tag_name = "announcement" if sender == "[系统公告]" else None
+                    self.append_chat("服务器", f"{tag}{sender}: {msg}", tag=tag_name)
+                    # 自动切换到“服务器”窗口以显示公告
+                    if sender == "[系统公告]":
+                        self.switch_chat_window("服务器")
+                        messagebox.showinfo("系统公告", f"收到新公告: {msg}")
                 else:
                     self.message_status[message_id] = status
-                    self.chat_text.config(state='normal')
-                    line_number = int(float(self.chat_text.index('end-1c')))
-                    self.chat_text.insert('end', f"{tag}{sender}: {msg} [{status}] ({message_id})\n", f"clickable_message_{message_id}")
-                    self.chat_text.config(state='disabled')
-                    self.chat_text.see('end')
-                    self.message_lines[message_id] = line_number
+                    self.append_chat(sender, f"{tag}{sender}: {msg} [{status}] ({message_id})", tag=f"clickable_message_{message_id}")
+                    if message_id and "history" not in header:
+                        try:
+                            send_message(self.ssock, "receipt", "", extra_headers={"message_id": message_id, "to": sender})
+                            logging.info(f"发送回执: 消息ID={message_id}, 目标={sender}")
+                        except Exception as e:
+                            self.append_chat(sender, f"发送回执失败: {message_id} ({str(e)})")
+                            logging.error(f"发送回执失败: 消息ID={message_id}, 错误={str(e)}")
             elif msg_type == "file":
                 filename = header.get("filename", "unknown_file")
                 file_path = f"files/recv_{filename}"
@@ -219,19 +288,14 @@ class ClientGUI:
                 with open(file_path, 'wb') as f:
                     f.write(data)
                 self.message_status[message_id] = status
-                self.chat_text.config(state='normal')
-                line_number = int(float(self.chat_text.index('end-1c')))
-                self.chat_text.insert('end', f"{tag}{sender}: 收到文件: {filename}，已保存至 {file_path} [{status}] ({message_id})\n", f"clickable_message_{message_id}")
-                self.chat_text.config(state='disabled')
-                self.chat_text.see('end')
-                self.message_lines[message_id] = line_number
-            if message_id and "history" not in header and sender != "服务器":
-                try:
-                    send_message(self.ssock, "receipt", "", extra_headers={"message_id": message_id, "to": sender})
-                    logging.info(f"发送回执: 消息ID={message_id}, 目标={sender}")
-                except Exception as e:
-                    self.append_chat(f"发送回执失败: {message_id} ({str(e)})")
-                    logging.error(f"发送回执失败: 消息ID={message_id}, 错误={str(e)}")
+                self.append_chat(sender, f"{tag}{sender}: 收到文件: {filename}，已保存至 {file_path} [{status}] ({message_id})", tag=f"clickable_message_{message_id}")
+                if message_id and "history" not in header:
+                    try:
+                        send_message(self.ssock, "receipt", "", extra_headers={"message_id": message_id, "to": sender})
+                        logging.info(f"发送回执: 消息ID={message_id}, 目标={sender}")
+                    except Exception as e:
+                        self.append_chat(sender, f"发送回执失败: {message_id} ({str(e)})")
+                        logging.error(f"发送回执失败: 消息ID={message_id}, 错误={str(e)}")
         elif msg_type == "status_update":
             message_id = header.get("message_id")
             status = header.get("status")
@@ -243,13 +307,13 @@ class ClientGUI:
                 logging.warning(f"状态更新失败: 消息ID={message_id} 不存在")
         elif msg_type == "friend_request":
             sender = header.get("from")
-            self.append_chat(f"收到好友请求: {sender}")
+            self.append_chat("服务器", f"收到好友请求: {sender}")
         elif msg_type == "list_friend_requests":
             try:
                 requests = json.loads(data.decode())
                 self.show_friend_requests(requests)
             except json.JSONDecodeError:
-                self.append_chat("解析好友请求列表失败")
+                self.append_chat("服务器", "解析好友请求列表失败")
                 logging.error("解析好友请求列表失败")
         elif msg_type == "admin_response":
             try:
@@ -258,11 +322,14 @@ class ClientGUI:
                 self.client_map.clear()
                 response_type = header.get("response_type", "list_friends")
                 if response_type == "list_friends":
+                    # 插入“服务器”条目
+                    self.user_list.insert('', 'end', values=("服务器", "始终在线"))
+                    self.client_map["服务器"] = {'is_online': True, 'is_admin': False}
                     for user, is_online in users:
                         self.client_map[user] = {'is_online': is_online, 'is_admin': False}
                         status = '在线' if is_online else '离线'
                         self.user_list.insert('', 'end', values=(user, status))
-                    self.append_chat("好友列表已刷新")
+                    self.append_chat("服务器", "好友列表已刷新")
                 elif response_type == "list_users":
                     for user, is_online, is_admin in users:
                         self.client_map[user] = {'is_online': is_online, 'is_admin': is_admin}
@@ -271,11 +338,11 @@ class ClientGUI:
                         self.user_list.insert('', 'end', values=(user, status))
                     action_result = header.get("action_result")
                     if action_result:
-                        self.append_chat(action_result)
+                        self.append_chat("服务器", action_result)
                     else:
-                        self.append_chat("用户列表已刷新")
+                        self.append_chat("服务器", "用户列表已刷新")
             except json.JSONDecodeError:
-                self.append_chat("用户列表解析失败")
+                self.append_chat("服务器", "用户列表解析失败")
                 logging.error("用户列表解析失败")
         elif msg_type == "recall":
             message_id = header.get("message_id")
@@ -287,7 +354,7 @@ class ClientGUI:
             else:
                 logging.warning(f"撤回消息失败: 消息ID={message_id} 不存在")
         elif msg_type == "error":
-            self.append_chat(f"错误: {data.decode()}")
+            self.append_chat("服务器", f"错误: {data.decode()}")
 
     def handle_file_request(self, sender, filename, filesize, message_id):
         """处理文件传输请求，显示确认弹窗"""
@@ -295,14 +362,14 @@ class ClientGUI:
         try:
             if response:
                 send_message(self.ssock, "file_response", "", extra_headers={"message_id": message_id, "response": "accept", "to": sender})
-                self.append_chat(f"已接受 {sender} 的文件请求: {filename}")
+                self.append_chat(sender, f"已接受 {sender} 的文件请求: {filename}")
                 logging.info(f"接受文件请求: {filename}, 消息ID={message_id}, 发送者={sender}")
             else:
                 send_message(self.ssock, "file_response", "", extra_headers={"message_id": message_id, "response": "reject", "to": sender})
-                self.append_chat(f"已拒绝 {sender} 的文件请求: {filename}")
+                self.append_chat(sender, f"已拒绝 {sender} 的文件请求: {filename}")
                 logging.info(f"拒绝文件请求: {filename}, 消息ID={message_id}, 发送者={sender}")
         except Exception as e:
-            self.append_chat(f"响应文件请求失败: {filename} ({str(e)})")
+            self.append_chat(sender, f"响应文件请求失败: {filename} ({str(e)})")
             logging.error(f"响应文件请求失败: 消息ID={message_id}, 错误={str(e)}")
 
     def show_all_users(self):
@@ -349,7 +416,7 @@ class ClientGUI:
             requester = tree.item(selected[0])['text']
             try:
                 send_message(self.ssock, "accept_friend", "", extra_headers={"from": requester})
-                self.append_chat(f"已接受 {requester} 的好友请求")
+                self.append_chat("服务器", f"已接受 {requester} 的好友请求")
                 tree.delete(selected[0])
                 self.refresh_user_list()
             except Exception as e:
@@ -362,7 +429,7 @@ class ClientGUI:
             requester = tree.item(selected[0])['text']
             try:
                 send_message(self.ssock, "reject_friend", "", extra_headers={"from": requester})
-                self.append_chat(f"已拒绝 {requester} 的好友请求")
+                self.append_chat("服务器", f"已拒绝 {requester} 的好友请求")
                 tree.delete(selected[0])
             except Exception as e:
                 messagebox.showerror("失败", f"拒绝好友请求失败: {e}")
@@ -371,23 +438,19 @@ class ClientGUI:
 
     def send_chat(self):
         msg = self.msg_entry.get()
-        selected = self.user_list.selection()
-        if not selected:
+        if not self.current_friend:
             messagebox.showwarning("提示", "请选择接收好友")
             return
-        target = self.user_list.item(selected[0])['values'][0]
+        if self.current_friend == "服务器":
+            messagebox.showwarning("提示", "不能向服务器发送消息")
+            return
         try:
             message_id = str(uuid.uuid4())
-            send_message(self.ssock, "chat", msg, extra_headers={"to": target, "message_id": message_id})
+            send_message(self.ssock, "chat", msg, extra_headers={"to": self.current_friend, "message_id": message_id})
             self.message_status[message_id] = "sent"
-            self.chat_text.config(state='normal')
-            line_number = int(float(self.chat_text.index('end-1c')))
-            self.chat_text.insert('end', f"我 -> {target}: {msg} [sent] ({message_id})\n", f"clickable_message_{message_id}")
-            self.chat_text.config(state='disabled')
-            self.chat_text.see('end')
-            self.message_lines[message_id] = line_number
+            self.append_chat(self.current_friend, f"我 -> {self.current_friend}: {msg} [sent] ({message_id})", tag=f"clickable_message_{message_id}")
             self.msg_entry.delete(0, 'end')
-            logging.info(f"发送聊天消息: {msg}, 消息ID={message_id}, 目标={target}")
+            logging.info(f"发送聊天消息: {msg}, 消息ID={message_id}, 目标={self.current_friend}")
         except Exception as e:
             messagebox.showerror("发送失败", str(e))
             logging.error(f"发送聊天消息失败: {str(e)}")
@@ -396,11 +459,12 @@ class ClientGUI:
         filepath = filedialog.askopenfilename()
         if not filepath:
             return
-        selected = self.user_list.selection()
-        if not selected:
+        if not self.current_friend:
             messagebox.showwarning("提示", "请选择接收好友")
             return
-        target = self.user_list.item(selected[0])['values'][0]
+        if self.current_friend == "服务器":
+            messagebox.showwarning("提示", "不能向服务器发送文件")
+            return
         filename = os.path.basename(filepath)
         try:
             with open(filepath, 'rb') as f:
@@ -408,15 +472,10 @@ class ClientGUI:
                 filesize = len(file_data)
                 message_id = str(uuid.uuid4())
                 send_message(self.ssock, 'file', file_data,
-                             extra_headers={"filename": filename, "to": target, "message_id": message_id, "filesize": filesize})
+                             extra_headers={"filename": filename, "to": self.current_friend, "message_id": message_id, "filesize": filesize})
                 self.message_status[message_id] = "sent"
-                self.chat_text.config(state='normal')
-                line_number = int(float(self.chat_text.index('end-1c')))
-                self.chat_text.insert('end', f"已发送文件: {filename} 给 {target} [sent] ({message_id})\n", f"clickable_message_{message_id}")
-                self.chat_text.config(state='disabled')
-                self.chat_text.see('end')
-                self.message_lines[message_id] = line_number
-                logging.info(f"发送文件请求: {filename}, 消息ID={message_id}, 目标={target}, 大小={filesize} bytes")
+                self.append_chat(self.current_friend, f"已发送文件: {filename} 给 {self.current_friend} [sent] ({message_id})", tag=f"clickable_message_{message_id}")
+                logging.info(f"发送文件请求: {filename}, 消息ID={message_id}, 目标={self.current_friend}, 大小={filesize} bytes")
         except Exception as e:
             messagebox.showerror("发送失败", str(e))
             logging.error(f"发送文件请求失败: {str(e)}")
@@ -427,7 +486,7 @@ class ClientGUI:
             return
         try:
             send_message(self.ssock, "recall", "", extra_headers={"message_id": message_id})
-            self.append_chat(f"已请求撤回消息 {message_id}")
+            self.append_chat(self.current_friend, f"已请求撤回消息 {message_id}")
             logging.info(f"请求撤回消息: {message_id}")
         except Exception as e:
             messagebox.showerror("失败", f"撤回消息失败: {e}")
@@ -437,9 +496,12 @@ class ClientGUI:
         target = tk.simpledialog.askstring("添加好友", "输入要添加的好友用户名:")
         if not target:
             return
+        if target == "服务器":
+            messagebox.showwarning("提示", "不能添加服务器为好友")
+            return
         try:
             send_message(self.ssock, "friend_request", "", extra_headers={"to": target})
-            self.append_chat(f"已发送好友请求给 {target}")
+            self.append_chat("服务器", f"已发送好友请求给 {target}")
             logging.info(f"发送好友请求: 目标={target}")
         except Exception as e:
             messagebox.showerror("失败", f"发送好友请求失败: {e}")
@@ -453,11 +515,20 @@ class ClientGUI:
             messagebox.showerror("失败", f"获取好友请求失败: {e}")
             logging.error(f"获取好友请求失败: {str(e)}")
 
-    def append_chat(self, message):
-        self.chat_text.config(state='normal')
-        self.chat_text.insert('end', message + '\n')
-        self.chat_text.config(state='disabled')
-        self.chat_text.see('end')
+    def append_chat(self, friend, message, tag=None):
+        """将消息添加到指定好友的聊天窗口"""
+        self.create_chat_window(friend)
+        chat_text = self.chat_windows[friend]
+        chat_text.config(state='normal')
+        line_number = int(float(chat_text.index('end-1c')))
+        chat_text.insert('end', message + '\n', tag)
+        chat_text.config(state='disabled')
+        chat_text.see('end')
+        if tag and tag.startswith("clickable_message_"):
+            message_id = tag[len("clickable_message_"):]
+            self.message_lines[message_id] = (friend, line_number)
+        self.chat_histories[friend].append({'text': message + '\n', 'tag': tag})
+        logging.info(f"消息追加到 {friend} 的窗口: {message}")
 
     def update_status(self, message):
         self.status_var.set(message)
@@ -489,7 +560,7 @@ class ClientGUI:
             return
         try:
             send_message(self.ssock, "admin_command", target, extra_headers={"action": "delete_user"})
-            self.append_chat(f"已请求删除用户 {target}")
+            self.append_chat("服务器", f"已请求删除用户 {target}")
             logging.info(f"请求删除用户: {target}")
         except Exception as e:
             messagebox.showerror("失败", f"删除用户失败: {e}")
@@ -501,7 +572,8 @@ class ClientGUI:
             return
         try:
             send_message(self.ssock, "admin_command", content, extra_headers={"action": "announcement"})
-            self.append_chat("公告已送达")
+            self.append_chat("服务器", "公告已送达", tag="announcement")
+            self.switch_chat_window("服务器")  # 管理员发送公告后自动切换到“服务器”窗口
             logging.info("发送公告")
         except Exception as e:
             messagebox.showerror("失败", f"发送公告失败: {e}")
@@ -520,9 +592,10 @@ class ClientGUI:
         self.client_map.clear()
         self.message_status.clear()
         self.message_lines.clear()
-        self.chat_text.config(state='normal')
-        self.chat_text.delete('1.0', 'end')
-        self.chat_text.config(state='disabled')
+        self.chat_windows.clear()
+        self.chat_histories.clear()
+        self.current_friend = None
+        self.current_friend_label.config(text="未选择好友")
         self.user_list.delete(*self.user_list.get_children())
         self.admin_btn.grid_forget()
         self.chat_frame.grid_forget()
