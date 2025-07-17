@@ -184,7 +184,13 @@ class ClientGUI:
         msg_type = header.get("type")
         message_id = header.get("message_id", "")
         logging.info(f"处理消息: 类型={msg_type}, 消息ID={message_id}, 头信息={header}")
-        if msg_type in ("chat", "file"):
+        if msg_type == "file_request":
+            sender = header.get("from", "未知用户")
+            filename = header.get("filename", "unknown_file")
+            filesize = header.get("filesize", "未知大小")
+            self.append_chat(f"收到文件传输请求: {sender} 希望发送文件 {filename} ({filesize} bytes)")
+            threading.Thread(target=self.handle_file_request, args=(sender, filename, filesize, message_id), daemon=True).start()
+        elif msg_type in ("chat", "file"):
             if "history" in header and message_id in self.message_lines:
                 logging.info(f"跳过重复历史消息: 消息ID={message_id}")
                 return
@@ -282,6 +288,22 @@ class ClientGUI:
                 logging.warning(f"撤回消息失败: 消息ID={message_id} 不存在")
         elif msg_type == "error":
             self.append_chat(f"错误: {data.decode()}")
+
+    def handle_file_request(self, sender, filename, filesize, message_id):
+        """处理文件传输请求，显示确认弹窗"""
+        response = messagebox.askyesno("文件传输请求", f"{sender} 希望发送文件 {filename} ({filesize} bytes)，是否接受？")
+        try:
+            if response:
+                send_message(self.ssock, "file_response", "", extra_headers={"message_id": message_id, "response": "accept", "to": sender})
+                self.append_chat(f"已接受 {sender} 的文件请求: {filename}")
+                logging.info(f"接受文件请求: {filename}, 消息ID={message_id}, 发送者={sender}")
+            else:
+                send_message(self.ssock, "file_response", "", extra_headers={"message_id": message_id, "response": "reject", "to": sender})
+                self.append_chat(f"已拒绝 {sender} 的文件请求: {filename}")
+                logging.info(f"拒绝文件请求: {filename}, 消息ID={message_id}, 发送者={sender}")
+        except Exception as e:
+            self.append_chat(f"响应文件请求失败: {filename} ({str(e)})")
+            logging.error(f"响应文件请求失败: 消息ID={message_id}, 错误={str(e)}")
 
     def show_all_users(self):
         users_win = tk.Toplevel(self.root)
@@ -383,9 +405,10 @@ class ClientGUI:
         try:
             with open(filepath, 'rb') as f:
                 file_data = f.read()
+                filesize = len(file_data)
                 message_id = str(uuid.uuid4())
                 send_message(self.ssock, 'file', file_data,
-                             extra_headers={"filename": filename, "to": target, "message_id": message_id})
+                             extra_headers={"filename": filename, "to": target, "message_id": message_id, "filesize": filesize})
                 self.message_status[message_id] = "sent"
                 self.chat_text.config(state='normal')
                 line_number = int(float(self.chat_text.index('end-1c')))
@@ -393,10 +416,10 @@ class ClientGUI:
                 self.chat_text.config(state='disabled')
                 self.chat_text.see('end')
                 self.message_lines[message_id] = line_number
-                logging.info(f"发送文件: {filename}, 消息ID={message_id}, 目标={target}")
+                logging.info(f"发送文件请求: {filename}, 消息ID={message_id}, 目标={target}, 大小={filesize} bytes")
         except Exception as e:
             messagebox.showerror("发送失败", str(e))
-            logging.error(f"发送文件失败: {str(e)}")
+            logging.error(f"发送文件请求失败: {str(e)}")
 
     def recall_message(self, message_id=None):
         if not message_id:

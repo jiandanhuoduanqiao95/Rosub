@@ -39,7 +39,7 @@ class Database:
                     message_type TEXT NOT NULL,
                     content BLOB NOT NULL,
                     filename TEXT,
-                    status TEXT DEFAULT 'sent',  -- 消息状态: sent, delivered, recalled
+                    status TEXT DEFAULT 'sent',
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -52,6 +52,20 @@ class Database:
                     PRIMARY KEY (user1, user2),
                     FOREIGN KEY (user1) REFERENCES users(username),
                     FOREIGN KEY (user2) REFERENCES users(username)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS file_requests (
+                    id INTEGER PRIMARY KEY,
+                    message_id TEXT UNIQUE NOT NULL,
+                    sender TEXT NOT NULL,
+                    receiver TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    filesize INTEGER NOT NULL,
+                    content BLOB NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (sender) REFERENCES users(username),
+                    FOREIGN KEY (receiver) REFERENCES users(username)
                 )
             ''')
             conn.commit()
@@ -138,11 +152,64 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM friends WHERE user1 = ? OR user2 = ?', (username, username))
+            cursor.execute('DELETE FROM file_requests WHERE sender = ? OR receiver = ?', (username, username))
             friends_deleted = cursor.rowcount
             cursor.execute('DELETE FROM users WHERE username = ?', (username,))
             users_deleted = cursor.rowcount
             conn.commit()
             return users_deleted > 0 or friends_deleted > 0
+
+    def save_file_request(self, sender, receiver, filename, filesize, content, message_id):
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO file_requests (message_id, sender, receiver, filename, filesize, content)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (message_id, sender, receiver, filename, filesize, content))
+                conn.commit()
+                logging.info(f"已保存文件请求：{sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}")
+        except Exception as e:
+            logging.error(f"保存文件请求失败: {e}")
+
+    def get_file_request(self, message_id):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT sender, receiver, filename, filesize, content
+                FROM file_requests
+                WHERE message_id = ?
+            ''', (message_id,))
+            return cursor.fetchone()
+
+    def get_pending_file_requests(self, receiver):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT sender, filename, filesize, message_id
+                FROM file_requests
+                WHERE receiver = ?
+            ''', (receiver,))
+            return cursor.fetchall()
+
+    def delete_file_request(self, message_id):
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    DELETE FROM file_requests
+                    WHERE message_id = ?
+                ''', (message_id,))
+                conn.commit()
+                if cursor.rowcount > 0:
+                    logging.info(f"文件请求已删除：消息ID={message_id}")
+                    return True
+                else:
+                    logging.error(f"文件请求删除失败：消息ID={message_id} 不存在")
+                    return False
+        except sqlite3.Error as e:
+            logging.error(f"文件请求删除失败: {e}")
+            return False
 
     def add_friend_request(self, requester, target):
         try:

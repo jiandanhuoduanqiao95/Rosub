@@ -76,20 +76,24 @@ class Server:
                             elif msg_type == "file":
                                 send_message(ssock, "file", content,
                                              extra_headers={"from": sender, "filename": filename, "history": "true", "message_id": message_id, "status": status})
-                            # 通知发送方消息已送达（如果发送方在线）
                             with self.client_map_lock:
                                 sender_socket = self.client_map.get(sender)
                             if sender_socket:
                                 send_message(sender_socket, "status_update", "",
                                              extra_headers={"message_id": message_id, "status": "delivered"})
                                 logging.info(f"通知发送方: 消息ID={message_id}, 状态=delivered, 目标={sender}")
-                        # 清理已送达的消息
                         self.db.cleanup_delivered_messages(username)
                         pending_requests = self.db.get_pending_friend_requests(username)
                         for requester in pending_requests:
                             send_message(ssock, "friend_request", f"来自 {requester} 的好友请求",
                                          extra_headers={"from": requester})
                             logging.info(f"发送好友请求通知: 请求者={requester}, 目标={username}")
+                        file_requests = self.db.get_pending_file_requests(username)
+                        for request in file_requests:
+                            sender, filename, filesize, message_id = request
+                            send_message(ssock, "file_request", "",
+                                         extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id})
+                            logging.info(f"发送文件请求通知: 发送者={sender}, 目标={username}, 文件名={filename}, 消息ID={message_id}")
                     else:
                         send_message(ssock, "error", "错误：密码错误")
                         logging.warning(f"登录失败: 用户 {username} 密码错误")
@@ -107,7 +111,7 @@ class Server:
                         target = header.get("to")
                         message_id = header.get("message_id")
                         if not message_id:
-                            message_id = str(uuid.uuid4())  # 后备生成 message_id
+                            message_id = str(uuid.uuid4())
                             logging.warning(f"客户端未提供 message_id，生成新ID: {message_id}")
                         if not self.db.is_friend(username, target):
                             send_message(ssock, "error", f"错误：{target} 不是您的好友")
@@ -140,20 +144,55 @@ class Server:
                             continue
                         message_id = header.get("message_id")
                         if not message_id:
-                            message_id = str(uuid.uuid4())  # 后备生成 message_id
+                            message_id = str(uuid.uuid4())
                             logging.warning(f"客户端未提供 message_id，生成新ID: {message_id}")
                         filename = header.get("filename", "received_file")
+                        filesize = header.get("filesize", len(data))
                         file_data = data
-                        self.db.save_offline_message(username, target, "file", file_data, filename=filename, message_id=message_id)
+                        self.db.save_file_request(username, target, filename, filesize, file_data, message_id)
                         with self.client_map_lock:
                             recipient_socket = self.client_map.get(target)
                         if recipient_socket:
-                            send_message(recipient_socket, "file", file_data,
-                                         extra_headers={"from": username, "filename": filename, "filesize": len(file_data), "message_id": message_id, "status": "sent"})
-                            logging.info(f"文件已转发: {username} -> {target}, 文件名={filename}, 消息ID={message_id}")
+                            send_message(recipient_socket, "file_request", "",
+                                         extra_headers={"from": username, "filename": filename, "filesize": filesize, "message_id": message_id})
+                            logging.info(f"文件请求已发送: {username} -> {target}, 文件名={filename}, 消息ID={message_id}")
                         else:
-                            send_message(ssock, "chat", f"用户 {target} 离线，文件已保存")
-                            logging.info(f"用户 {target} 离线，文件已保存: 文件名={filename}, 消息ID={message_id}")
+                            send_message(ssock, "chat", f"用户 {target} 离线，文件请求已保存")
+                            logging.info(f"用户 {target} 离线，文件请求已保存: 文件名={filename}, 消息ID={message_id}")
+
+                    elif msg_type == "file_response":
+                        message_id = header.get("message_id")
+                        response = header.get("response")
+                        target = header.get("to")
+                        file_request = self.db.get_file_request(message_id)
+                        if not file_request:
+                            send_message(ssock, "error", f"文件请求 {message_id} 不存在")
+                            logging.warning(f"文件响应失败: 消息ID={message_id} 不存在")
+                            continue
+                        sender, receiver, filename, filesize, file_data = file_request
+                        if receiver != username:
+                            send_message(ssock, "error", "无权限响应此文件请求")
+                            logging.warning(f"文件响应失败: 用户 {username} 无权限响应消息ID={message_id}")
+                            continue
+                        with self.client_map_lock:
+                            sender_socket = self.client_map.get(sender)
+                        if response == "accept":
+                            self.db.save_offline_message(sender, receiver, "file", file_data, filename=filename, message_id=message_id)
+                            if sender_socket:
+                                send_message(sender_socket, "chat", f"用户 {receiver} 已接受文件 {filename}")
+                                logging.info(f"通知发送方: {receiver} 接受文件 {filename}, 消息ID={message_id}")
+                            if self.client_map.get(receiver):
+                                send_message(self.client_map[receiver], "file", file_data,
+                                             extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id, "status": "sent"})
+                                logging.info(f"文件已传输: {sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}")
+                            self.db.delete_file_request(message_id)
+                            logging.info(f"文件请求已删除: 消息ID={message_id}")
+                        else:
+                            if sender_socket:
+                                send_message(sender_socket, "chat", f"用户 {receiver} 已拒绝文件 {filename}")
+                                logging.info(f"通知发送方: {receiver} 拒绝文件 {filename}, 消息ID={message_id}")
+                            self.db.delete_file_request(message_id)
+                            logging.info(f"文件请求已删除: 消息ID={message_id}")
 
                     elif msg_type == "friend_request":
                         target = header.get("to")
@@ -255,43 +294,58 @@ class Server:
                     elif msg_type == "recall":
                         message_id = header.get("message_id")
                         message_info = self.db.get_message_info(message_id)
-                        if not message_info:
-                            send_message(ssock, "error", f"消息 {message_id} 不存在")
+                        file_request = self.db.get_file_request(message_id)
+                        if not message_info and not file_request:
+                            send_message(ssock, "error", f"消息或文件请求 {message_id} 不存在")
                             logging.warning(f"撤回消息失败: 消息ID={message_id} 不存在")
                             continue
-                        sender, receiver, _, _, _, status, timestamp = message_info
-                        if sender != username:
-                            send_message(ssock, "error", "只能撤回自己的消息")
-                            logging.warning(f"撤回消息失败: 用户 {username} 尝试撤回非自己的消息 {message_id}")
-                            continue
-                        try:
-                            # 直接解析时间戳，数据库格式为 'YYYY-MM-DD HH:MM:SS'
-                            message_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
-                            current_time = datetime.utcnow()  # 使用 UTC 时间，与数据库时间戳一致
-                            time_diff = current_time - message_time
-                            logging.info(f"撤回消息时间检查: 消息ID={message_id}, 原始时间戳={timestamp}, 解析时间={message_time}, 当前时间={current_time}, 时间差={time_diff.total_seconds()}秒")
-                            if time_diff > timedelta(minutes=2):
-                                send_message(ssock, "error", f"消息超过2分钟，无法撤回 (时间差: {time_diff.total_seconds()}秒)")
-                                logging.warning(f"撤回消息失败: 消息 {message_id} 超过2分钟, 时间差={time_diff.total_seconds()}秒")
+                        if message_info:
+                            sender, receiver, _, _, _, status, timestamp = message_info
+                            if sender != username:
+                                send_message(ssock, "error", "只能撤回自己的消息")
+                                logging.warning(f"撤回消息失败: 用户 {username} 尝试撤回非自己的消息 {message_id}")
                                 continue
-                        except ValueError as e:
-                            send_message(ssock, "error", f"消息时间格式错误: {e}")
-                            logging.error(f"撤回消息失败: 消息 {message_id} 时间格式错误: {e}")
-                            continue
-                        if status == 'recalled':
-                            send_message(ssock, "error", "消息已被撤回")
-                            logging.warning(f"撤回消息失败: 消息 {message_id} 已被撤回")
-                            continue
-                        if self.db.update_message_status(message_id, 'recalled'):
+                            try:
+                                message_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                                current_time = datetime.utcnow()
+                                time_diff = current_time - message_time
+                                logging.info(f"撤回消息时间检查: 消息ID={message_id}, 原始时间戳={timestamp}, 解析时间={message_time}, 当前时间={current_time}, 时间差={time_diff.total_seconds()}秒")
+                                if time_diff > timedelta(minutes=2):
+                                    send_message(ssock, "error", f"消息超过2分钟，无法撤回 (时间差: {time_diff.total_seconds()}秒)")
+                                    logging.warning(f"撤回消息失败: 消息 {message_id} 超过2分钟, 时间差={time_diff.total_seconds()}秒")
+                                    continue
+                            except ValueError as e:
+                                send_message(ssock, "error", f"消息时间格式错误: {e}")
+                                logging.error(f"撤回消息失败: 消息 {message_id} 时间格式错误: {e}")
+                                continue
+                            if status == 'recalled':
+                                send_message(ssock, "error", "消息已被撤回")
+                                logging.warning(f"撤回消息失败: 消息 {message_id} 已被撤回")
+                                continue
+                            if self.db.update_message_status(message_id, 'recalled'):
+                                with self.client_map_lock:
+                                    recipient_socket = self.client_map.get(receiver)
+                                if recipient_socket:
+                                    send_message(recipient_socket, "recall", "", extra_headers={"message_id": message_id, "from": username})
+                                send_message(ssock, "chat", "消息已撤回")
+                                logging.info(f"消息撤回：{username} 撤回了消息 {message_id}")
+                            else:
+                                send_message(ssock, "error", f"撤回消息 {message_id} 失败")
+                                logging.error(f"撤回消息失败：{message_id}")
+                        elif file_request:
+                            sender, receiver, filename, filesize, _ = file_request
+                            if sender != username:
+                                send_message(ssock, "error", "只能撤回自己的文件请求")
+                                logging.warning(f"撤回文件请求失败: 用户 {username} 尝试撤回非自己的文件请求 {message_id}")
+                                continue
+                            self.db.delete_file_request(message_id)
                             with self.client_map_lock:
                                 recipient_socket = self.client_map.get(receiver)
                             if recipient_socket:
-                                send_message(recipient_socket, "recall", "", extra_headers={"message_id": message_id})
-                            send_message(ssock, "chat", "消息已撤回")
-                            logging.info(f"消息撤回：{username} 撤回了消息 {message_id}")
-                        else:
-                            send_message(ssock, "error", f"撤回消息 {message_id} 失败")
-                            logging.error(f"撤回消息失败：{message_id}")
+                                send_message(recipient_socket, "chat", f"文件请求 {filename} 已被 {username} 撤回",
+                                             extra_headers={"message_id": message_id})
+                            send_message(ssock, "chat", f"文件请求 {filename} 已撤回")
+                            logging.info(f"文件请求撤回：{username} 撤回了文件请求 {message_id}")
 
                     elif msg_type == "receipt":
                         message_id = header.get("message_id")
@@ -307,7 +361,6 @@ class Server:
                                 send_message(sender_socket, "status_update", "",
                                              extra_headers={"message_id": message_id, "status": "delivered"})
                                 logging.info(f"发送状态更新: 消息ID={message_id}, 状态=delivered, 目标={target}")
-                            # 移除回执确认消息，依赖客户端状态更新
                             logging.info(f"消息回执：{message_id} 已送达")
                         else:
                             send_message(ssock, "error", f"消息 {message_id} 回执失败")
