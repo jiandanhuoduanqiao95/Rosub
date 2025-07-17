@@ -327,8 +327,9 @@ class Server:
                                     recipient_socket = self.client_map.get(receiver)
                                 if recipient_socket:
                                     send_message(recipient_socket, "recall", "", extra_headers={"message_id": message_id, "from": username})
-                                send_message(ssock, "chat", "消息已撤回")
-                                logging.info(f"消息撤回：{username} 撤回了消息 {message_id}")
+                                    logging.info(f"通知接收方: 消息ID={message_id}, 撤回者={username}")
+                                send_message(ssock, "chat", f"消息 {message_id} 已撤回")
+                                logging.info(f"消息撤回成功：{username} 撤回了消息 {message_id}")
                             else:
                                 send_message(ssock, "error", f"撤回消息 {message_id} 失败")
                                 logging.error(f"撤回消息失败：{message_id}")
@@ -345,7 +346,7 @@ class Server:
                                 send_message(recipient_socket, "chat", f"文件请求 {filename} 已被 {username} 撤回",
                                              extra_headers={"message_id": message_id})
                             send_message(ssock, "chat", f"文件请求 {filename} 已撤回")
-                            logging.info(f"文件请求撤回：{username} 撤回了文件请求 {message_id}")
+                            logging.info(f"文件请求撤回成功：{username} 撤回了文件请求 {message_id}")
 
                     elif msg_type == "receipt":
                         message_id = header.get("message_id")

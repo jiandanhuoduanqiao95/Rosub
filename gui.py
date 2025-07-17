@@ -21,7 +21,7 @@ class ClientGUI:
         self.is_admin = False
         self.client_map = {}
         self.message_status = {}  # 存储消息状态 {message_id: status}
-        self.message_lines = {}   # 存储消息ID与聊天窗口行号的映射 {message_id: line_number}
+        self.message_lines = {}   # 存储消息ID与聊天窗口行号的映射 {message_id: (friend, line_number)}
         self.chat_windows = {}    # 存储每个好友的聊天窗口 {friend: Text}
         self.chat_histories = {}  # 存储每个好友的聊天记录 {friend: list of messages}
         self.current_friend = None  # 当前选中的好友
@@ -124,8 +124,16 @@ class ClientGUI:
         chat_window = self.create_chat_window(friend)
         chat_window.grid(row=0, column=0, sticky='nsew')
         chat_window.config(state='normal')
-        chat_window.see('end')
+        # 重新加载聊天记录并更新行号映射
+        chat_window.delete('1.0', 'end')
+        for msg in self.chat_histories[friend]:
+            line_number = int(float(chat_window.index('end-1c')))
+            chat_window.insert('end', msg['text'], msg.get('tag'))
+            if msg.get('tag', '').startswith("clickable_message_"):
+                message_id = msg['tag'][len("clickable_message_"):]
+                self.message_lines[message_id] = (friend, line_number)
         chat_window.config(state='disabled')
+        chat_window.see('end')
         logging.info(f"切换到聊天窗口: {friend}")
 
     def on_user_select(self, event):
@@ -199,6 +207,7 @@ class ClientGUI:
         if message_id in self.message_lines:
             friend, line_number = self.message_lines[message_id]
             if friend not in self.chat_windows:
+                logging.warning(f"更新消息状态失败: 窗口 {friend} 不存在")
                 return
             chat_text = self.chat_windows[friend]
             chat_text.config(state='normal')
@@ -219,29 +228,28 @@ class ClientGUI:
             chat_text.config(state='disabled')
             chat_text.see('end')
             logging.info(f"更新消息状态: {message_id} -> {new_status} 在 {friend} 的窗口")
+        else:
+            logging.warning(f"更新消息状态失败: 消息ID={message_id} 不存在于 message_lines")
 
     def on_chat_text_click(self, event):
         """处理聊天窗口的点击事件"""
         if not self.current_friend or self.current_friend not in self.chat_windows:
+            logging.warning("点击消息失败: 未选择好友或聊天窗口不存在")
             return
         chat_text = self.chat_windows[self.current_friend]
         index = chat_text.index(f"@{event.x},{event.y}")
+        line_number = int(float(index.split('.')[0]))
         tags = chat_text.tag_names(index)
         for tag in tags:
             if tag.startswith("clickable_message_"):
                 message_id = tag[len("clickable_message_"):]
-                line_number = None
-                for friend, ln in self.message_lines.items():
-                    if friend[0] == self.current_friend and ln[1] == int(float(chat_text.index(index).split('.')[0])):
-                        line_number = ln[1]
-                        break
-                if line_number:
-                    line_content = chat_text.get(f"{line_number}.0", f"{line_number}.end")
-                    if line_content.startswith("我 ->") or line_content.startswith("已发送文件"):
-                        if messagebox.askyesno("确认撤回", f"是否撤回消息 {message_id}？"):
-                            self.recall_message(message_id)
-                    else:
-                        messagebox.showwarning("提示", "只能撤回自己的消息")
+                line_content = chat_text.get(f"{line_number}.0", f"{line_number}.end")
+                if line_content.startswith("我 ->") or line_content.startswith("已发送文件"):
+                    if messagebox.askyesno("确认撤回", f"是否撤回消息 {message_id}？"):
+                        self.recall_message(message_id)
+                    return
+                else:
+                    messagebox.showwarning("提示", "只能撤回自己的消息")
                     return
         messagebox.showinfo("提示", "请点击一条消息以撤回")
 
@@ -267,7 +275,6 @@ class ClientGUI:
                 if sender == "服务器" or sender == "[系统公告]":
                     tag_name = "announcement" if sender == "[系统公告]" else None
                     self.append_chat("服务器", f"{tag}{sender}: {msg}", tag=tag_name)
-                    # 自动切换到“服务器”窗口以显示公告
                     if sender == "[系统公告]":
                         self.switch_chat_window("服务器")
                         messagebox.showinfo("系统公告", f"收到新公告: {msg}")
@@ -322,7 +329,6 @@ class ClientGUI:
                 self.client_map.clear()
                 response_type = header.get("response_type", "list_friends")
                 if response_type == "list_friends":
-                    # 插入“服务器”条目
                     self.user_list.insert('', 'end', values=("服务器", "始终在线"))
                     self.client_map["服务器"] = {'is_online': True, 'is_admin': False}
                     for user, is_online in users:
@@ -351,8 +357,12 @@ class ClientGUI:
                 self.message_status[message_id] = "recalled"
                 self.update_message_status_in_chat(message_id, "recalled", sender=sender)
                 logging.info(f"处理撤回消息: {message_id} from {sender}")
+                # 如果当前窗口不是发送者的窗口，切换到该窗口以显示撤回消息
+                if self.current_friend != sender:
+                    self.switch_chat_window(sender)
             else:
                 logging.warning(f"撤回消息失败: 消息ID={message_id} 不存在")
+                self.append_chat(sender, f"撤回消息失败: 消息ID {message_id} 不存在")
         elif msg_type == "error":
             self.append_chat("服务器", f"错误: {data.decode()}")
 
