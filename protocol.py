@@ -17,6 +17,8 @@ def send_message(sock, msg_type, content, extra_headers=None, chunk_size=1024*10
     if extra_headers is None:
         extra_headers = {}
     # 如果内容为字符串则转为字节流
+    # 确保所有头部字段为字符串(防御数字用户名)
+    extra_headers = {str(k): str(v) for k, v in extra_headers.items()}
     if isinstance(content, str):
         content_bytes = content.encode('utf-8')
     else:
