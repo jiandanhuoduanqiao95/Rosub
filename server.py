@@ -97,8 +97,24 @@ class Server:
                         user_groups = self.db.get_user_groups(username)
                         for group_id, _ in user_groups:
                             group_file_requests = self.db.get_pending_group_file_requests(group_id, username)
+                            current_time = datetime.utcnow()
                             for request in group_file_requests:
                                 sender, filename, filesize, message_id = request
+                                with self.db._get_connection() as conn:
+                                    cursor = conn.cursor()
+                                    cursor.execute('''
+                                        SELECT timestamp FROM group_file_requests WHERE message_id = ?
+                                    ''', (message_id,))
+                                    timestamp = cursor.fetchone()[0]
+                                    try:
+                                        request_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                                        if current_time - request_time > timedelta(hours=24):
+                                            self.db.delete_group_file_request(message_id)
+                                            logging.info(f"删除过期群组文件请求: 消息ID={message_id}")
+                                            continue
+                                    except ValueError as e:
+                                        logging.error(f"时间格式错误: 消息ID={message_id}, 错误={e}")
+                                        continue
                                 send_message(ssock, "group_file_request", "",
                                              extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id, "group_id": str(group_id)})
                                 logging.info(f"发送群组文件请求通知: 发送者={sender}, 群组ID={group_id}, 文件名={filename}, 消息ID={message_id}")
@@ -292,6 +308,8 @@ class Server:
                                     logging.error(f"传输群组文件失败: {sender} -> {username}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
                                     with self.client_map_lock:
                                         self.client_map.pop(username, None)
+                            self.db.delete_group_file_request(message_id)
+                            logging.info(f"群组文件请求已删除: 消息ID={message_id}")
                         else:
                             if sender_socket:
                                 try:
@@ -301,7 +319,8 @@ class Server:
                                     logging.error(f"通知发送方失败: {username} 拒绝群组文件 {filename}, 消息ID={message_id}, 错误={e}")
                                     with self.client_map_lock:
                                         self.client_map.pop(sender, None)
-                        logging.info(f"群组文件响应处理完成: 用户={username}, 响应={response}, 消息ID={message_id}")
+                            self.db.delete_group_file_request(message_id)
+                            logging.info(f"群组文件请求已删除: 消息ID={message_id}")
 
                     elif msg_type == "friend_request":
                         target = header.get("to")
@@ -609,6 +628,10 @@ class Server:
                 members = [row[0] for row in cursor.fetchall()]
             logging.info(f"通知群组 {group_id} 的成员: {members}")
             for member in members:
+                # 跳过向发送者发送 group_file_request
+                if msg_type == "group_file_request" and member == from_user:
+                    logging.info(f"跳过向发送者 {from_user} 发送群组文件请求: 群组ID={group_id}")
+                    continue
                 with self.client_map_lock:
                     member_socket = self.client_map.get(member)
                 if member_socket:

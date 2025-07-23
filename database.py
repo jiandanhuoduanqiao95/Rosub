@@ -277,8 +277,10 @@ class Database:
             cursor.execute('''
                 SELECT sender, filename, filesize, message_id
                 FROM group_file_requests
-                WHERE group_id = ?
-            ''', (group_id,))
+                WHERE group_id = ? AND message_id NOT IN (
+                    SELECT message_id FROM offline_messages WHERE receiver = ? AND message_type = 'file'
+                )
+            ''', (group_id, username))
             return cursor.fetchall()
 
     def delete_group_file_request(self, message_id):
