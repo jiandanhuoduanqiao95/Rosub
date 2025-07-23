@@ -68,7 +68,6 @@ class Database:
                     FOREIGN KEY (receiver) REFERENCES users(username)
                 )
             ''')
-            # 新增群组表
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS groups (
                     id INTEGER PRIMARY KEY,
@@ -86,6 +85,20 @@ class Database:
                     PRIMARY KEY (group_id, username),
                     FOREIGN KEY (group_id) REFERENCES groups(id),
                     FOREIGN KEY (username) REFERENCES users(username)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS group_file_requests (
+                    id INTEGER PRIMARY KEY,
+                    message_id TEXT UNIQUE NOT NULL,
+                    group_id INTEGER NOT NULL,
+                    sender TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    filesize INTEGER NOT NULL,
+                    content BLOB NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (group_id) REFERENCES groups(id),
+                    FOREIGN KEY (sender) REFERENCES users(username)
                 )
             ''')
             conn.commit()
@@ -173,6 +186,8 @@ class Database:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM friends WHERE user1 = ? OR user2 = ?', (username, username))
             cursor.execute('DELETE FROM file_requests WHERE sender = ? OR receiver = ?', (username, username))
+            cursor.execute('DELETE FROM group_members WHERE username = ?', (username,))
+            cursor.execute('DELETE FROM group_file_requests WHERE sender = ?', (username,))
             friends_deleted = cursor.rowcount
             cursor.execute('DELETE FROM users WHERE username = ?', (username,))
             users_deleted = cursor.rowcount
@@ -229,6 +244,60 @@ class Database:
                     return False
         except sqlite3.Error as e:
             logging.error(f"文件请求删除失败: {e}")
+            return False
+
+    def save_group_file_request(self, group_id, sender, filename, filesize, content, message_id):
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO group_file_requests (message_id, group_id, sender, filename, filesize, content)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (message_id, group_id, sender, filename, filesize, content))
+                conn.commit()
+                logging.info(f"已保存群组文件请求：群组ID={group_id}, 发送者={sender}, 文件名={filename}, 消息ID={message_id}")
+                return True
+        except Exception as e:
+            logging.error(f"保存群组文件请求失败: {e}")
+            return False
+
+    def get_group_file_request(self, message_id):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT group_id, sender, filename, filesize, content
+                FROM group_file_requests
+                WHERE message_id = ?
+            ''', (message_id,))
+            return cursor.fetchone()
+
+    def get_pending_group_file_requests(self, group_id, username):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT sender, filename, filesize, message_id
+                FROM group_file_requests
+                WHERE group_id = ?
+            ''', (group_id,))
+            return cursor.fetchall()
+
+    def delete_group_file_request(self, message_id):
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    DELETE FROM group_file_requests
+                    WHERE message_id = ?
+                ''', (message_id,))
+                conn.commit()
+                if cursor.rowcount > 0:
+                    logging.info(f"群组文件请求已删除：消息ID={message_id}")
+                    return True
+                else:
+                    logging.error(f"群组文件请求删除失败：消息ID={message_id} 不存在")
+                    return False
+        except sqlite3.Error as e:
+            logging.error(f"群组文件请求删除失败: {e}")
             return False
 
     def add_friend_request(self, requester, target):
@@ -371,7 +440,6 @@ class Database:
             ''', (message_id,))
             return cursor.fetchone()
 
-    # 创建群组
     def create_group(self, group_name, creator):
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -388,7 +456,6 @@ class Database:
             logging.info(f"群组创建成功: {group_name}, ID={group_id}, 创建者={creator}")
             return group_id
 
-    # 加入群组
     def join_group(self, group_id, username):
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -399,7 +466,6 @@ class Database:
             conn.commit()
             logging.info(f"用户 {username} 加入群组: ID={group_id}")
 
-    # 获取用户所在群组
     def get_user_groups(self, username):
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -411,7 +477,6 @@ class Database:
             ''', (username,))
             return cursor.fetchall()
 
-    # 获取群组成员
     def get_group_members(self, group_id):
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -422,7 +487,6 @@ class Database:
             ''', (group_id,))
             return [row[0] for row in cursor.fetchall()]
 
-    # 检查用户是否在群组中
     def is_group_member(self, group_id, username):
         with self._get_connection() as conn:
             cursor = conn.cursor()

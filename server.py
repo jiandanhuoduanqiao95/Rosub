@@ -94,6 +94,14 @@ class Server:
                             send_message(ssock, "file_request", "",
                                          extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id})
                             logging.info(f"发送文件请求通知: 发送者={sender}, 目标={username}, 文件名={filename}, 消息ID={message_id}")
+                        user_groups = self.db.get_user_groups(username)
+                        for group_id, _ in user_groups:
+                            group_file_requests = self.db.get_pending_group_file_requests(group_id, username)
+                            for request in group_file_requests:
+                                sender, filename, filesize, message_id = request
+                                send_message(ssock, "group_file_request", "",
+                                             extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id, "group_id": str(group_id)})
+                                logging.info(f"发送群组文件请求通知: 发送者={sender}, 群组ID={group_id}, 文件名={filename}, 消息ID={message_id}")
                     else:
                         send_message(ssock, "error", "错误：密码错误")
                         logging.warning(f"登录失败: 用户 {username} 密码错误")
@@ -143,10 +151,6 @@ class Server:
                             send_message(ssock, "error", "错误，未指定接收者")
                             logging.error(f"文件消息失败: 未指定接收者")
                             continue
-                        if not self.db.is_friend(username, target):
-                            send_message(ssock, "error", f"错误：{target} 不是您的好友")
-                            logging.warning(f"文件发送失败: {username} -> {target}, 非好友")
-                            continue
                         message_id = header.get("message_id")
                         if not message_id:
                             message_id = str(uuid.uuid4())
@@ -154,21 +158,51 @@ class Server:
                         filename = header.get("filename", "received_file")
                         filesize = header.get("filesize", len(data))
                         file_data = data
-                        self.db.save_file_request(username, target, filename, filesize, file_data, message_id)
-                        with self.client_map_lock:
-                            recipient_socket = self.client_map.get(target)
-                        if recipient_socket:
+
+                        if target.startswith("群组 "):
                             try:
-                                send_message(recipient_socket, "file_request", "",
-                                             extra_headers={"from": username, "filename": filename, "filesize": filesize, "message_id": message_id})
-                                logging.info(f"文件请求已发送: {username} -> {target}, 文件名={filename}, 消息ID={message_id}")
-                            except Exception as e:
-                                logging.error(f"发送文件请求失败: {username} -> {target}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
-                                with self.client_map_lock:
-                                    self.client_map.pop(target, None)
+                                group_id = int(target.split(" ")[1])
+                                with self.db._get_connection() as conn:
+                                    cursor = conn.cursor()
+                                    cursor.execute('SELECT 1 FROM groups WHERE id = ?', (group_id,))
+                                    if not cursor.fetchone():
+                                        send_message(ssock, "error", f"群组 {group_id} 不存在")
+                                        logging.error(f"文件发送失败: 群组 {group_id} 不存在")
+                                        continue
+                                if not self.db.is_group_member(group_id, username):
+                                    send_message(ssock, "error", "您不在此群组中")
+                                    logging.warning(f"文件发送失败: 用户 {username} 不在群组 {group_id} 中")
+                                    continue
+                                self.db.save_group_file_request(group_id, username, filename, filesize, file_data, message_id)
+                                self.notify_group_members(group_id, "group_file_request", "",
+                                                         from_user=username,
+                                                         extra_headers={"filename": filename, "filesize": filesize, "message_id": message_id})
+                                send_message(ssock, "chat", f"文件请求已发送至群组 {group_id}")
+                                logging.info(f"群组文件请求已保存: 群组ID={group_id}, 文件名={filename}, 消息ID={message_id}")
+                            except ValueError:
+                                send_message(ssock, "error", "无效的群组ID")
+                                logging.error(f"文件发送失败: 无效的群组ID {target}")
+                                continue
                         else:
-                            send_message(ssock, "chat", f"用户 {target} 离线，文件请求已保存")
-                            logging.info(f"用户 {target} 离线，文件请求已保存: 文件名={filename}, 消息ID={message_id}")
+                            if not self.db.is_friend(username, target):
+                                send_message(ssock, "error", f"错误：{target} 不是您的好友")
+                                logging.warning(f"文件发送失败: {username} -> {target}, 非好友")
+                                continue
+                            self.db.save_file_request(username, target, filename, filesize, file_data, message_id)
+                            with self.client_map_lock:
+                                recipient_socket = self.client_map.get(target)
+                            if recipient_socket:
+                                try:
+                                    send_message(recipient_socket, "file_request", "",
+                                                 extra_headers={"from": username, "filename": filename, "filesize": filesize, "message_id": message_id})
+                                    logging.info(f"文件请求已发送: {username} -> {target}, 文件名={filename}, 消息ID={message_id}")
+                                except Exception as e:
+                                    logging.error(f"发送文件请求失败: {username} -> {target}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
+                                    with self.client_map_lock:
+                                        self.client_map.pop(target, None)
+                            else:
+                                send_message(ssock, "chat", f"用户 {target} 离线，文件请求已保存")
+                                logging.info(f"用户 {target} 离线，文件请求已保存: 文件名={filename}, 消息ID={message_id}")
 
                     elif msg_type == "file_response":
                         message_id = header.get("message_id")
@@ -219,10 +253,60 @@ class Server:
                             self.db.delete_file_request(message_id)
                             logging.info(f"文件请求已删除: 消息ID={message_id}")
 
+                    elif msg_type == "group_file_response":
+                        message_id = header.get("message_id")
+                        response = header.get("response")
+                        group_id = header.get("group_id")
+                        file_request = self.db.get_group_file_request(message_id)
+                        if not file_request:
+                            send_message(ssock, "error", f"群组文件请求 {message_id} 不存在")
+                            logging.warning(f"群组文件响应失败: 消息ID={message_id} 不存在")
+                            continue
+                        group_id_db, sender, filename, filesize, file_data = file_request
+                        if int(group_id) != group_id_db:
+                            send_message(ssock, "error", "无效的群组ID")
+                            logging.warning(f"群组文件响应失败: 用户 {username} 提供无效的群组ID {group_id}")
+                            continue
+                        if not self.db.is_group_member(group_id, username):
+                            send_message(ssock, "error", "您不在此群组中")
+                            logging.warning(f"群组文件响应失败: 用户 {username} 不在群组 {group_id} 中")
+                            continue
+                        with self.client_map_lock:
+                            sender_socket = self.client_map.get(sender)
+                        if response == "accept":
+                            self.db.save_offline_message(sender, username, "file", file_data, filename=filename, message_id=message_id)
+                            if sender_socket:
+                                try:
+                                    send_message(sender_socket, "chat", f"用户 {username} 已接受群组 {group_id} 的文件 {filename}")
+                                    logging.info(f"通知发送方: {username} 接受群组文件 {filename}, 消息ID={message_id}")
+                                except Exception as e:
+                                    logging.error(f"通知发送方失败: {username} 接受群组文件 {filename}, 消息ID={message_id}, 错误={e}")
+                                    with self.client_map_lock:
+                                        self.client_map.pop(sender, None)
+                            if self.client_map.get(username):
+                                try:
+                                    send_message(self.client_map[username], "file", file_data,
+                                                 extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id, "status": "sent"})
+                                    logging.info(f"群组文件已传输: {sender} -> {username}, 文件名={filename}, 消息ID={message_id}")
+                                except Exception as e:
+                                    logging.error(f"传输群组文件失败: {sender} -> {username}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
+                                    with self.client_map_lock:
+                                        self.client_map.pop(username, None)
+                        else:
+                            if sender_socket:
+                                try:
+                                    send_message(sender_socket, "chat", f"用户 {username} 已拒绝群组 {group_id} 的文件 {filename}")
+                                    logging.info(f"通知发送方: {username} 拒绝群组文件 {filename}, 消息ID={message_id}")
+                                except Exception as e:
+                                    logging.error(f"通知发送方失败: {username} 拒绝群组文件 {filename}, 消息ID={message_id}, 错误={e}")
+                                    with self.client_map_lock:
+                                        self.client_map.pop(sender, None)
+                        logging.info(f"群组文件响应处理完成: 用户={username}, 响应={response}, 消息ID={message_id}")
+
                     elif msg_type == "friend_request":
                         target = header.get("to")
                         if not self.db.user_exists(target):
-                            send_message(ssock, "error", f"用户44 {target} 不存在")
+                            send_message(ssock, "error", f"用户 {target} 不存在")
                             logging.warning(f"好友请求失败: 目标用户 {target} 不存在")
                             continue
                         if self.db.is_friend(username, target):
@@ -336,7 +420,8 @@ class Server:
                         message_id = header.get("message_id")
                         message_info = self.db.get_message_info(message_id)
                         file_request = self.db.get_file_request(message_id)
-                        if not message_info and not file_request:
+                        group_file_request = self.db.get_group_file_request(message_id)
+                        if not message_info and not file_request and not group_file_request:
                             send_message(ssock, "error", f"消息或文件请求 {message_id} 不存在")
                             logging.warning(f"撤回消息失败: 消息ID={message_id} 不存在")
                             continue
@@ -399,6 +484,18 @@ class Server:
                                         self.client_map.pop(receiver, None)
                             send_message(ssock, "chat", f"文件请求 {filename} 已撤回")
                             logging.info(f"文件请求撤回成功：{username} 撤回了文件请求 {message_id}")
+                        elif group_file_request:
+                            group_id, sender, filename, filesize, _ = group_file_request
+                            if sender != username:
+                                send_message(ssock, "error", "只能撤回自己的文件请求")
+                                logging.warning(f"撤回群组文件请求失败: 用户 {username} 尝试撤回非自己的文件请求 {message_id}")
+                                continue
+                            self.db.delete_group_file_request(message_id)
+                            self.notify_group_members(group_id, "chat", f"文件请求 {filename} 已被 {username} 撤回",
+                                                     from_user=username,
+                                                     extra_headers={"message_id": message_id})
+                            send_message(ssock, "chat", f"群组文件请求 {filename} 已撤回")
+                            logging.info(f"群组文件请求撤回成功：{username} 撤回了群组文件请求 {message_id}")
 
                     elif msg_type == "receipt":
                         message_id = header.get("message_id")
@@ -498,8 +595,10 @@ class Server:
             logging.info(f"客户端断开连接: {client_address}")
             client_socket.close()
 
-    def notify_group_members(self, group_id, msg_type, message, from_user="系统"):
+    def notify_group_members(self, group_id, msg_type, message, from_user="系统", extra_headers=None):
         """通知群组成员"""
+        if extra_headers is None:
+            extra_headers = {}
         try:
             if not group_id:
                 logging.error(f"无效的群组ID: {group_id}")
@@ -515,7 +614,7 @@ class Server:
                 if member_socket:
                     try:
                         send_message(member_socket, msg_type, message,
-                                     extra_headers={"from": from_user, "group_id": str(group_id)})
+                                     extra_headers={"from": from_user, "group_id": str(group_id), **extra_headers})
                         logging.info(f"向 {member} 发送群组消息: 类型={msg_type}, 群组ID={group_id}")
                     except Exception as e:
                         logging.error(f"向 {member} 发送群组消息失败: {e}")
