@@ -68,6 +68,26 @@ class Database:
                     FOREIGN KEY (receiver) REFERENCES users(username)
                 )
             ''')
+            # 新增群组表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS groups (
+                    id INTEGER PRIMARY KEY,
+                    group_name TEXT UNIQUE NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (created_by) REFERENCES users(username)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS group_members (
+                    group_id INTEGER NOT NULL,
+                    username TEXT NOT NULL,
+                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (group_id, username),
+                    FOREIGN KEY (group_id) REFERENCES groups(id),
+                    FOREIGN KEY (username) REFERENCES users(username)
+                )
+            ''')
             conn.commit()
 
     def add_user(self, username, password_hash):
@@ -350,3 +370,65 @@ class Database:
                 WHERE message_id = ?
             ''', (message_id,))
             return cursor.fetchone()
+
+    # 创建群组
+    def create_group(self, group_name, creator):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO groups (group_name, created_by)
+                VALUES (?, ?)
+            ''', (group_name, creator))
+            group_id = cursor.lastrowid
+            cursor.execute('''
+                INSERT INTO group_members (group_id, username)
+                VALUES (?, ?)
+            ''', (group_id, creator))
+            conn.commit()
+            logging.info(f"群组创建成功: {group_name}, ID={group_id}, 创建者={creator}")
+            return group_id
+
+    # 加入群组
+    def join_group(self, group_id, username):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR IGNORE INTO group_members (group_id, username)
+                VALUES (?, ?)
+            ''', (group_id, username))
+            conn.commit()
+            logging.info(f"用户 {username} 加入群组: ID={group_id}")
+
+    # 获取用户所在群组
+    def get_user_groups(self, username):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT g.id, g.group_name
+                FROM groups g
+                JOIN group_members gm ON g.id = gm.group_id
+                WHERE gm.username = ?
+            ''', (username,))
+            return cursor.fetchall()
+
+    # 获取群组成员
+    def get_group_members(self, group_id):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT username
+                FROM group_members
+                WHERE group_id = ?
+            ''', (group_id,))
+            return [row[0] for row in cursor.fetchall()]
+
+    # 检查用户是否在群组中
+    def is_group_member(self, group_id, username):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT 1
+                FROM group_members
+                WHERE group_id = ? AND username = ?
+            ''', (group_id, username))
+            return cursor.fetchone() is not None

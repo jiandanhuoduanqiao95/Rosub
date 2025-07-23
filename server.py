@@ -222,7 +222,7 @@ class Server:
                     elif msg_type == "friend_request":
                         target = header.get("to")
                         if not self.db.user_exists(target):
-                            send_message(ssock, "error", f"用户 {target} 不存在")
+                            send_message(ssock, "error", f"用户44 {target} 不存在")
                             logging.warning(f"好友请求失败: 目标用户 {target} 不存在")
                             continue
                         if self.db.is_friend(username, target):
@@ -424,6 +424,67 @@ class Server:
                             send_message(ssock, "error", f"消息 {message_id} 回执失败")
                             logging.error(f"消息回执失败：{message_id} 不存在或已更新")
 
+                    elif msg_type == "create_group":
+                        group_name = data.decode("utf-8").strip()
+                        group_id = self.db.create_group(group_name, username)
+                        send_message(ssock, "chat", f"群组 {group_name} 创建成功，ID: {group_id}")
+                        logging.info(f"用户 {username} 创建群组: {group_name}, ID: {group_id}")
+                        self.notify_group_members(group_id, "chat", f"群组 {group_name} 已创建", from_user="系统")
+
+                    elif msg_type == "join_group":
+                        try:
+                            group_id = int(data.decode("utf-8").strip())
+                            with self.db._get_connection() as conn:
+                                cursor = conn.cursor()
+                                cursor.execute('SELECT 1 FROM groups WHERE id = ?', (group_id,))
+                                if not cursor.fetchone():
+                                    send_message(ssock, "error", f"群组 {group_id} 不存在")
+                                    logging.error(f"用户 {username} 尝试加入不存在的群组: {group_id}")
+                                    continue
+                            if not self.db.is_group_member(group_id, username):
+                                self.db.join_group(group_id, username)
+                                send_message(ssock, "chat", f"已加入群组 {group_id}")
+                                logging.info(f"用户 {username} 加入群组: {group_id}")
+                                self.notify_group_members(group_id, "chat", f"{username} 加入了群组", from_user="系统")
+                            else:
+                                send_message(ssock, "error", "您已在群组中")
+                                logging.warning(f"用户 {username} 尝试重复加入群组: {group_id}")
+                        except ValueError:
+                            send_message(ssock, "error", "无效的群组ID")
+                            logging.error(f"用户 {username} 提供无效的群组ID: {data.decode('utf-8')}")
+                        except Exception as e:
+                            send_message(ssock, "error", f"加入群组失败: {str(e)}")
+                            logging.error(f"用户 {username} 加入群组失败: {str(e)}")
+
+                    elif msg_type == "group_chat":
+                        try:
+                            group_id = int(header.get("group_id"))
+                            with self.db._get_connection() as conn:
+                                cursor = conn.cursor()
+                                cursor.execute('SELECT 1 FROM groups WHERE id = ?', (group_id,))
+                                if not cursor.fetchone():
+                                    send_message(ssock, "error", f"群组 {group_id} 不存在")
+                                    logging.error(f"用户 {username} 尝试发送消息到不存在的群组: {group_id}")
+                                    continue
+                            if not self.db.is_group_member(group_id, username):
+                                send_message(ssock, "error", "您不在此群组中")
+                                logging.warning(f"用户 {username} 尝试发送消息到未加入的群组: {group_id}")
+                                continue
+                            message = data.decode("utf-8")
+                            self.notify_group_members(group_id, "group_chat", message, from_user=username)
+                            logging.info(f"群组消息: 用户={username}, 群组ID={group_id}, 消息={message}")
+                        except ValueError:
+                            send_message(ssock, "error", "无效的群组ID")
+                            logging.error(f"用户 {username} 提供无效的群组ID: {header.get('group_id')}")
+                        except Exception as e:
+                            send_message(ssock, "error", f"发送群组消息失败: {str(e)}")
+                            logging.error(f"用户 {username} 发送群组消息失败: {str(e)}")
+
+                    elif msg_type == "list_groups":
+                        groups = self.db.get_user_groups(username)
+                        send_message(ssock, "list_groups", json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
+                        logging.info(f"发送群组列表给用户: {username}")
+
                     else:
                         logging.warning(f"未知消息类型来自 {username}: {msg_type}")
         except ssl.SSLError as e:
@@ -436,6 +497,32 @@ class Server:
                     self.client_map.pop(username, None)
             logging.info(f"客户端断开连接: {client_address}")
             client_socket.close()
+
+    def notify_group_members(self, group_id, msg_type, message, from_user="系统"):
+        """通知群组成员"""
+        try:
+            if not group_id:
+                logging.error(f"无效的群组ID: {group_id}")
+                return
+            with self.db._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT username FROM group_members WHERE group_id = ?', (group_id,))
+                members = [row[0] for row in cursor.fetchall()]
+            logging.info(f"通知群组 {group_id} 的成员: {members}")
+            for member in members:
+                with self.client_map_lock:
+                    member_socket = self.client_map.get(member)
+                if member_socket:
+                    try:
+                        send_message(member_socket, msg_type, message,
+                                     extra_headers={"from": from_user, "group_id": str(group_id)})
+                        logging.info(f"向 {member} 发送群组消息: 类型={msg_type}, 群组ID={group_id}")
+                    except Exception as e:
+                        logging.error(f"向 {member} 发送群组消息失败: {e}")
+                        with self.client_map_lock:
+                            self.client_map.pop(member, None)
+        except Exception as e:
+            logging.error(f"通知群组 {group_id} 成员失败: {e}")
 
     def build_listen(self):
         if not os.path.exists("files"):

@@ -9,7 +9,6 @@ import json
 import uuid
 import logging
 
-# 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 class ClientGUI:
@@ -20,11 +19,12 @@ class ClientGUI:
         self.username = ""
         self.is_admin = False
         self.client_map = {}
-        self.message_status = {}  # 存储消息状态 {message_id: status}
-        self.message_lines = {}   # 存储消息ID与聊天窗口行号的映射 {message_id: (friend, line_number)}
-        self.chat_windows = {}    # 存储每个好友的聊天窗口 {friend: Text}
-        self.chat_histories = {}  # 存储每个好友的聊天记录 {friend: list of messages}
-        self.current_friend = None  # 当前选中的好友
+        self.message_status = {}
+        self.message_lines = {}
+        self.chat_windows = {}
+        self.chat_histories = {}
+        self.current_friend = None
+        self.group_list = {}  # group_id -> group_name
         self.setup_login_ui()
         self.setup_chat_ui()
         self.show_login()
@@ -49,7 +49,7 @@ class ClientGUI:
         tree_frame = ttk.Frame(self.chat_frame)
         tree_frame.grid(row=0, column=0, rowspan=3, padx=5, pady=5, sticky='ns')
         self.user_list = ttk.Treeview(tree_frame, columns=('username', 'status'), show='headings', height=20)
-        self.user_list.heading('username', text='好友')
+        self.user_list.heading('username', text='好友/群组')
         self.user_list.heading('status', text='状态')
         self.user_list.column('username', width=150, anchor='center', minwidth=150)
         self.user_list.column('status', width=80, anchor='center', minwidth=80)
@@ -61,19 +61,15 @@ class ClientGUI:
         self.user_list.configure(yscrollcommand=scrollbar.set)
         self.user_list.bind('<<TreeviewSelect>>', self.on_user_select)
 
-        # 当前聊天对象标签
         self.current_friend_label = ttk.Label(self.chat_frame, text="未选择好友")
         self.current_friend_label.grid(row=0, column=1, columnspan=2, pady=5, sticky='w')
 
-        # 聊天窗口容器
         self.chat_container = ttk.Frame(self.chat_frame)
         self.chat_container.grid(row=1, column=1, columnspan=2, padx=5, pady=5, sticky='nsew')
 
-        # 预创建“服务器”窗口并设置公告样式
         self.create_chat_window("服务器")
-        self.chat_windows["服务器"].tag_configure("announcement", font=('Arial', 10, 'bold'), foreground="red")  # 公告消息加粗且红色
+        self.chat_windows["服务器"].tag_configure("announcement", font=('Arial', 10, 'bold'), foreground="red")
 
-        # 输入区域
         self.msg_entry = ttk.Entry(self.chat_frame, width=40)
         self.msg_entry.grid(row=2, column=1, padx=5, pady=5)
         self.file_btn = ttk.Button(self.chat_frame, text="发送文件", command=self.send_file)
@@ -88,21 +84,21 @@ class ClientGUI:
         self.add_friend_btn.grid(row=3, column=0, padx=5)
         self.view_requests_btn = ttk.Button(self.chat_frame, text="查看好友请求", command=self.view_friend_requests)
         self.view_requests_btn.grid(row=4, column=0, padx=5)
+        self.group_btn = ttk.Button(self.chat_frame, text="群组管理", command=self.group_management)
+        self.group_btn.grid(row=5, column=0, padx=5)
         self.logout_btn = ttk.Button(self.chat_frame, text="退出", command=self.logout, width=12)
-        self.logout_btn.grid(row=5, column=1, columnspan=2, pady=10)
+        self.logout_btn.grid(row=6, column=1, columnspan=2, pady=10)
         self.admin_btn = ttk.Button(self.chat_frame, text="管理面板", command=self.show_admin_panel)
         self.status_var = tk.StringVar()
         self.status_bar = ttk.Label(self.chat_frame, textvariable=self.status_var)
-        self.status_bar.grid(row=6, columnspan=3, sticky='ew')
+        self.status_bar.grid(row=7, columnspan=3, sticky='ew')
 
     def create_chat_window(self, friend):
-        """为指定好友创建聊天窗口"""
         if friend not in self.chat_windows:
             chat_text = tk.Text(self.chat_container, width=50, height=20, state='disabled')
             chat_text.bind("<Button-1>", self.on_chat_text_click)
             self.chat_windows[friend] = chat_text
             self.chat_histories[friend] = []
-            # 加载历史消息（如果有）
             if friend in self.chat_histories:
                 chat_text.config(state='normal')
                 for msg in self.chat_histories[friend]:
@@ -112,19 +108,15 @@ class ClientGUI:
         return self.chat_windows[friend]
 
     def switch_chat_window(self, friend):
-        """切换到指定好友的聊天窗口"""
         if friend == self.current_friend:
             return
-        # 隐藏当前聊天窗口
         if self.current_friend and self.current_friend in self.chat_windows:
             self.chat_windows[self.current_friend].grid_forget()
-        # 显示新聊天窗口
         self.current_friend = friend
         self.current_friend_label.config(text=f"与 {friend} 的聊天")
         chat_window = self.create_chat_window(friend)
         chat_window.grid(row=0, column=0, sticky='nsew')
         chat_window.config(state='normal')
-        # 重新加载聊天记录并更新行号映射
         chat_window.delete('1.0', 'end')
         for msg in self.chat_histories[friend]:
             line_number = int(float(chat_window.index('end-1c')))
@@ -137,7 +129,6 @@ class ClientGUI:
         logging.info(f"切换到聊天窗口: {friend}")
 
     def on_user_select(self, event):
-        """处理好友列表选择事件"""
         selected = self.user_list.selection()
         if selected:
             friend = self.user_list.item(selected[0])['values'][0]
@@ -194,18 +185,23 @@ class ClientGUI:
         while True:
             try:
                 header, data = recv_message(self.ssock)
-                if header is None:  # 服务器连接断开
+                if header is None:
                     self.update_status("服务器连接已断开")
-                    self.logout()  # 自动退出登录
+                    self.root.after(0, self.logout)
                     break
                 self.process_message(header, data)
-            except Exception as e:
-                self.update_status(f"接收错误: {str(e)}")
-                self.logout()  # 自动退出登录
+            except ssl.SSLError as e:
+                logging.error(f"SSL错误: {str(e)}")
+                self.update_status(f"SSL错误: {str(e)}")
+                self.root.after(0, self.logout)
                 break
+            except Exception as e:
+                logging.error(f"接收消息错误: {str(e)}")
+                self.update_status(f"接收错误: {str(e)}")
+                self.root.after(0, self.append_chat, "服务器", f"接收错误: {str(e)}")
+                continue
 
     def update_message_status_in_chat(self, message_id, new_status, sender=None):
-        """更新指定好友聊天窗口中消息的状态"""
         if message_id in self.message_lines:
             friend, line_number = self.message_lines[message_id]
             if friend not in self.chat_windows:
@@ -234,7 +230,6 @@ class ClientGUI:
             logging.warning(f"更新消息状态失败: 消息ID={message_id} 不存在于 message_lines")
 
     def on_chat_text_click(self, event):
-        """处理聊天窗口的点击事件"""
         if not self.current_friend or self.current_friend not in self.chat_windows:
             logging.warning("点击消息失败: 未选择好友或聊天窗口不存在")
             return
@@ -273,24 +268,27 @@ class ClientGUI:
             tag = "[历史]" if "history" in header else ""
             status = "delivered" if sender != "服务器" and sender != "[系统公告]" else ""
             if msg_type == "chat":
-                msg = data.decode()
-                if sender == "服务器" or sender == "[系统公告]":
-                    tag_name = "announcement" if sender == "[系统公告]" else None
-                    self.append_chat("服务器", f"{tag}{sender}: {msg}", tag=tag_name)
-                    if sender == "[系统公告]":
-                        # 确保在主线程中执行 UI 操作
-                        self.root.after(0, lambda: self.switch_chat_window("服务器"))
-                        self.root.after(0, lambda: messagebox.showinfo("系统公告", f"收到新公告: {msg}"))
-                else:
-                    self.message_status[message_id] = status
-                    self.append_chat(sender, f"{tag}{sender}: {msg} [{status}] ({message_id})", tag=f"clickable_message_{message_id}")
-                    if message_id and "history" not in header:
-                        try:
-                            send_message(self.ssock, "receipt", "", extra_headers={"message_id": message_id, "to": sender})
-                            logging.info(f"发送回执: 消息ID={message_id}, 目标={sender}")
-                        except Exception as e:
-                            self.append_chat(sender, f"发送回执失败: {message_id} ({str(e)})")
-                            logging.error(f"发送回执失败: 消息ID={message_id}, 错误={str(e)}")
+                try:
+                    msg = data.decode()
+                    if sender == "服务器" or sender == "[系统公告]":
+                        tag_name = "announcement" if sender == "[系统公告]" else None
+                        self.append_chat("服务器", f"{tag}{sender}: {msg}", tag=tag_name)
+                        if sender == "[系统公告]":
+                            self.root.after(0, lambda: self.switch_chat_window("服务器"))
+                            self.root.after(0, lambda: messagebox.showinfo("系统公告", f"收到新公告: {msg}"))
+                    else:
+                        self.message_status[message_id] = status
+                        self.append_chat(sender, f"{tag}{sender}: {msg} [{status}] ({message_id})", tag=f"clickable_message_{message_id}")
+                        if message_id and "history" not in header:
+                            try:
+                                send_message(self.ssock, "receipt", "", extra_headers={"message_id": message_id, "to": sender})
+                                logging.info(f"发送回执: 消息ID={message_id}, 目标={sender}")
+                            except Exception as e:
+                                self.append_chat(sender, f"发送回执失败: {message_id} ({str(e)})")
+                                logging.error(f"发送回执失败: 消息ID={message_id}, 错误={str(e)}")
+                except UnicodeDecodeError:
+                    logging.error(f"消息解码失败: 发送者={sender}, 消息ID={message_id}")
+                    self.append_chat("服务器", f"消息解码失败: {message_id}")
             elif msg_type == "file":
                 filename = header.get("filename", "unknown_file")
                 file_path = f"files/recv_{filename}"
@@ -360,17 +358,51 @@ class ClientGUI:
                 self.message_status[message_id] = "recalled"
                 self.update_message_status_in_chat(message_id, "recalled", sender=sender)
                 logging.info(f"处理撤回消息: {message_id} from {sender}")
-                # 如果当前窗口不是发送者的窗口，切换到该窗口以显示撤回消息
                 if self.current_friend != sender:
                     self.switch_chat_window(sender)
             else:
                 logging.warning(f"撤回消息失败: 消息ID={message_id} 不存在")
                 self.append_chat(sender, f"撤回消息失败: 消息ID {message_id} 不存在")
         elif msg_type == "error":
-            self.append_chat("服务器", f"错误: {data.decode()}")
+            try:
+                error_msg = data.decode()
+                self.append_chat("服务器", f"错误: {error_msg}")
+                messagebox.showerror("错误", error_msg)
+            except UnicodeDecodeError:
+                self.append_chat("服务器", "错误: 无法解码服务器错误消息")
+                logging.error("错误消息解码失败")
+        elif msg_type == "group_chat":
+            group_id = header.get("group_id")
+            sender = header.get("from")
+            try:
+                if not group_id:
+                    raise ValueError("缺少群组ID")
+                msg = data.decode()
+                group_name = self.group_list.get(group_id, f"群组 {group_id}")
+                self.append_chat(f"群组 {group_id}", f"{sender}: {msg}")
+                if self.current_friend != f"群组 {group_id}":
+                    self.root.after(0, lambda: self.switch_chat_window(f"群组 {group_id}"))
+                    self.root.after(0, lambda: messagebox.showinfo("群组消息", f"群组 {group_name} 收到新消息"))
+                logging.info(f"收到群组消息: 群组ID={group_id}, 发送者={sender}, 消息={msg}")
+            except UnicodeDecodeError:
+                logging.error(f"群组消息解码失败: 群组ID={group_id}, 发送者={sender}")
+                self.append_chat("服务器", f"群组 {group_id} 消息解码失败")
+            except Exception as e:
+                logging.error(f"处理群组消息失败: {str(e)}")
+                self.append_chat("服务器", f"处理群组消息失败: {str(e)}")
+        elif msg_type == "list_groups":
+            try:
+                groups = json.loads(data.decode())
+                for group in groups:
+                    self.group_list[str(group['id'])] = group['group_name']
+                    self.user_list.insert('', 'end', values=(f"群组 {group['id']}", "群聊"))
+                self.append_chat("服务器", "群组列表已刷新")
+                logging.info("群组列表已刷新")
+            except json.JSONDecodeError:
+                self.append_chat("服务器", "解析群组列表失败")
+                logging.error("解析群组列表失败")
 
     def handle_file_request(self, sender, filename, filesize, message_id):
-        """处理文件传输请求，显示确认弹窗"""
         response = messagebox.askyesno("文件传输请求", f"{sender} 希望发送文件 {filename} ({filesize} bytes)，是否接受？")
         try:
             if response:
@@ -452,21 +484,34 @@ class ClientGUI:
     def send_chat(self):
         msg = self.msg_entry.get()
         if not self.current_friend:
-            messagebox.showwarning("提示", "请选择接收好友")
+            messagebox.showwarning("提示", "请选择接收好友或群组")
             return
         if self.current_friend == "服务器":
             messagebox.showwarning("提示", "不能向服务器发送消息")
             return
-        try:
-            message_id = str(uuid.uuid4())
-            send_message(self.ssock, "chat", msg, extra_headers={"to": self.current_friend, "message_id": message_id})
-            self.message_status[message_id] = "sent"
-            self.append_chat(self.current_friend, f"我 -> {self.current_friend}: {msg} [sent] ({message_id})", tag=f"clickable_message_{message_id}")
-            self.msg_entry.delete(0, 'end')
-            logging.info(f"发送聊天消息: {msg}, 消息ID={message_id}, 目标={self.current_friend}")
-        except Exception as e:
-            messagebox.showerror("发送失败", str(e))
-            logging.error(f"发送聊天消息失败: {str(e)}")
+        if self.current_friend.startswith("群组 "):
+            group_id = self.current_friend.split(" ")[1]
+            try:
+                message_id = str(uuid.uuid4())
+                send_message(self.ssock, "group_chat", msg, extra_headers={"group_id": group_id, "message_id": message_id})
+                self.message_status[message_id] = "sent"
+                #self.append_chat(self.current_friend, f"我: {msg} [sent] ({message_id})", tag=f"clickable_message_{message_id}")
+                self.msg_entry.delete(0, 'end')
+                logging.info(f"发送群组消息: {msg}, 群组ID={group_id}, 消息ID={message_id}")
+            except Exception as e:
+                messagebox.showerror("发送失败", str(e))
+                logging.error(f"发送群组消息失败: {str(e)}")
+        else:
+            try:
+                message_id = str(uuid.uuid4())
+                send_message(self.ssock, "chat", msg, extra_headers={"to": self.current_friend, "message_id": message_id})
+                self.message_status[message_id] = "sent"
+                self.append_chat(self.current_friend, f"我 -> {self.current_friend}: {msg} [sent] ({message_id})", tag=f"clickable_message_{message_id}")
+                self.msg_entry.delete(0, 'end')
+                logging.info(f"发送聊天消息: {msg}, 消息ID={message_id}, 目标={self.current_friend}")
+            except Exception as e:
+                messagebox.showerror("发送失败", str(e))
+                logging.error(f"发送聊天消息失败: {str(e)}")
 
     def send_file(self):
         filepath = filedialog.askopenfilename()
@@ -529,7 +574,6 @@ class ClientGUI:
             logging.error(f"获取好友请求失败: {str(e)}")
 
     def append_chat(self, friend, message, tag=None):
-        """将消息添加到指定好友的聊天窗口"""
         self.create_chat_window(friend)
         chat_text = self.chat_windows[friend]
         chat_text.config(state='normal')
@@ -553,10 +597,11 @@ class ClientGUI:
     def refresh_user_list(self):
         try:
             send_message(self.ssock, "list_friends", "")
-            logging.info("请求刷新好友列表")
+            send_message(self.ssock, "list_groups", "")
+            logging.info("请求刷新好友和群组列表")
         except Exception as e:
-            self.update_status(f"刷新好友列表失败: {e}")
-            logging.error(f"刷新好友列表失败: {str(e)}")
+            self.update_status(f"刷新好友和群组列表失败: {e}")
+            logging.error(f"刷新好友和群组列表失败: {str(e)}")
 
     def list_users(self):
         try:
@@ -586,7 +631,7 @@ class ClientGUI:
         try:
             send_message(self.ssock, "admin_command", content, extra_headers={"action": "announcement"})
             self.append_chat("服务器", "公告已送达", tag="announcement")
-            self.switch_chat_window("服务器")  # 管理员发送公告后自动切换到“服务器”窗口
+            self.switch_chat_window("服务器")
             logging.info("发送公告")
         except Exception as e:
             messagebox.showerror("失败", f"发送公告失败: {e}")
@@ -608,6 +653,7 @@ class ClientGUI:
         self.chat_windows.clear()
         self.chat_histories.clear()
         self.current_friend = None
+        self.group_list.clear()
         self.current_friend_label.config(text="未选择好友")
         self.user_list.delete(*self.user_list.get_children())
         self.admin_btn.grid_forget()
@@ -619,6 +665,58 @@ class ClientGUI:
     def on_close(self):
         self.logout()
         self.root.destroy()
+
+    def group_management(self):
+        group_win = tk.Toplevel(self.root)
+        group_win.title("群组管理")
+        ttk.Button(group_win, text="创建群组", command=self.create_group).pack(pady=5)
+        ttk.Button(group_win, text="加入群组", command=self.join_group).pack(pady=5)
+        ttk.Button(group_win, text="查看我的群组", command=self.view_my_groups).pack(pady=5)
+
+    def create_group(self):
+        group_name = tk.simpledialog.askstring("创建群组", "输入群组名称:")
+        if not group_name:
+            return
+        try:
+            send_message(self.ssock, "create_group", group_name)
+            logging.info(f"请求创建群组: {group_name}")
+        except Exception as e:
+            messagebox.showerror("失败", f"创建群组失败: {e}")
+
+    def join_group(self):
+        group_id = tk.simpledialog.askstring("加入群组", "输入群组ID:")
+        if not group_id:
+            return
+        try:
+            send_message(self.ssock, "join_group", group_id)
+            logging.info(f"请求加入群组: {group_id}")
+        except Exception as e:
+            messagebox.showerror("失败", f"加入群组失败: {e}")
+            logging.error(f"加入群组失败: {str(e)}")
+
+    def view_my_groups(self):
+        try:
+            send_message(self.ssock, "list_groups", "")
+            logging.info("请求我的群组列表")
+        except Exception as e:
+            messagebox.showerror("失败", f"获取群组列表失败: {e}")
+
+    def show_my_groups(self, groups):
+        groups_win = tk.Toplevel(self.root)
+        groups_win.title("我的群组")
+        tree = ttk.Treeview(groups_win, columns=('group_id', 'group_name'), show='headings')
+        tree.heading('group_id', text='群组ID')
+        tree.heading('group_name', text='群组名称')
+        tree.pack(fill='both', expand=True)
+        for group in groups:
+            tree.insert('', 'end', values=(group['id'], group['group_name']))
+        tree.bind('<<TreeviewSelect>>', self.on_group_select)
+
+    def on_group_select(self, event):
+        selected = event.widget.selection()
+        if selected:
+            group_id = event.widget.item(selected[0])['values'][0]
+            self.switch_chat_window(f"群组 {group_id}")
 
 if __name__ == "__main__":
     app = ClientGUI()
