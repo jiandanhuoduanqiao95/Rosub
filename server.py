@@ -100,6 +100,9 @@ class Server:
                             current_time = datetime.utcnow()
                             for request in group_file_requests:
                                 sender, filename, filesize, message_id = request
+                                if sender == username:  # Skip sending group file requests to the sender
+                                    logging.info(f"跳过向发送者 {username} 发送自己的群组文件请求: 消息ID={message_id}, 群组ID={group_id}")
+                                    continue
                                 with self.db._get_connection() as conn:
                                     cursor = conn.cursor()
                                     cursor.execute('''
@@ -287,6 +290,8 @@ class Server:
                             send_message(ssock, "error", "您不在此群组中")
                             logging.warning(f"群组文件响应失败: 用户 {username} 不在群组 {group_id} 中")
                             continue
+                        # 保存用户的响应
+                        self.db.save_group_file_response(message_id, group_id, username, response)
                         with self.client_map_lock:
                             sender_socket = self.client_map.get(sender)
                         if response == "accept":
@@ -308,8 +313,6 @@ class Server:
                                     logging.error(f"传输群组文件失败: {sender} -> {username}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
                                     with self.client_map_lock:
                                         self.client_map.pop(username, None)
-                            self.db.delete_group_file_request(message_id)
-                            logging.info(f"群组文件请求已删除: 消息ID={message_id}")
                         else:
                             if sender_socket:
                                 try:
@@ -319,8 +322,12 @@ class Server:
                                     logging.error(f"通知发送方失败: {username} 拒绝群组文件 {filename}, 消息ID={message_id}, 错误={e}")
                                     with self.client_map_lock:
                                         self.client_map.pop(sender, None)
+                        # 检查是否所有群成员都已响应
+                        if self.db.all_members_responded(message_id, group_id):
                             self.db.delete_group_file_request(message_id)
-                            logging.info(f"群组文件请求已删除: 消息ID={message_id}")
+                            logging.info(f"群组文件请求已删除: 消息ID={message_id}, 所有成员已响应")
+                        else:
+                            logging.info(f"群组文件请求未删除: 消息ID={message_id}, 仍有成员未响应")
 
                     elif msg_type == "friend_request":
                         target = header.get("to")
@@ -448,8 +455,6 @@ class Server:
                             sender, receiver, _, _, _, status, timestamp = message_info
                             if sender != username:
                                 send_message(ssock, "error", "只能撤回自己的消息")
-                                logging.warning(f"撤回消息失败: 用户 {username} 尝试撤回非自己的消息 {message_id}")
-                                continue
                             try:
                                 message_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
                                 current_time = datetime.utcnow()

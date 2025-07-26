@@ -101,6 +101,19 @@ class Database:
                     FOREIGN KEY (sender) REFERENCES users(username)
                 )
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS group_file_responses (
+                    message_id TEXT NOT NULL,
+                    group_id INTEGER NOT NULL,
+                    username TEXT NOT NULL,
+                    response TEXT NOT NULL,  -- 'accept' or 'reject'
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (message_id, group_id, username),
+                    FOREIGN KEY (message_id) REFERENCES group_file_requests(message_id),
+                    FOREIGN KEY (group_id) REFERENCES groups(id),
+                    FOREIGN KEY (username) REFERENCES users(username)
+                )
+            ''')
             conn.commit()
 
     def add_user(self, username, password_hash):
@@ -188,6 +201,7 @@ class Database:
             cursor.execute('DELETE FROM file_requests WHERE sender = ? OR receiver = ?', (username, username))
             cursor.execute('DELETE FROM group_members WHERE username = ?', (username,))
             cursor.execute('DELETE FROM group_file_requests WHERE sender = ?', (username,))
+            cursor.execute('DELETE FROM group_file_responses WHERE username = ?', (username,))
             friends_deleted = cursor.rowcount
             cursor.execute('DELETE FROM users WHERE username = ?', (username,))
             users_deleted = cursor.rowcount
@@ -278,7 +292,7 @@ class Database:
                 SELECT sender, filename, filesize, message_id
                 FROM group_file_requests
                 WHERE group_id = ? AND message_id NOT IN (
-                    SELECT message_id FROM offline_messages WHERE receiver = ? AND message_type = 'file'
+                    SELECT message_id FROM group_file_responses WHERE username = ?
                 )
             ''', (group_id, username))
             return cursor.fetchall()
@@ -291,6 +305,10 @@ class Database:
                     DELETE FROM group_file_requests
                     WHERE message_id = ?
                 ''', (message_id,))
+                cursor.execute('''
+                    DELETE FROM group_file_responses
+                    WHERE message_id = ?
+                ''', (message_id,))
                 conn.commit()
                 if cursor.rowcount > 0:
                     logging.info(f"群组文件请求已删除：消息ID={message_id}")
@@ -301,6 +319,38 @@ class Database:
         except sqlite3.Error as e:
             logging.error(f"群组文件请求删除失败: {e}")
             return False
+
+    def save_group_file_response(self, message_id, group_id, username, response):
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO group_file_responses (message_id, group_id, username, response)
+                    VALUES (?, ?, ?, ?)
+                ''', (message_id, group_id, username, response))
+                conn.commit()
+                logging.info(f"已保存群组文件响应：消息ID={message_id}, 群组ID={group_id}, 用户={username}, 响应={response}")
+                return True
+        except sqlite3.Error as e:
+            logging.error(f"保存群组文件响应失败: {e}")
+            return False
+
+    def all_members_responded(self, message_id, group_id):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT username
+                FROM group_members
+                WHERE group_id = ?
+            ''', (group_id,))
+            members = [row[0] for row in cursor.fetchall()]
+            cursor.execute('''
+                SELECT username
+                FROM group_file_responses
+                WHERE message_id = ? AND group_id = ?
+            ''', (message_id, group_id))
+            responded = [row[0] for row in cursor.fetchall()]
+            return set(members).issubset(set(responded))
 
     def add_friend_request(self, requester, target):
         try:
