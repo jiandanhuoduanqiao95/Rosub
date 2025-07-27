@@ -2,7 +2,7 @@ import ssl
 import logging
 import bcrypt
 from protocol import send_message, recv_message
-from message_handler import MessageHandler
+from server_message_handler import MessageHandler
 
 class ClientHandler:
     def __init__(self, server):

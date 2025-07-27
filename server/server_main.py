@@ -4,7 +4,7 @@ import os
 import threading
 import logging
 from database import Database
-from client_handler import ClientHandler
+from server_client_handler import ClientHandler
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 

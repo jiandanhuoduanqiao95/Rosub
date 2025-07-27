@@ -3,8 +3,8 @@ import json
 import uuid
 from datetime import datetime, timedelta
 from protocol import send_message, recv_message
-from group_handler import GroupHandler
-from admin_handler import AdminHandler
+from server_group_handler import GroupHandler
+from server_admin_handler import AdminHandler
 
 class MessageHandler:
     def __init__(self, server):

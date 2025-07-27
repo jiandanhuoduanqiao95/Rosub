@@ -1,9 +1,9 @@
 import tkinter as tk
-from login_ui import LoginUI
-from chat_ui import ChatUI
-from admin_ui import AdminUI
-from group_ui import GroupUI
-from message_handler import MessageHandler
+from gui_login_ui import LoginUI
+from gui_chat_ui import ChatUI
+from gui_admin_ui import AdminUI
+from gui_group_ui import GroupUI
+from gui_message_handler import MessageHandler
 import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
