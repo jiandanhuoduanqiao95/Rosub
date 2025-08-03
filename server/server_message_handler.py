@@ -12,6 +12,20 @@ class MessageHandler:
         self.group_handler = GroupHandler(server)
         self.admin_handler = AdminHandler(server)
 
+    def send_initial_data(self, username, ssock):
+        """发送初始好友和群组列表"""
+        # 发送好友列表
+        users = self.server.db.get_friends(username)
+        with self.server.client_map_lock:
+            users_list = [[user, user in self.server.client_map] for user in users]
+        send_message(ssock, "admin_response", json.dumps(users_list), extra_headers={"response_type": "list_friends"})
+        logging.info(f"发送初始好友列表给用户: {username}, 好友数={len(users_list)}")
+
+        # 发送群组列表
+        groups = self.server.db.get_user_groups(username)
+        send_message(ssock, "list_groups", json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
+        logging.info(f"发送初始群组列表给用户: {username}, 群组数={len(groups)}")
+
     def load_offline_data(self, username, ssock):
         """加载用户的离线消息、好友请求和文件请求"""
         messages = self.server.db.get_offline_messages(username)
@@ -25,9 +39,32 @@ class MessageHandler:
             elif msg_type == "file":
                 send_message(ssock, "file", content,
                              extra_headers={"from": sender, "filename": filename, "history": "true", "message_id": message_id, "status": status})
+            elif msg_type == "group_chat":
+                group_id = None
+                # 从数据库获取群组ID
+                with self.server.db._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        SELECT group_id FROM group_members 
+                        WHERE username = ? AND group_id IN (
+                            SELECT group_id FROM group_members WHERE username = ?
+                        )
+                    ''', (username, sender))
+                    result = cursor.fetchone()
+                    if result:
+                        group_id = result[0]
+                if group_id:
+                    group_name = self.server.db.get_user_groups(username)
+                    group_name = next((g[1] for g in group_name if g[0] == group_id), f"群组 {group_id}")
+                    send_message(ssock, "group_chat", content.decode('utf-8'),
+                                 extra_headers={"from": sender, "group_id": str(group_id), "history": "true", "message_id": message_id, "status": status})
+                    logging.info(f"发送离线群聊消息: 发送者={sender}, 群组ID={group_id}, 消息ID={message_id}")
+                else:
+                    logging.warning(f"未找到群组ID: 发送者={sender}, 接收者={username}, 消息ID={message_id}")
+                    continue
             with self.server.client_map_lock:
                 sender_socket = self.server.client_map.get(sender)
-            if sender_socket:
+            if sender_socket and msg_type != "group_chat":  # 群聊消息不发送回执
                 send_message(sender_socket, "status_update", "",
                              extra_headers={"message_id": message_id, "status": "delivered"})
                 logging.info(f"通知发送方: 消息ID={message_id}, 状态=delivered, 目标={sender}")
@@ -324,13 +361,13 @@ class MessageHandler:
                         continue
                     if self.server.db.update_message_status(message_id, 'recalled'):
                         if msg_type == "group_chat":
-                            # 获取群组ID（需要从消息的接收者或上下文推断）
+                            # 获取群组ID
                             with self.server.db._get_connection() as conn:
                                 cursor = conn.cursor()
                                 cursor.execute('SELECT group_id FROM group_members WHERE username = ?', (receiver,))
                                 group_ids = [row[0] for row in cursor.fetchall()]
 
-                                # 假设消息只属于一个群组，找到包含 sender 和 receiver 的群组
+                                # 找到包含 sender 和 receiver 的群组
                                 for group_id in group_ids:
                                     if self.server.db.is_group_member(group_id, sender):
                                         self.group_handler.notify_group_members(

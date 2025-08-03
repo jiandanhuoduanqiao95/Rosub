@@ -36,8 +36,9 @@ class ClientHandler:
                         with self.server.client_map_lock:
                             self.server.client_map[username] = ssock
                         logging.info(f"注册成功: 用户={username}")
-                        # 加载离线数据并进入消息处理循环
+                        # 加载离线数据并发送初始好友/群组列表
                         message_handler.load_offline_data(username, ssock)
+                        message_handler.send_initial_data(username, ssock)
                         message_handler.process_messages(username, ssock)
                     else:
                         send_message(ssock, "error", "注册失败")
@@ -59,8 +60,9 @@ class ClientHandler:
                             logging.info(f"登录成功: 用户={username}")
                         with self.server.client_map_lock:
                             self.server.client_map[username] = ssock
-                        # 加载离线消息、好友请求和文件请求
+                        # 加载离线消息、好友请求和文件请求，并发送初始好友/群组列表
                         message_handler.load_offline_data(username, ssock)
+                        message_handler.send_initial_data(username, ssock)
                         # 处理后续消息
                         message_handler.process_messages(username, ssock)
                     else:
