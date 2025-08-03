@@ -141,9 +141,14 @@ class MessageHandler:
                     self.client_gui.chat_ui.append_chat("服务器", "解析好友列表失败")
                     logging.error("解析好友列表失败")
         elif msg_type == "recall":
-            sender = header.get("from", "未知用户")
-            message_id = header.get("message_id")
-            self.update_message_status_in_chat(message_id, "recalled", sender)
+                    sender = header.get("from", "未知用户")
+                    message_id = header.get("message_id")
+                    group_id = header.get("group_id")  # 新增：检查是否为群组消息
+                    if group_id:
+                        group_name = self.client_gui.group_list.get(group_id, f"群组 {group_id}")
+                        self.update_message_status_in_chat(message_id, "recalled", sender, group_name)
+                    else:
+                        self.update_message_status_in_chat(message_id, "recalled", sender)
         elif msg_type == "list_groups":
             try:
                 groups = json.loads(data.decode())
@@ -172,7 +177,7 @@ class MessageHandler:
                 logging.error(f"群组消息解码失败: 发送者={sender}, 群组ID={group_id}")
                 self.client_gui.chat_ui.append_chat(f"群组 {group_id}", f"消息解码失败")
 
-    def update_message_status_in_chat(self, message_id, new_status, sender=None):
+    def update_message_status_in_chat(self, message_id, new_status, sender=None, group_name=None):
         if message_id in self.client_gui.message_lines:
             friend, line_number = self.client_gui.message_lines[message_id]
             if friend not in self.client_gui.chat_windows:

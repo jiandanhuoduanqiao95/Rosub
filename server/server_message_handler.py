@@ -297,7 +297,7 @@ class MessageHandler:
                     logging.warning(f"撤回消息失败: 消息ID={message_id} 不存在")
                     continue
                 if message_info:
-                    sender, receiver, _, _, _, status, timestamp = message_info
+                    sender, receiver, msg_type, _, _, status, timestamp = message_info
                     if sender != username:
                         send_message(ssock, "error", "只能撤回自己的消息")
                         logging.warning(f"撤回消息失败: 用户 {username} 尝试撤回非自己的消息 {message_id}")
@@ -306,10 +306,13 @@ class MessageHandler:
                         message_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
                         current_time = datetime.utcnow()
                         time_diff = current_time - message_time
-                        logging.info(f"撤回消息时间检查: 消息ID={message_id}, 原始时间戳={timestamp}, 解析时间={message_time}, 当前时间={current_time}, 时间差={time_diff.total_seconds()}秒")
+                        logging.info(
+                            f"撤回消息时间检查: 消息ID={message_id}, 原始时间戳={timestamp}, 解析时间={message_time}, 当前时间={current_time}, 时间差={time_diff.total_seconds()}秒")
                         if time_diff > timedelta(minutes=2):
-                            send_message(ssock, "error", f"消息超过2分钟，无法撤回 (时间差: {time_diff.total_seconds()}秒)")
-                            logging.warning(f"撤回消息失败: 消息 {message_id} 超过2分钟, 时间差={time_diff.total_seconds()}秒")
+                            send_message(ssock, "error",
+                                         f"消息超过2分钟，无法撤回 (时间差: {time_diff.total_seconds()}秒)")
+                            logging.warning(
+                                f"撤回消息失败: 消息 {message_id} 超过2分钟, 时间差={time_diff.total_seconds()}秒")
                             continue
                     except ValueError as e:
                         send_message(ssock, "error", f"消息时间格式错误: {e}")
@@ -320,55 +323,40 @@ class MessageHandler:
                         logging.warning(f"撤回消息失败: 消息 {message_id} 已被撤回")
                         continue
                     if self.server.db.update_message_status(message_id, 'recalled'):
-                        with self.server.client_map_lock:
-                            recipient_socket = self.server.client_map.get(receiver)
-                        if recipient_socket:
-                            try:
-                                send_message(recipient_socket, "recall", "", extra_headers={"message_id": message_id, "from": username})
-                                logging.info(f"通知接收方: 消息ID={message_id}, 撤回者={username}")
-                            except Exception as e:
-                                logging.error(f"通知接收方失败: 消息ID={message_id}, 撤回者={username}, 错误={e}")
-                                with self.server.client_map_lock:
-                                    self.server.client_map.pop(receiver, None)
+                        if msg_type == "group_chat":
+                            # 获取群组ID（需要从消息的接收者或上下文推断）
+                            with self.server.db._get_connection() as conn:
+                                cursor = conn.cursor()
+                                cursor.execute('SELECT group_id FROM group_members WHERE username = ?', (receiver,))
+                                group_ids = [row[0] for row in cursor.fetchall()]
+
+                                # 假设消息只属于一个群组，找到包含 sender 和 receiver 的群组
+                                for group_id in group_ids:
+                                    if self.server.db.is_group_member(group_id, sender):
+                                        self.group_handler.notify_group_members(
+                                            group_id, "recall", "", from_user=username,
+                                            extra_headers={"message_id": message_id}
+                                        )
+                                        break
+                                else:
+                                    logging.warning(f"未找到包含 {sender} 和 {receiver} 的群组，消息ID={message_id}")
+                        else:
+                            with self.server.client_map_lock:
+                                recipient_socket = self.server.client_map.get(receiver)
+                            if recipient_socket:
+                                try:
+                                    send_message(recipient_socket, "recall", "",
+                                                 extra_headers={"message_id": message_id, "from": username})
+                                    logging.info(f"通知接收方: 消息ID={message_id}, 撤回者={username}")
+                                except Exception as e:
+                                    logging.error(f"通知接收方失败: 消息ID={message_id}, 撤回者={username}, 错误={e}")
+                                    with self.server.client_map_lock:
+                                        self.server.client_map.pop(receiver, None)
                         send_message(ssock, "chat", f"消息 {message_id} 已撤回")
                         logging.info(f"消息撤回成功：{username} 撤回了消息 {message_id}")
                     else:
                         send_message(ssock, "error", f"撤回消息 {message_id} 失败")
                         logging.error(f"撤回消息失败：{message_id}")
-                elif file_request:
-                    sender, receiver, filename, filesize, _ = file_request
-                    if sender != username:
-                        send_message(ssock, "error", "只能撤回自己的文件请求")
-                        logging.warning(f"撤回文件请求失败: 用户 {username} 尝试撤回非自己的文件请求 {message_id}")
-                        continue
-                    self.server.db.delete_file_request(message_id)
-                    with self.server.client_map_lock:
-                        recipient_socket = self.server.client_map.get(receiver)
-                    if recipient_socket:
-                        try:
-                            send_message(recipient_socket, "chat", f"文件请求 {filename} 已被 {username} 撤回",
-                                         extra_headers={"message_id": message_id})
-                            logging.info(f"通知接收方: 文件请求 {filename} 已被 {username} 撤回")
-                        except Exception as e:
-                            logging.error(f"通知接收方失败: 文件请求 {filename}, 消息ID={message_id}, 错误={e}")
-                            with self.server.client_map_lock:
-                                self.server.client_map.pop(receiver, None)
-                    send_message(ssock, "chat", f"文件请求 {filename} 已撤回")
-                    logging.info(f"文件请求撤回成功：{username} 撤回了文件请求 {message_id}")
-                elif group_file_request:
-                    group_id, sender, filename, filesize, _ = group_file_request
-                    if sender != username:
-                        send_message(ssock, "error", "只能撤回自己的文件请求")
-                        logging.warning(f"撤回群组文件请求失败: 用户 {username} 尝试撤回非自己的文件请求 {message_id}")
-                        continue
-                    self.server.db.delete_group_file_request(message_id)
-                    self.group_handler.notify_group_members(
-                        group_id, "chat", f"文件请求 {filename} 已被 {username} 撤回",
-                        from_user=username,
-                        extra_headers={"message_id": message_id}
-                    )
-                    send_message(ssock, "chat", f"群组文件请求 {filename} 已撤回")
-                    logging.info(f"群组文件请求撤回成功：{username} 撤回了群组文件请求 {message_id}")
 
             elif msg_type == "admin_command":
                 self.admin_handler.handle_admin_command(username, ssock, header, data)
