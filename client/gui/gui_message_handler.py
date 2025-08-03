@@ -141,14 +141,14 @@ class MessageHandler:
                     self.client_gui.chat_ui.append_chat("服务器", "解析好友列表失败")
                     logging.error("解析好友列表失败")
         elif msg_type == "recall":
-                    sender = header.get("from", "未知用户")
-                    message_id = header.get("message_id")
-                    group_id = header.get("group_id")  # 新增：检查是否为群组消息
-                    if group_id:
-                        group_name = self.client_gui.group_list.get(group_id, f"群组 {group_id}")
-                        self.update_message_status_in_chat(message_id, "recalled", sender, group_name)
-                    else:
-                        self.update_message_status_in_chat(message_id, "recalled", sender)
+            sender = header.get("from", "未知用户")
+            message_id = header.get("message_id")
+            group_id = header.get("group_id")
+            if group_id:
+                group_name = self.client_gui.group_list.get(group_id, f"群组 {group_id}")
+                self.update_message_status_in_chat(message_id, "recalled", sender, group_name)
+            else:
+                self.update_message_status_in_chat(message_id, "recalled", sender)
         elif msg_type == "list_groups":
             try:
                 groups = json.loads(data.decode())
@@ -160,6 +160,7 @@ class MessageHandler:
                     group_id = str(group["id"])
                     group_name = group["group_name"]
                     self.client_gui.chat_ui.user_list.insert("", "end", values=(f"群组 {group_id}", ""), iid=f"group_{group_id}")
+                self.client_gui.chat_ui.append_chat("服务器", "群组列表已更新")
             except json.JSONDecodeError:
                 self.client_gui.chat_ui.append_chat("服务器", "解析群组列表失败")
                 logging.error("解析群组列表失败")
@@ -176,6 +177,18 @@ class MessageHandler:
             except UnicodeDecodeError:
                 logging.error(f"群组消息解码失败: 发送者={sender}, 群组ID={group_id}")
                 self.client_gui.chat_ui.append_chat(f"群组 {group_id}", f"消息解码失败")
+        elif msg_type == "chat":
+            try:
+                msg = data.decode()
+                if header.get("from") == "服务器":
+                    self.client_gui.chat_ui.append_chat("服务器", msg)
+                    if "群组" in msg and ("创建成功" in msg or "已加入" in msg):
+                        # 触发刷新群组列表
+                        self.refresh_user_list()
+                        messagebox.showinfo("成功", msg)
+            except UnicodeDecodeError:
+                logging.error(f"消息解码失败: {header}")
+                self.client_gui.chat_ui.append_chat("服务器", "消息解码失败")
 
     def update_message_status_in_chat(self, message_id, new_status, sender=None, group_name=None):
         if message_id in self.client_gui.message_lines:
@@ -298,7 +311,7 @@ class MessageHandler:
             else:
                 send_message(self.client_gui.ssock, "group_file_response", "", extra_headers={"message_id": message_id, "response": "reject", "group_id": group_id, "to": sender})
                 self.client_gui.chat_ui.append_chat(f"群组 {group_id}", f"已拒绝来自 {sender} 的群组文件请求: {filename}")
-            self.client_gui.processed_group_file_requests.add(message_id)  # 确保处理后不再重复显示
+            self.client_gui.processed_group_file_requests.add(message_id)
         except Exception as e:
             self.client_gui.chat_ui.append_chat("服务器", f"响应群组文件请求失败: {str(e)}")
             logging.error(f"响应群组文件请求失败: {str(e)}")
