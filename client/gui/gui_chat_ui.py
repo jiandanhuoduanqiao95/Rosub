@@ -104,6 +104,7 @@ class ChatUI:
              if msg.get('tag', '').startswith("clickable_message_"):
                  message_id = msg['tag'][len("clickable_message_"):]
                  self.client_gui.message_lines[message_id] = (friend, line_number)
+                 logging.info(f"重新存储消息行: 消息ID={message_id}, 好友={friend}, 行号={line_number}")
          chat_window.config(state='disabled')
          chat_window.see('end')
          logging.info(f"切换到聊天窗口: {friend}")
@@ -137,7 +138,9 @@ class ChatUI:
          chat_text.insert('end', message + '\n', tag)
          if tag and tag.startswith("clickable_message_"):
              message_id = tag[len("clickable_message_"):]
+             # 存储消息ID，兼容群组消息的变体ID
              self.client_gui.message_lines[message_id] = (friend, line_number)
+             logging.info(f"存储消息行: 消息ID={message_id}, 好友={friend}, 行号={line_number}")
          self.client_gui.chat_histories[friend].append({"text": message + "\n", "tag": tag})
          chat_text.config(state='disabled')
          chat_text.see('end')

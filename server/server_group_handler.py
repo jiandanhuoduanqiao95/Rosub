@@ -61,10 +61,12 @@ class GroupHandler:
                 send_message(ssock, "error", f"加入群组失败: {str(e)}")
                 logging.error(f"用户 {username} 加入群组失败: {str(e)}")
 
-        elif msg_type == "group_chat":
+        if msg_type == "group_chat":
             try:
                 group_id = int(header.get("group_id"))
-                message_id = header.get("message_id", str(uuid.uuid4()))
+                original_message_id = header.get("message_id", str(uuid.uuid4()))
+
+                # 验证群组存在
                 with self.server.db._get_connection() as conn:
                     cursor = conn.cursor()
                     cursor.execute('SELECT 1 FROM groups WHERE id = ?', (group_id,))
@@ -72,21 +74,34 @@ class GroupHandler:
                         send_message(ssock, "error", f"群组 {group_id} 不存在")
                         logging.error(f"用户 {username} 尝试发送消息到不存在的群组: {group_id}")
                         return
-                    if not self.server.db.is_group_member(group_id, username):
-                        send_message(ssock, "error", "您不在此群组中")
-                        logging.warning(f"用户 {username} 尝试发送消息到未加入的群组: {group_id}")
-                        return
-                    message = data.decode("utf-8")
-                    members = self.server.db.get_group_members(group_id)
-                    for member in members:
-                        if member != username:
-                            self.server.db.save_offline_message(
-                                username, member, "group_chat", message.encode('utf-8'),
-                                message_id=message_id, filename=None
-                            )
-                    self.notify_group_members(group_id, "group_chat", message, from_user=username,
-                                             extra_headers={"message_id": message_id})
-                    logging.info(f"群组消息: 用户={username}, 群组ID={group_id}, 消息={message}, 消息ID={message_id}")
+
+                if not self.server.db.is_group_member(group_id, username):
+                    send_message(ssock, "error", "您不在此群组中")
+                    logging.warning(f"用户 {username} 尝试发送消息到未加入的群组: {group_id}")
+                    return
+
+                message = data.decode("utf-8")
+                members = self.server.db.get_group_members(group_id)
+                message_with_metadata = json.dumps({"text": message, "group_id": group_id})
+                for member in members:
+                    if member != username:
+                        member_message_id = f"{original_message_id}_{member}"
+                        self.server.db.save_offline_message(
+                            username, member, "group_chat",
+                            message_with_metadata.encode('utf-8'),
+                            message_id=member_message_id
+                        )
+                        logging.info(f"保存群组消息: 消息ID={member_message_id}, 群组ID={group_id}, 接收者={member}")
+
+                # 通知群组成员，使用原始消息ID
+                self.notify_group_members(
+                    group_id, "group_chat", message,
+                    from_user=username,
+                    extra_headers={"message_id": original_message_id}
+                )
+                send_message(ssock, "chat", f"群组消息已发送至群组 {group_id}")
+                logging.info(f"群组消息: 用户={username}, 群组ID={group_id}, 消息ID={original_message_id}")
+
             except ValueError:
                 send_message(ssock, "error", "无效的群组ID")
                 logging.error(f"用户 {username} 提供无效的群组ID: {header.get('group_id')}")
