@@ -87,7 +87,7 @@ class MessageHandler:
                     logging.error(
                         f"处理群组消息失败: {str(e)}, 发送者={sender}, 接收者={username}, 消息ID={message_id}")
 
-        # 加载待处理文件请求
+        # 加载私聊待处理文件请求
         file_requests = self.server.db.get_pending_file_requests(username)
         logging.info(f"用户 {username} 的待处理文件请求: {len(file_requests)} 条")
 
@@ -97,6 +97,30 @@ class MessageHandler:
             send_message(ssock, "file_request", "",
                          extra_headers={"from": sender, "filename": filename, "filesize": filesize,
                                         "message_id": message_id})
+
+        # 加载群组待处理文件请求
+        groups = self.server.db.get_user_groups(username)
+        logging.info(f"用户 {username} 所属群组: {len(groups)} 个")
+
+        for group_id, group_name in groups:
+            group_file_requests = self.server.db.get_pending_group_file_requests(group_id, username)
+            logging.info(f"群组 {group_id} ({group_name}) 的待处理文件请求: {len(group_file_requests)} 条")
+            for request in group_file_requests:
+                sender, filename, filesize, message_id = request
+                if sender != username:  # 排除发送者本人
+                    logging.info(
+                        f"发送群组待处理文件请求: 发送者={sender}, 文件名={filename}, 群组ID={group_id}, 消息ID={message_id}")
+                    send_message(ssock, "group_file_request", "",
+                                 extra_headers={
+                                     "from": sender,
+                                     "filename": filename,
+                                     "filesize": filesize,
+                                     "group_id": str(group_id),
+                                     "message_id": message_id
+                                 })
+                else:
+                    logging.info(
+                        f"跳过发送群组文件请求给发送者本人: 发送者={sender}, 文件名={filename}, 群组ID={group_id}, 消息ID={message_id}")
 
     def process_messages(self, username, ssock):
         """处理客户端发送的消息"""
