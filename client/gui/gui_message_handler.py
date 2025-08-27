@@ -140,26 +140,17 @@ class MessageHandler:
                 except json.JSONDecodeError:
                     self.client_gui.chat_ui.append_chat("服务器", "解析好友列表失败")
                     logging.error("解析好友列表失败")
-            elif msg_type == "recall":
-                    sender = header.get("from", "未知用户")
-                    message_id = header.get("message_id")
-                    group_id = header.get("group_id")
-
-                    if group_id:
-                        group_name = self.client_gui.group_list.get(group_id, f"群组 {group_id}")
-                        chat_window_name = f"群组 {group_id}"
-                        found = False
-                        for msg_id in list(self.client_gui.message_lines.keys()):
-                            if msg_id == message_id or msg_id.startswith(f"{message_id}_") or message_id.startswith(
-                                    f"{msg_id}_"):
-                                self.update_message_status_in_chat(msg_id, "recalled", sender)
-                                found = True
-                                break
-                        if not found:
-                            logging.warning(f"未找到要撤回的群组消息: 群组={group_name}, 消息ID={message_id}")
-                    else:
-                        self.update_message_status_in_chat(message_id, "recalled", sender)
-
+        elif msg_type == "recall":
+            sender = header.get("from", "未知用户")
+            message_id = header.get("message_id")
+            group_id = header.get("group_id")
+            if group_id:
+                group_name = self.client_gui.group_list.get(group_id, f"群组 {group_id}")
+                chat_window_name = f"群组 {group_id}"
+                # Update all variant message IDs for group messages
+                self.update_message_status_in_chat(message_id, "recalled", sender, chat_window_name)
+            else:
+                self.update_message_status_in_chat(message_id, "recalled", sender)
         elif msg_type == "list_groups":
             try:
                 groups = json.loads(data.decode())
@@ -179,24 +170,16 @@ class MessageHandler:
             sender = header.get("from", "未知用户")
             group_id = header.get("group_id")
             group_name = self.client_gui.group_list.get(group_id, f"群组 {group_id}")
-
-            # 仅当不是历史消息且发送者是自己时，才跳过显示
             if sender == self.client_gui.username and "history" not in header:
                 logging.info(f"跳过显示自己刚发送的群组消息: 消息ID={message_id}")
                 return
-
             try:
                 msg = data.decode()
-                # 添加历史标记处理
                 tag = "[历史]" if "history" in header else ""
-
-                # 确保群组消息显示在正确的群组聊天窗口
                 chat_window_name = f"群组 {group_id}"
                 self.client_gui.chat_ui.append_chat(chat_window_name,
                                                     f"{tag}{sender}: {msg}",
                                                     tag=f"clickable_message_{message_id}")
-
-                # 如果是历史消息且当前没有选择聊天窗口，不做任何操作
             except UnicodeDecodeError:
                 logging.error(f"群组消息解码失败: 发送者={sender}, 群组ID={group_id}")
                 self.client_gui.chat_ui.append_chat(f"群组 {group_id}", f"消息解码失败")
@@ -206,7 +189,6 @@ class MessageHandler:
                 if header.get("from") == "服务器":
                     self.client_gui.chat_ui.append_chat("服务器", msg)
                     if "群组" in msg and ("创建成功" in msg or "已加入" in msg):
-                        # 触发刷新群组列表
                         self.refresh_user_list()
                         messagebox.showinfo("成功", msg)
             except UnicodeDecodeError:
@@ -214,60 +196,71 @@ class MessageHandler:
                 self.client_gui.chat_ui.append_chat("服务器", "消息解码失败")
 
     def update_message_status_in_chat(self, message_id, new_status, sender=None, group_name=None):
-        # 尝试查找原始消息ID或其变体
-        target_message_id = None
+        # Find all variant message IDs (original and suffixed)
+        target_message_ids = []
         for msg_id in list(self.client_gui.message_lines.keys()):
             if msg_id == message_id or msg_id.startswith(f"{message_id}_") or message_id.startswith(f"{msg_id}_"):
-                target_message_id = msg_id
-                break
+                target_message_ids.append(msg_id)
 
-        if not target_message_id or target_message_id not in self.client_gui.message_lines:
+        if not target_message_ids:
             logging.warning(f"更新消息状态失败: 消息ID {message_id} 不在消息行中")
             return
 
-        friend, line_number = self.client_gui.message_lines[target_message_id]
-        if friend not in self.client_gui.chat_histories:
-            logging.warning(f"更新消息状态失败: 历史记录 {friend} 不存在")
-            return
-
-        # 更新历史记录
         updated = False
-        for msg in self.client_gui.chat_histories[friend]:
-            if msg.get('tag', '') == f"clickable_message_{target_message_id}":
-                current_text = msg['text'].rstrip('\n')
+        for target_message_id in target_message_ids:
+            if target_message_id not in self.client_gui.message_lines:
+                logging.warning(f"更新消息状态失败: 消息ID {target_message_id} 不在消息行中")
+                continue
+
+            friend, line_number = self.client_gui.message_lines[target_message_id]
+            if friend not in self.client_gui.chat_histories:
+                logging.warning(f"更新消息状态失败: 历史记录 {friend} 不存在")
+                continue
+
+            # Update chat history
+            for msg in self.client_gui.chat_histories[friend]:
+                if msg.get('tag', '') == f"clickable_message_{target_message_id}":
+                    current_text = msg['text'].rstrip('\n')
+                    if new_status == "recalled":
+                        new_content = f"{sender or self.client_gui.username}: [消息已撤回] ({target_message_id})"
+                        msg['text'] = new_content + "\n"
+                    else:
+                        updated_text = current_text.rsplit("[", 1)[0].rstrip() + f"[{new_status}] ({target_message_id})"
+                        msg['text'] = updated_text + "\n"
+                    updated = True
+                    break
+
+            if not updated:
+                logging.warning(f"更新历史记录失败: 未找到消息ID {target_message_id} 在 {friend} 的历史中")
+                continue
+
+            logging.info(f"历史记录更新: 消息ID={target_message_id}, 新状态={new_status} 在 {friend}")
+
+            # Update current chat window
+            if friend == self.client_gui.current_friend and friend in self.client_gui.chat_windows:
+                chat_text = self.client_gui.chat_windows[friend]
+                chat_text.config(state='normal')
                 if new_status == "recalled":
                     new_content = f"{sender or self.client_gui.username}: [消息已撤回] ({target_message_id})"
-                    msg['text'] = new_content + "\n"
+                    chat_text.delete(f"{line_number}.0", f"{line_number + 1}.0")
+                    chat_text.insert(f"{line_number}.0", new_content + "\n", f"clickable_message_{target_message_id}")
                 else:
+                    start_idx = f"{line_number}.0"
+                    end_idx = chat_text.index(f"{start_idx} lineend")
+                    current_text = chat_text.get(start_idx, end_idx)
                     updated_text = current_text.rsplit("[", 1)[0].rstrip() + f"[{new_status}] ({target_message_id})"
-                    msg['text'] = updated_text + "\n"
-                updated = True
-                break
+                    chat_text.delete(start_idx, end_idx)
+                    chat_text.insert(start_idx, updated_text + "\n")
+                chat_text.config(state='disabled')
+                chat_text.see('end')
+                logging.info(f"当前聊天窗口更新: 消息ID={target_message_id}, 新状态={new_status}")
 
-        if not updated:
-            logging.warning(f"更新历史记录失败: 未找到消息ID {target_message_id} 在 {friend} 的历史中")
-            return
-
-        logging.info(f"历史记录更新: 消息ID={target_message_id}, 新状态={new_status} 在 {friend}")
-
-        # 更新当前聊天窗口
-        if friend == self.client_gui.current_friend and friend in self.client_gui.chat_windows:
-            chat_text = self.client_gui.chat_windows[friend]
-            chat_text.config(state='normal')
+        if updated:
+            # Clean up message lines for recalled messages
             if new_status == "recalled":
-                new_content = f"{sender or self.client_gui.username}: [消息已撤回] ({target_message_id})"
-                chat_text.delete(f"{line_number}.0", f"{line_number + 1}.0")
-                chat_text.insert(f"{line_number}.0", new_content + "\n", f"clickable_message_{target_message_id}")
-            else:
-                start_idx = f"{line_number}.0"
-                end_idx = chat_text.index(f"{start_idx} lineend")
-                current_text = chat_text.get(start_idx, end_idx)
-                updated_text = current_text.rsplit("[", 1)[0].rstrip() + f"[{new_status}] ({target_message_id})"
-                chat_text.delete(start_idx, end_idx)
-                chat_text.insert(start_idx, updated_text + "\n")
-            chat_text.config(state='disabled')
-            chat_text.see('end')
-            logging.info(f"当前聊天窗口更新: 消息ID={target_message_id}, 新状态={new_status}")
+                for target_message_id in target_message_ids:
+                    self.client_gui.message_status.pop(target_message_id, None)
+                    self.client_gui.message_lines.pop(target_message_id, None)
 
     def on_chat_text_click(self, event):
         if not self.client_gui.current_friend or self.client_gui.current_friend not in self.client_gui.chat_windows:
