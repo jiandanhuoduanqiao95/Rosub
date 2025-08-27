@@ -27,6 +27,8 @@ class MessageHandler:
         logging.info(f"发送初始群组列表给用户: {username}, 群组数={len(groups)}")
 
     def load_offline_data(self, username, ssock):
+        """加载用户的离线消息和文件请求"""
+        # 加载离线消息
         messages = self.server.db.get_offline_messages(username)
         logging.info(f"用户 {username} 的离线消息: {len(messages)} 条")
 
@@ -73,7 +75,6 @@ class MessageHandler:
                                          "group_id": str(group_id),
                                          "history": "true",
                                          "message_id": message_id.split('_')[0] if '_' in message_id else message_id,
-                                         # 还原原始消息ID
                                          "status": status
                                      })
                         logging.info(f"发送离线群聊消息: 发送者={sender}, 群组ID={group_id}, 消息ID={message_id}")
@@ -85,6 +86,17 @@ class MessageHandler:
                 except Exception as e:
                     logging.error(
                         f"处理群组消息失败: {str(e)}, 发送者={sender}, 接收者={username}, 消息ID={message_id}")
+
+        # 加载待处理文件请求
+        file_requests = self.server.db.get_pending_file_requests(username)
+        logging.info(f"用户 {username} 的待处理文件请求: {len(file_requests)} 条")
+
+        for request in file_requests:
+            sender, filename, filesize, message_id = request
+            logging.info(f"发送待处理文件请求: 发送者={sender}, 文件名={filename}, 消息ID={message_id}")
+            send_message(ssock, "file_request", "",
+                         extra_headers={"from": sender, "filename": filename, "filesize": filesize,
+                                        "message_id": message_id})
 
     def process_messages(self, username, ssock):
         """处理客户端发送的消息"""

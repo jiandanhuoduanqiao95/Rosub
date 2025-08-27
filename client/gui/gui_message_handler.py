@@ -9,6 +9,7 @@ import json
 import uuid
 import logging
 
+
 class MessageHandler:
     def __init__(self, client_gui):
         self.client_gui = client_gui
@@ -41,8 +42,9 @@ class MessageHandler:
             sender = header.get("from", "未知用户")
             filename = header.get("filename", "unknown_file")
             filesize = header.get("filesize", "未知大小")
-            self.client_gui.chat_ui.append_chat("服务器", f"收到文件传输请求: {sender} 希望发送文件 {filename} ({filesize} bytes)")
-            threading.Thread(target=self.handle_file_request, args=(sender, filename, filesize, message_id), daemon=True).start()
+            self.client_gui.chat_ui.append_chat("服务器",
+                                                f"收到文件传输请求: {sender} 希望发送文件 {filename} ({filesize} bytes)")
+            self.client_gui.root.after(0, self.handle_file_request, sender, filename, filesize, message_id)
         elif msg_type == "group_file_request":
             sender = header.get("from", "未知用户")
             filename = header.get("filename", "unknown_file")
@@ -53,8 +55,11 @@ class MessageHandler:
                 logging.info(f"跳过已处理的群组文件请求: 消息ID={message_id}")
                 return
             self.client_gui.processed_group_file_requests.add(message_id)
-            self.client_gui.chat_ui.append_chat(f"群组 {group_id}", f"收到群组文件传输请求: {sender} 希望发送文件 {filename} ({filesize} bytes)", tag=f"clickable_message_{message_id}")
-            threading.Thread(target=self.handle_group_file_request, args=(sender, filename, filesize, message_id, group_id), daemon=True).start()
+            self.client_gui.chat_ui.append_chat(f"群组 {group_id}",
+                                                f"收到群组文件传输请求: {sender} 希望发送文件 {filename} ({filesize} bytes)",
+                                                tag=f"clickable_message_{message_id}")
+            self.client_gui.root.after(0, self.handle_group_file_request, sender, filename, filesize, message_id,
+                                       group_id)
         elif msg_type in ("chat", "file"):
             if "history" in header and message_id in self.client_gui.message_lines:
                 logging.info(f"跳过重复历史消息: 消息ID={message_id}")
@@ -73,10 +78,12 @@ class MessageHandler:
                             self.client_gui.root.after(0, lambda: messagebox.showinfo("系统公告", f"收到新公告: {msg}"))
                     else:
                         self.client_gui.message_status[message_id] = status
-                        self.client_gui.chat_ui.append_chat(sender, f"{tag}{sender}: {msg} [{status}] ({message_id})", tag=f"clickable_message_{message_id}")
+                        self.client_gui.chat_ui.append_chat(sender, f"{tag}{sender}: {msg} [{status}] ({message_id})",
+                                                            tag=f"clickable_message_{message_id}")
                         if message_id and "history" not in header:
                             try:
-                                send_message(self.client_gui.ssock, "receipt", "", extra_headers={"message_id": message_id, "to": sender})
+                                send_message(self.client_gui.ssock, "receipt", "",
+                                             extra_headers={"message_id": message_id, "to": sender})
                                 logging.info(f"发送回执: 消息ID={message_id}, 目标={sender}")
                             except Exception as e:
                                 self.client_gui.chat_ui.append_chat(sender, f"发送回执失败: {message_id} ({str(e)})")
@@ -91,10 +98,13 @@ class MessageHandler:
                 with open(file_path, 'wb') as f:
                     f.write(data)
                 self.client_gui.message_status[message_id] = status
-                self.client_gui.chat_ui.append_chat(sender, f"{tag}{sender}: 收到文件: {filename}，已保存至 {file_path} [{status}] ({message_id})", tag=f"clickable_message_{message_id}")
+                self.client_gui.chat_ui.append_chat(sender,
+                                                    f"{tag}{sender}: 收到文件: {filename}，已保存至 {file_path} [{status}] ({message_id})",
+                                                    tag=f"clickable_message_{message_id}")
                 if message_id and "history" not in header:
                     try:
-                        send_message(self.client_gui.ssock, "receipt", "", extra_headers={"message_id": message_id, "to": sender})
+                        send_message(self.client_gui.ssock, "receipt", "",
+                                     extra_headers={"message_id": message_id, "to": sender})
                         logging.info(f"发送回执: 消息ID={message_id}, 目标={sender}")
                     except Exception as e:
                         self.client_gui.chat_ui.append_chat(sender, f"发送回执失败: {message_id} ({str(e)})")
@@ -147,7 +157,6 @@ class MessageHandler:
             if group_id:
                 group_name = self.client_gui.group_list.get(group_id, f"群组 {group_id}")
                 chat_window_name = f"群组 {group_id}"
-                # Update all variant message IDs for group messages
                 self.update_message_status_in_chat(message_id, "recalled", sender, chat_window_name)
             else:
                 self.update_message_status_in_chat(message_id, "recalled", sender)
@@ -161,7 +170,8 @@ class MessageHandler:
                 for group in groups:
                     group_id = str(group["id"])
                     group_name = group["group_name"]
-                    self.client_gui.chat_ui.user_list.insert("", "end", values=(f"群组 {group_id}", ""), iid=f"group_{group_id}")
+                    self.client_gui.chat_ui.user_list.insert("", "end", values=(f"群组 {group_id}", ""),
+                                                             iid=f"group_{group_id}")
                 self.client_gui.chat_ui.append_chat("服务器", "群组列表已更新")
             except json.JSONDecodeError:
                 self.client_gui.chat_ui.append_chat("服务器", "解析群组列表失败")
@@ -196,7 +206,6 @@ class MessageHandler:
                 self.client_gui.chat_ui.append_chat("服务器", "消息解码失败")
 
     def update_message_status_in_chat(self, message_id, new_status, sender=None, group_name=None):
-        # Find all variant message IDs (original and suffixed)
         target_message_ids = []
         for msg_id in list(self.client_gui.message_lines.keys()):
             if msg_id == message_id or msg_id.startswith(f"{message_id}_") or message_id.startswith(f"{msg_id}_"):
@@ -217,7 +226,6 @@ class MessageHandler:
                 logging.warning(f"更新消息状态失败: 历史记录 {friend} 不存在")
                 continue
 
-            # Update chat history
             for msg in self.client_gui.chat_histories[friend]:
                 if msg.get('tag', '') == f"clickable_message_{target_message_id}":
                     current_text = msg['text'].rstrip('\n')
@@ -236,7 +244,6 @@ class MessageHandler:
 
             logging.info(f"历史记录更新: 消息ID={target_message_id}, 新状态={new_status} 在 {friend}")
 
-            # Update current chat window
             if friend == self.client_gui.current_friend and friend in self.client_gui.chat_windows:
                 chat_text = self.client_gui.chat_windows[friend]
                 chat_text.config(state='normal')
@@ -256,7 +263,6 @@ class MessageHandler:
                 logging.info(f"当前聊天窗口更新: 消息ID={target_message_id}, 新状态={new_status}")
 
         if updated:
-            # Clean up message lines for recalled messages
             if new_status == "recalled":
                 for target_message_id in target_message_ids:
                     self.client_gui.message_status.pop(target_message_id, None)
@@ -294,12 +300,18 @@ class MessageHandler:
         try:
             if self.client_gui.current_friend.startswith("群组 "):
                 group_id = self.client_gui.current_friend.split(" ")[1]
-                send_message(self.client_gui.ssock, "group_chat", msg, extra_headers={"group_id": group_id, "message_id": message_id})
-                self.client_gui.chat_ui.append_chat(self.client_gui.current_friend, f"{self.client_gui.username}: {msg}", tag=f"clickable_message_{message_id}")
+                send_message(self.client_gui.ssock, "group_chat", msg,
+                             extra_headers={"group_id": group_id, "message_id": message_id})
+                self.client_gui.chat_ui.append_chat(self.client_gui.current_friend,
+                                                    f"{self.client_gui.username}: {msg}",
+                                                    tag=f"clickable_message_{message_id}")
                 self.client_gui.message_status[message_id] = "sent"
             else:
-                send_message(self.client_gui.ssock, "chat", msg, extra_headers={"to": self.client_gui.current_friend, "message_id": message_id})
-                self.client_gui.chat_ui.append_chat(self.client_gui.current_friend, f"{self.client_gui.username}: {msg} [sent] ({message_id})", tag=f"clickable_message_{message_id}")
+                send_message(self.client_gui.ssock, "chat", msg,
+                             extra_headers={"to": self.client_gui.current_friend, "message_id": message_id})
+                self.client_gui.chat_ui.append_chat(self.client_gui.current_friend,
+                                                    f"{self.client_gui.username}: {msg} [sent] ({message_id})",
+                                                    tag=f"clickable_message_{message_id}")
                 self.client_gui.message_status[message_id] = "sent"
             self.client_gui.chat_ui.msg_entry.delete(0, 'end')
         except Exception as e:
@@ -322,43 +334,64 @@ class MessageHandler:
             if self.client_gui.current_friend.startswith("群组 "):
                 group_id = self.client_gui.current_friend.split(" ")[1]
                 send_message(self.client_gui.ssock, "file", file_data,
-                             extra_headers={"to": f"群组 {group_id}", "filename": filename, "filesize": filesize, "message_id": message_id})
+                             extra_headers={"to": f"群组 {group_id}", "filename": filename, "filesize": filesize,
+                                            "message_id": message_id})
             else:
                 send_message(self.client_gui.ssock, "file", file_data,
-                             extra_headers={"to": self.client_gui.current_friend, "filename": filename, "filesize": filesize, "message_id": message_id})
-            self.client_gui.chat_ui.append_chat(self.client_gui.current_friend, f"已发送文件: {filename} ({filesize} bytes) [sent] ({message_id})", tag=f"clickable_message_{message_id}")
+                             extra_headers={"to": self.client_gui.current_friend, "filename": filename,
+                                            "filesize": filesize, "message_id": message_id})
+            self.client_gui.chat_ui.append_chat(self.client_gui.current_friend,
+                                                f"已发送文件: {filename} ({filesize} bytes) [sent] ({message_id})",
+                                                tag=f"clickable_message_{message_id}")
             self.client_gui.message_status[message_id] = "sent"
         except Exception as e:
             self.client_gui.chat_ui.append_chat("服务器", f"发送文件失败: {str(e)}")
             logging.error(f"发送文件失败: {str(e)}")
 
     def handle_file_request(self, sender, filename, filesize, message_id):
-        response = messagebox.askyesno("文件传输请求", f"{sender} 希望发送文件 {filename} ({filesize} bytes)，是否接受？")
-        try:
-            if response:
-                send_message(self.client_gui.ssock, "file_response", "", extra_headers={"message_id": message_id, "response": "accept", "to": sender})
-                self.client_gui.chat_ui.append_chat("服务器", f"已接受来自 {sender} 的文件请求: {filename}")
-            else:
-                send_message(self.client_gui.ssock, "file_response", "", extra_headers={"message_id": message_id, "response": "reject", "to": sender})
-                self.client_gui.chat_ui.append_chat("服务器", f"已拒绝来自 {sender} 的文件请求: {filename}")
-        except Exception as e:
-            self.client_gui.chat_ui.append_chat("服务器", f"响应文件请求失败: {str(e)}")
-            logging.error(f"响应文件请求失败: {str(e)}")
+        def show_file_request_dialog():
+            response = messagebox.askyesno("文件传输请求",
+                                           f"{sender} 希望发送文件 {filename} ({filesize} bytes)，是否接受？")
+            try:
+                if response:
+                    send_message(self.client_gui.ssock, "file_response", "",
+                                 extra_headers={"message_id": message_id, "response": "accept", "to": sender})
+                    self.client_gui.chat_ui.append_chat("服务器", f"已接受来自 {sender} 的文件请求: {filename}")
+                else:
+                    send_message(self.client_gui.ssock, "file_response", "",
+                                 extra_headers={"message_id": message_id, "response": "reject", "to": sender})
+                    self.client_gui.chat_ui.append_chat("服务器", f"已拒绝来自 {sender} 的文件请求: {filename}")
+            except Exception as e:
+                self.client_gui.chat_ui.append_chat("服务器", f"响应文件请求失败: {str(e)}")
+                logging.error(f"响应文件请求失败: {str(e)}")
+
+        self.client_gui.root.after(0, show_file_request_dialog)
 
     def handle_group_file_request(self, sender, filename, filesize, message_id, group_id):
         group_name = self.client_gui.group_list.get(group_id, f"群组 {group_id}")
-        response = messagebox.askyesno("群组文件传输请求", f"{sender} 在群组 {group_name} 发送文件 {filename} ({filesize} bytes)，是否接受？")
-        try:
-            if response:
-                send_message(self.client_gui.ssock, "group_file_response", "", extra_headers={"message_id": message_id, "response": "accept", "group_id": group_id, "to": sender})
-                self.client_gui.chat_ui.append_chat(f"群组 {group_id}", f"已接受来自 {sender} 的群组文件请求: {filename}")
-            else:
-                send_message(self.client_gui.ssock, "group_file_response", "", extra_headers={"message_id": message_id, "response": "reject", "group_id": group_id, "to": sender})
-                self.client_gui.chat_ui.append_chat(f"群组 {group_id}", f"已拒绝来自 {sender} 的群组文件请求: {filename}")
-            self.client_gui.processed_group_file_requests.add(message_id)
-        except Exception as e:
-            self.client_gui.chat_ui.append_chat("服务器", f"响应群组文件请求失败: {str(e)}")
-            logging.error(f"响应群组文件请求失败: {str(e)}")
+
+        def show_group_file_request_dialog():
+            response = messagebox.askyesno("群组文件传输请求",
+                                           f"{sender} 在群组 {group_name} 发送文件 {filename} ({filesize} bytes)，是否接受？")
+            try:
+                if response:
+                    send_message(self.client_gui.ssock, "group_file_response", "",
+                                 extra_headers={"message_id": message_id, "response": "accept", "group_id": group_id,
+                                                "to": sender})
+                    self.client_gui.chat_ui.append_chat(f"群组 {group_id}",
+                                                        f"已接受来自 {sender} 的群组文件请求: {filename}")
+                else:
+                    send_message(self.client_gui.ssock, "group_file_response", "",
+                                 extra_headers={"message_id": message_id, "response": "reject", "group_id": group_id,
+                                                "to": sender})
+                    self.client_gui.chat_ui.append_chat(f"群组 {group_id}",
+                                                        f"已拒绝来自 {sender} 的群组文件请求: {filename}")
+                self.client_gui.processed_group_file_requests.add(message_id)
+            except Exception as e:
+                self.client_gui.chat_ui.append_chat("服务器", f"响应群组文件请求失败: {str(e)}")
+                logging.error(f"响应群组文件请求失败: {str(e)}")
+
+        self.client_gui.root.after(0, show_group_file_request_dialog)
 
     def refresh_user_list(self):
         try:
@@ -391,8 +424,10 @@ class MessageHandler:
             frame = ttk.Frame(win)
             frame.pack(fill='x', padx=5, pady=2)
             ttk.Label(frame, text=f"来自 {requester} 的好友请求").pack(side='left')
-            ttk.Button(frame, text="接受", command=lambda r=requester: self.accept_friend(r, win)).pack(side='left', padx=5)
-            ttk.Button(frame, text="拒绝", command=lambda r=requester: self.reject_friend(r, win)).pack(side='left', padx=5)
+            ttk.Button(frame, text="接受", command=lambda r=requester: self.accept_friend(r, win)).pack(side='left',
+                                                                                                        padx=5)
+            ttk.Button(frame, text="拒绝", command=lambda r=requester: self.reject_friend(r, win)).pack(side='left',
+                                                                                                        padx=5)
 
     def accept_friend(self, requester, win):
         try:
