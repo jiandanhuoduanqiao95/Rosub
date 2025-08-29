@@ -42,24 +42,40 @@ class MessageHandler:
             sender = header.get("from", "未知用户")
             filename = header.get("filename", "unknown_file")
             filesize = header.get("filesize", "未知大小")
+            message_id = header.get("message_id", "")
             self.client_gui.chat_ui.append_chat("服务器",
                                                 f"收到文件传输请求: {sender} 希望发送文件 {filename} ({filesize} bytes)")
-            self.client_gui.root.after(0, self.handle_file_request, sender, filename, filesize, message_id)
+            self.client_gui.pending_file_requests.append({
+                'type': 'private',
+                'sender': sender,
+                'filename': filename,
+                'filesize': filesize,
+                'message_id': message_id
+            })
+            self.client_gui.root.after(0, self.process_file_queue)
         elif msg_type == "group_file_request":
             sender = header.get("from", "未知用户")
             filename = header.get("filename", "unknown_file")
             filesize = header.get("filesize", "未知大小")
             group_id = header.get("group_id")
+            message_id = header.get("message_id", "")
             group_name = self.client_gui.group_list.get(group_id, f"群组 {group_id}")
             if message_id in self.client_gui.processed_group_file_requests:
                 logging.info(f"跳过已处理的群组文件请求: 消息ID={message_id}")
                 return
-            self.client_gui.processed_group_file_requests.add(message_id)
+            # 移除此处的 add 操作，仅在响应后添加
             self.client_gui.chat_ui.append_chat(f"群组 {group_id}",
                                                 f"收到群组文件传输请求: {sender} 希望发送文件 {filename} ({filesize} bytes)",
                                                 tag=f"clickable_message_{message_id}")
-            self.client_gui.root.after(0, self.handle_group_file_request, sender, filename, filesize, message_id,
-                                       group_id)
+            self.client_gui.pending_file_requests.append({
+                'type': 'group',
+                'sender': sender,
+                'filename': filename,
+                'filesize': filesize,
+                'message_id': message_id,
+                'group_id': group_id
+            })
+            self.client_gui.root.after(0, self.process_file_queue)
         elif msg_type in ("chat", "file"):
             if "history" in header and message_id in self.client_gui.message_lines:
                 logging.info(f"跳过重复历史消息: 消息ID={message_id}")
@@ -458,6 +474,71 @@ class MessageHandler:
             self.client_gui.chat_ui.append_chat("服务器", f"撤回消息失败: {str(e)}")
             logging.error(f"撤回消息失败: {str(e)}")
 
+    def process_file_queue(self):
+        if self.client_gui.showing_file_dialog or not self.client_gui.pending_file_requests:
+            return
+        self.client_gui.showing_file_dialog = True
+        request = self.client_gui.pending_file_requests.pop(0)
+        if request['type'] == 'private':
+            sender = request['sender']
+            filename = request['filename']
+            filesize = request['filesize']
+            message_id = request['message_id']
+
+            def show_private_dialog():
+                response = messagebox.askyesno("文件传输请求",
+                                               f"{sender} 希望发送文件 {filename} ({filesize} bytes)，是否接受？")
+                try:
+                    if response:
+                        send_message(self.client_gui.ssock, "file_response", "",
+                                     extra_headers={"message_id": message_id, "response": "accept", "to": sender})
+                        self.client_gui.chat_ui.append_chat("服务器", f"已接受来自 {sender} 的文件请求: {filename}")
+                    else:
+                        send_message(self.client_gui.ssock, "file_response", "",
+                                     extra_headers={"message_id": message_id, "response": "reject", "to": sender})
+                        self.client_gui.chat_ui.append_chat("服务器", f"已拒绝来自 {sender} 的文件请求: {filename}")
+                except Exception as e:
+                    self.client_gui.chat_ui.append_chat("服务器", f"响应文件请求失败: {str(e)}")
+                    logging.error(f"响应文件请求失败: {str(e)}")
+                finally:
+                    self.client_gui.showing_file_dialog = False
+                    self.client_gui.root.after(0, self.process_file_queue)
+
+            self.client_gui.root.after(0, show_private_dialog)
+        elif request['type'] == 'group':
+            sender = request['sender']
+            filename = request['filename']
+            filesize = request['filesize']
+            message_id = request['message_id']
+            group_id = request['group_id']
+            group_name = self.client_gui.group_list.get(group_id, f"群组 {group_id}")
+
+            def show_group_dialog():
+                response = messagebox.askyesno("群组文件传输请求",
+                                               f"{sender} 在群组 {group_name} 发送文件 {filename} ({filesize} bytes)，是否接受？")
+                try:
+                    if response:
+                        send_message(self.client_gui.ssock, "group_file_response", "",
+                                     extra_headers={"message_id": message_id, "response": "accept",
+                                                    "group_id": group_id, "to": sender})
+                        self.client_gui.chat_ui.append_chat(f"群组 {group_id}",
+                                                            f"已接受来自 {sender} 的群组文件请求: {filename}")
+                    else:
+                        send_message(self.client_gui.ssock, "group_file_response", "",
+                                     extra_headers={"message_id": message_id, "response": "reject",
+                                                    "group_id": group_id, "to": sender})
+                        self.client_gui.chat_ui.append_chat(f"群组 {group_id}",
+                                                            f"已拒绝来自 {sender} 的群组文件请求: {filename}")
+                    self.client_gui.processed_group_file_requests.add(message_id)
+                except Exception as e:
+                    self.client_gui.chat_ui.append_chat("服务器", f"响应群组文件请求失败: {str(e)}")
+                    logging.error(f"响应群组文件请求失败: {str(e)}")
+                finally:
+                    self.client_gui.showing_file_dialog = False
+                    self.client_gui.root.after(0, self.process_file_queue)
+
+            self.client_gui.root.after(0, show_group_dialog)
+
     def logout(self):
         if self.client_gui.ssock:
             try:
@@ -477,4 +558,6 @@ class MessageHandler:
         self.client_gui.group_list.clear()
         self.client_gui.processed_group_file_requests.clear()
         self.client_gui.chat_ui.user_list.delete(*self.client_gui.chat_ui.user_list.get_children())
+        self.client_gui.pending_file_requests.clear()
+        self.client_gui.showing_file_dialog = False
         self.client_gui.show_login()

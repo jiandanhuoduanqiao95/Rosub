@@ -23,6 +23,8 @@ class ClientGUI:
         self.current_friend = None
         self.group_list = {}  # group_id -> group_name
         self.processed_group_file_requests = set()  # Track processed group file requests
+        self.pending_file_requests = []
+        self.showing_file_dialog = False
 
         # Initialize handler and UI components in correct order
         self.message_handler = MessageHandler(self)
