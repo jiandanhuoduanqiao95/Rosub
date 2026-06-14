@@ -377,18 +377,15 @@ class TestFriendSystem:
 
     def test_add_friend_request_self(self, db):
         """
-        【测试34】给自己发好友请求（理论上不应该发生）
+        【测试34】给自己发好友请求应被拒绝
         
-        注意：当前代码没有阻止这种情况，只是检查用户是否存在。
-        这是一个潜在的 bug——但测试记录当前行为。
+        修复 BUG-02：现在 add_friend_request 会检查 requester == target，
+        如果相同则返回 False。
         """
         pw = bcrypt.hashpw("pw".encode(), bcrypt.gensalt())
         db.add_user("alice", pw)
-        # 当前允许自己加自己
         result = db.add_friend_request("alice", "alice")
-        # 这里根据实际行为：可能成功（两人相同但用户存在）
-        # 不验证特定结果，只验证不崩溃
-        assert result in (True, False)
+        assert result is False
 
     def test_accept_friend_request(self, db):
         """
@@ -461,6 +458,19 @@ class TestFriendSystem:
         # 接受后才是好友
         db.accept_friend_request("alice", "bob")
         assert db.is_friend("alice", "bob") is True
+
+    def test_add_friend_request_self_blocked(self, db):
+        """
+        【BUG-02 验证】自己不能添加自己为好友
+        
+        验证 add_friend_request("alice", "alice") 返回 False。
+        """
+        pw = bcrypt.hashpw("pw".encode(), bcrypt.gensalt())
+        db.add_user("alice", pw)
+        result = db.add_friend_request("alice", "alice")
+        assert result is False
+        # 也没有待处理请求
+        assert db.get_pending_friend_requests("alice") == []
 
 
 # ============================================================
@@ -647,10 +657,8 @@ class TestFileRequests:
         db.save_group_file_response("grp-file-1", gid, "bob", "accept")
         db.save_group_file_response("grp-file-1", gid, "charlie", "reject")
 
-        # 注意：all_members_responded 检查的是所有群成员（包括发送者 alice）
-        # 是否都已响应。由于发送者不会自己响应，所以永远返回 False。
-        # 这是当前代码的一个设计缺陷，记录下来。
-        assert db.all_members_responded("grp-file-1", gid) is False
+        # all_members_responded 应排除发送者 alice，因此 bob+charlie 都响应后返回 True
+        assert db.all_members_responded("grp-file-1", gid) is True
 
     def test_all_members_responded_false(self, db):
         """
@@ -670,6 +678,45 @@ class TestFileRequests:
 
         # charlie 还没响应，所以不是全部
         assert db.all_members_responded("gfr-1", gid) is False
+
+    def test_all_members_responded_excludes_sender(self, db):
+        """
+        【BUG-01 验证】发送者不需要响应自己的群文件请求
+        
+        场景：群组有 alice(发送者), bob, charlie
+        bob 和 charlie 都响应后 → all_members_responded 应返回 True
+        （alice 作为发送者被排除）
+        """
+        self._setup_users(db, "charlie")
+
+        gid = db.create_group("BUG01测试群", "alice")
+        db.join_group(gid, "bob")
+        db.join_group(gid, "charlie")
+
+        db.save_group_file_request(gid, "alice", "bug01.pdf", 100, b"test", "bug01-1")
+
+        # bob 和 charlie 都响应
+        db.save_group_file_response("bug01-1", gid, "bob", "accept")
+        db.save_group_file_response("bug01-1", gid, "charlie", "reject")
+
+        # 发送者 alice 被排除，全部非发送者成员已响应 → True
+        assert db.all_members_responded("bug01-1", gid) is True
+
+        # 对比：如果 bob 还没响应，应返回 False
+        db2 = self._fresh_db()
+        self._setup_users(db2, "charlie")
+        gid2 = db2.create_group("BUG01b", "alice")
+        db2.join_group(gid2, "bob")
+        db2.join_group(gid2, "charlie")
+        db2.save_group_file_request(gid2, "alice", "b.pdf", 100, b"x", "bug01-2")
+        db2.save_group_file_response("bug01-2", gid2, "bob", "accept")
+        # charlie 未响应 → False
+        assert db2.all_members_responded("bug01-2", gid2) is False
+
+    def _fresh_db(self):
+        """创建一个新的独立数据库实例用于子测试"""
+        import tempfile
+        return Database(tempfile.mktemp(suffix=".db"))
 
 
 # ============================================================

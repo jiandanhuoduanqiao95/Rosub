@@ -338,6 +338,14 @@ class Database:
     def all_members_responded(self, message_id, group_id):
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            # 获取发送者（发送者不需要响应自己的请求）
+            cursor.execute('''
+                SELECT sender FROM group_file_requests
+                WHERE message_id = ?
+            ''', (message_id,))
+            sender_row = cursor.fetchone()
+            sender = sender_row[0] if sender_row else None
+
             cursor.execute('''
                 SELECT username
                 FROM group_members
@@ -350,12 +358,17 @@ class Database:
                 WHERE message_id = ? AND group_id = ?
             ''', (message_id, group_id))
             responded = [row[0] for row in cursor.fetchall()]
-            return set(members).issubset(set(responded))
+            # 排除发送者：发送者不需要响应自己的文件请求
+            members_to_check = [m for m in members if m != sender]
+            return set(members_to_check).issubset(set(responded))
 
     def add_friend_request(self, requester, target):
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
+                if requester == target:
+                    logging.error(f"好友请求失败: 不能添加自己为好友")
+                    return False
                 if not (self.user_exists(requester) and self.user_exists(target)):
                     logging.error(f"好友请求失败：用户 {requester} 或 {target} 不存在")
                     return False
