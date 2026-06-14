@@ -1,10 +1,15 @@
 import socket
 import ssl
 import os
+import sys
 import threading
 import logging
+
+# 确保项目根目录在 Python 路径中（支持直接运行或作为模块导入）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from database import Database
-from server_client_handler import ClientHandler
+from server.server_client_handler import ClientHandler
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 

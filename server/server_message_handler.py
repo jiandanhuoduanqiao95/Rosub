@@ -1,10 +1,10 @@
 import logging
 import json
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from protocol import send_message, recv_message
-from server_group_handler import GroupHandler
-from server_admin_handler import AdminHandler
+from server.server_group_handler import GroupHandler
+from server.server_admin_handler import AdminHandler
 
 class MessageHandler:
     def __init__(self, server):
@@ -388,9 +388,9 @@ class MessageHandler:
 
                     try:
 
-                        message_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                        message_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S').replace(tzinfo=UTC)
 
-                        current_time = datetime.utcnow()
+                        current_time = datetime.now(UTC)
 
                         time_diff = current_time - message_time
 
@@ -513,9 +513,9 @@ class MessageHandler:
 
                     try:
 
-                        message_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                        message_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S').replace(tzinfo=UTC)
 
-                        current_time = datetime.utcnow()
+                        current_time = datetime.now(UTC)
 
                         time_diff = current_time - message_time
 
@@ -603,9 +603,9 @@ class MessageHandler:
 
                     try:
 
-                        request_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                        request_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S').replace(tzinfo=UTC)
 
-                        current_time = datetime.utcnow()
+                        current_time = datetime.now(UTC)
 
                         time_diff = current_time - request_time
 
@@ -682,9 +682,9 @@ class MessageHandler:
 
                     try:
 
-                        request_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                        request_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S').replace(tzinfo=UTC)
 
-                        current_time = datetime.utcnow()
+                        current_time = datetime.now(UTC)
 
                         time_diff = current_time - request_time
 
