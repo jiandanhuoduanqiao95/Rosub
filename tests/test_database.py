@@ -78,12 +78,13 @@ class TestDatabaseInit:
         """
         with db._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
             tables = {row[0] for row in cursor.fetchall()}
 
         expected = {
             "users", "offline_messages", "friends", "file_requests",
-            "groups", "group_members", "group_file_requests", "group_file_responses"
+            "groups", "group_members", "group_file_requests", "group_file_responses",
+            "message_history"
         }
         assert tables == expected, f"缺少表: {expected - tables}"
 

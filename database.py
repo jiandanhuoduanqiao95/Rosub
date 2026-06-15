@@ -5,7 +5,10 @@ import os
 import logging
 
 class Database:
-    def __init__(self, db_name="users.db"):
+    def __init__(self, db_name=None):
+        if db_name is None:
+            from config import config
+            db_name = config.get("database.path", "users.db")
         self.db_name = db_name
         print(f"数据库路径: {os.path.abspath(self.db_name)}")
         self._init_db()
@@ -112,6 +115,19 @@ class Database:
                     FOREIGN KEY (message_id) REFERENCES group_file_requests(message_id),
                     FOREIGN KEY (group_id) REFERENCES groups(id),
                     FOREIGN KEY (username) REFERENCES users(username)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS message_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT UNIQUE NOT NULL,
+                    sender TEXT NOT NULL,
+                    receiver TEXT NOT NULL,
+                    message_type TEXT NOT NULL,
+                    content BLOB NOT NULL,
+                    filename TEXT,
+                    group_id INTEGER,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             conn.commit()
@@ -561,3 +577,148 @@ class Database:
                 WHERE group_id = ? AND username = ?
             ''', (group_id, username))
             return cursor.fetchone() is not None
+
+    # ============================================================
+    # 消息历史持久化
+    # ============================================================
+
+    def save_message_history(self, sender, receiver, message_type, content,
+                             filename=None, group_id=None, message_id=None):
+        """保存一条消息到 message_history 表（永久存储）"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR IGNORE INTO message_history
+                        (message_id, sender, receiver, message_type, content, filename, group_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (message_id, sender, receiver, message_type, content, filename, group_id))
+                conn.commit()
+                if cursor.rowcount > 0:
+                    logging.info(f"消息已保存到历史: 类型={message_type}, 消息ID={message_id}")
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"保存消息历史失败: {e}")
+            return False
+
+    def get_message_history(self, user, with_user=None, group_id=None,
+                            limit=50, offset=0):
+        """分页拉取历史消息，按时间倒序（最新在前）"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if group_id is not None:
+                cursor.execute('''
+                    SELECT sender, receiver, message_type, content, message_id,
+                           filename, timestamp, group_id
+                    FROM message_history
+                    WHERE group_id = ?
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT ? OFFSET ?
+                ''', (group_id, limit, offset))
+            elif with_user is not None:
+                cursor.execute('''
+                    SELECT sender, receiver, message_type, content, message_id,
+                           filename, timestamp, group_id
+                    FROM message_history
+                    WHERE (sender = ? AND receiver = ?)
+                       OR (sender = ? AND receiver = ?)
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT ? OFFSET ?
+                ''', (user, with_user, with_user, user, limit, offset))
+            else:
+                cursor.execute('''
+                    SELECT sender, receiver, message_type, content, message_id,
+                           filename, timestamp, group_id
+                    FROM message_history
+                    WHERE sender = ? OR receiver = ?
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT ? OFFSET ?
+                ''', (user, user, limit, offset))
+            return cursor.fetchall()
+
+    def search_message_history(self, user, keyword, with_user=None, limit=50):
+        """按关键字搜索历史消息（在 content 中做 LIKE 匹配）"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            like_pattern = f"%{keyword}%"
+            if with_user is not None:
+                cursor.execute('''
+                    SELECT sender, receiver, message_type, content, message_id,
+                           filename, timestamp, group_id
+                    FROM message_history
+                    WHERE ((sender = ? AND receiver = ?)
+                       OR (sender = ? AND receiver = ?))
+                      AND CAST(content AS TEXT) LIKE ?
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT ?
+                ''', (user, with_user, with_user, user, like_pattern, limit))
+            else:
+                cursor.execute('''
+                    SELECT sender, receiver, message_type, content, message_id,
+                           filename, timestamp, group_id
+                    FROM message_history
+                    WHERE (sender = ? OR receiver = ?)
+                      AND CAST(content AS TEXT) LIKE ?
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT ?
+                ''', (user, user, like_pattern, limit))
+            return cursor.fetchall()
+
+    def get_message_history_count(self, user, with_user=None, group_id=None):
+        """获取消息总数（用于分页计算）"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if group_id is not None:
+                cursor.execute('''
+                    SELECT COUNT(*) FROM message_history WHERE group_id = ?
+                ''', (group_id,))
+            elif with_user is not None:
+                cursor.execute('''
+                    SELECT COUNT(*) FROM message_history
+                    WHERE (sender = ? AND receiver = ?)
+                       OR (sender = ? AND receiver = ?)
+                ''', (user, with_user, with_user, user))
+            else:
+                cursor.execute('''
+                    SELECT COUNT(*) FROM message_history
+                    WHERE sender = ? OR receiver = ?
+                ''', (user, user))
+            return cursor.fetchone()[0]
+
+    # ============================================================
+    # 离线文件过期清理
+    # ============================================================
+
+    def cleanup_expired_file_requests(self, expire_days=7):
+        """清理过期的文件请求（私聊和群组），默认清理 7 天前的记录。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                # 清理过期私聊文件请求
+                cursor.execute('''
+                    DELETE FROM file_requests
+                    WHERE timestamp <= datetime('now', '-' || ? || ' days')
+                ''', (expire_days,))
+                private_deleted = cursor.rowcount
+
+                # 清理过期群组文件请求及其响应
+                cursor.execute('''
+                    DELETE FROM group_file_responses
+                    WHERE message_id IN (
+                        SELECT message_id FROM group_file_requests
+                        WHERE timestamp <= datetime('now', '-' || ? || ' days')
+                    )
+                ''', (expire_days,))
+                cursor.execute('''
+                    DELETE FROM group_file_requests
+                    WHERE timestamp <= datetime('now', '-' || ? || ' days')
+                ''', (expire_days,))
+                group_deleted = cursor.rowcount
+
+                conn.commit()
+                total = private_deleted + group_deleted
+                logging.info(f"清理过期文件请求: 私聊={private_deleted}, 群组={group_deleted}, 合计={total}")
+                return total
+        except sqlite3.Error as e:
+            logging.error(f"清理过期文件请求失败: {e}")
+            return 0

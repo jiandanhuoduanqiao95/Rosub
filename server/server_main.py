@@ -10,13 +10,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database import Database
 from server.server_client_handler import ClientHandler
+from config import config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 class Server:
-    def __init__(self, host="127.0.0.1", port=8090):
-        self.host = host
-        self.port = port
+    def __init__(self, host=None, port=None):
+        self.host = host or config.get("server.host", "127.0.0.1")
+        self.port = port or config.get("server.port", 8090)
         self.client_map = {}
         self.db = Database()
         self.client_map_lock = threading.Lock()
@@ -25,8 +26,15 @@ class Server:
     def build_listen(self):
         if not os.path.exists("files"):
             os.makedirs("files")
+        # 启动时清理过期文件请求
+        cleaned = self.db.cleanup_expired_file_requests()
+        if cleaned > 0:
+            logging.info(f"启动时清理了 {cleaned} 个过期文件请求")
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain("SSL/tsetcn.crt", "SSL/tsetcn.pem")
+        context.load_cert_chain(
+            config.get("server.ssl_cert", "SSL/tsetcn.crt"),
+            config.get("server.ssl_key", "SSL/tsetcn.pem")
+        )
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((self.host, self.port))

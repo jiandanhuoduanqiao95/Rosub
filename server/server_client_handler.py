@@ -3,6 +3,7 @@ import logging
 import bcrypt
 from protocol import send_message, recv_message
 from server.server_message_handler import MessageHandler
+from validation import validate_username, validate_password
 
 class ClientHandler:
     def __init__(self, server):
@@ -26,6 +27,17 @@ class ClientHandler:
                 message_handler = MessageHandler(self.server)  # 提前初始化 message_handler
 
                 if msg_type == "register":
+                    # 服务端验证用户名和密码格式
+                    valid, error = validate_username(username)
+                    if not valid:
+                        send_message(ssock, "error", error)
+                        logging.warning(f"注册失败: 用户名 {username} 格式不合法: {error}")
+                        return
+                    valid, error = validate_password(password or "")
+                    if not valid:
+                        send_message(ssock, "error", error)
+                        logging.warning(f"注册失败: 密码格式不合法: {error}")
+                        return
                     if self.server.db.user_exists(username):
                         send_message(ssock, "error", "用户已存在")
                         logging.warning(f"注册失败: 用户 {username} 已存在")

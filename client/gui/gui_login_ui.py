@@ -3,6 +3,8 @@ from tkinter import ttk, messagebox
 import socket
 import ssl
 from protocol import send_message, recv_message
+from config import config
+from validation import validate_username, validate_password
 import threading
 import logging
 
@@ -31,14 +33,29 @@ class LoginUI:
 
     def do_auth(self):
         action = self.action_var.get()
-        username = self.username_entry.get()
+        username = self.username_entry.get().strip()
         password = self.password_entry.get()
+
+        # 客户端预验证
+        valid, error = validate_username(username)
+        if not valid:
+            messagebox.showerror("输入错误", error)
+            return
+        valid, error = validate_password(password)
+        if not valid:
+            messagebox.showerror("输入错误", error)
+            return
         try:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            context.load_verify_locations("SSL/tsetcn.crt")
+            context.load_verify_locations(config.get("client.ssl_cert", "SSL/tsetcn.crt"))
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_socket.connect(('127.0.0.1', 8090))
-            self.client_gui.ssock = context.wrap_socket(client_socket, server_hostname='tset.cn')
+            server_host = config.get("client.host", "127.0.0.1")
+            server_port = config.get("client.port", 8090)
+            client_socket.connect((server_host, server_port))
+            self.client_gui.ssock = context.wrap_socket(
+                client_socket,
+                server_hostname=config.get("client.server_hostname", "tset.cn")
+            )
             send_message(self.client_gui.ssock, action, username, extra_headers={"password": password})
             header, data = recv_message(self.client_gui.ssock)
             if header.get("type") == "error":

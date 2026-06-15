@@ -1,6 +1,6 @@
 # 聊天室 —— 基于 TCP+SSL 的 C/S 即时通讯系统
 
-> 版本 3.1.0 | 2026-06-14
+> 版本 3.2.1 | 2026-06-15
 
 ---
 
@@ -54,17 +54,23 @@ chatroom/
 │   ├── gui_message_handler.py      #   消息收发处理
 │   ├── gui_admin_ui.py             #   管理员面板
 │   └── gui_group_ui.py             #   群组管理
-├── protocol.py                     # 自定义二进制通信协议
-├── database.py                     # SQLite 数据库层（8 张表）
+├── protocol.py                     # 自定义二进制通信协议（v1.0.0，已冻结）
+├── database.py                     # SQLite 数据库层（9 张表）
+├── config.yaml                     # 全局配置文件（替代硬编码）
+├── config.py                       # 配置加载模块
+├── validation.py                   # 用户名/密码格式验证
 ├── SSL/                            # SSL 证书（自签名）
 │   ├── gen_cert.py                 #   证书生成脚本
 │   ├── tsetcn.crt / .key / .pem    #   证书文件
-├── tests/                          # 自动化测试（89 个）
+├── tests/                          # 自动化测试（151 个）
 │   ├── test_protocol.py            #   协议层 (15)
-│   ├── test_database.py            #   数据层 (35)
+│   ├── test_database.py            #   数据层 (36)
 │   ├── test_client_logic.py        #   客户端逻辑 (19)
 │   ├── test_server.py              #   服务端集成 (16)
-│   └── test_e2e.py                 #   端到端场景 (4)
+│   ├── test_e2e.py                 #   端到端场景 (4)
+│   ├── test_message_history.py     #   消息历史持久化 (20)
+│   ├── test_input_validation.py    #   输入验证 (34)
+│   └── test_backend_integration.py #   后端加固集成验证 (7)
 ├── run_tests.sh                    # 一键测试脚本
 ├── pyproject.toml                  # pytest 配置
 └── README.md
@@ -99,14 +105,15 @@ chatroom/
 
 > **战略决策（2026-06-14）**: 经全面评估，决定采用 **Flutter (Dart)** 统一 Windows / Linux / Android 三端客户端，替代当前 tkinter。详见 `软件开发文档3.0.0.md` 第 11 章。
 
-#### 🔴 阶段 1：后端加固（当前）
+#### 🔴 阶段 1：后端加固 ✅ 已完成
 
 | 功能 | 说明 |
 |------|------|
-| **聊天记录持久化** | 服务端保存全量历史消息，客户端分页拉取，支持搜索 |
-| 配置文件替代硬编码 (config.yaml) | 地址、端口、证书路径、分块大小、撤回时限等 |
-| 用户名格式验证 | 长度、字符集校验，防 SQL 注入 |
-| 协议冻结 | 明确最终协议版本，作为多端共用的契约 |
+| ✅ **聊天记录持久化** | `message_history` 表永久保存，分页拉取，支持搜索 |
+| ✅ 配置文件替代硬编码 | `config.yaml` + `config.py`，文件缺失时自动回退默认值 |
+| ✅ 用户名格式验证 | `validation.py`：长度 3–32，仅字母数字下划线连字符 |
+| ✅ 协议冻结 | `protocol.py` 声明 `PROTOCOL_VERSION = "1.0.0"` |
+| ✅ 离线文件过期清理 | `database.cleanup_expired_file_requests()` 定期清理 |
 
 #### 🟡 阶段 2–5：Flutter 客户端迁移
 
@@ -149,7 +156,7 @@ chatroom/
 - **决策**: 采用 **Flutter (Dart)** 统一三端（Windows / Linux / Android），同一代码库编译
 - **优势**: Material Design 3 开箱即用，`dart:io` 的 Socket API 可直接对接现有自定义二进制协议
 - **不变**: 服务端 (`server/`) 和数据库层 (`database.py`) 完全保留不动
-- **策略**: 先补完后端欠账（阶段1），再逐步迁移客户端（阶段2–5），保证开发期间系统始终可用
+- **策略**: 先补完后端欠账（阶段1 ✅ 已完成），再逐步迁移客户端（阶段2–5），保证开发期间系统始终可用
 
 ---
 
@@ -219,8 +226,10 @@ chatroom/
 | 语言 | Python 3.12 |
 | GUI | tkinter (ttk) —— 当前 / Flutter (Dart) —— 规划中 |
 | 网络 | TCP socket, SSL/TLS |
-| 数据库 | SQLite3 |
+| 数据库 | SQLite3（9 张表）|
 | 密码哈希 | bcrypt |
+| 配置 | config.yaml + PyYAML |
+| 输入验证 | validation.py |
 | 证书 | 自签名 (cryptography 库) |
 | 测试 | pytest 9.x |
 | 包管理 | pip + venv |
@@ -228,6 +237,20 @@ chatroom/
 ---
 
 ## 变更日志
+
+### v3.2.1 (2026-06-15)
+
+- **集成审计与修复**: 发现并修复 5 个集成缺陷（validation/save_message_history/cleanup 未被调用、密码未验证、E2E 密码过短），确保所有后端加固功能已集成到运行时路径
+- 新增 `tests/test_backend_integration.py`（7 个集成验证测试），测试总数 144 → 151
+- `validation.py` 已集成到客户端（`gui_login_ui.py`）和服务端（`server_client_handler.py`）注册流程
+- `save_message_history()` 已集成到私聊/群聊/文件消息处理路径
+- `cleanup_expired_file_requests()` 在服务端启动时自动调用
+
+### v3.2.0 (2026-06-15)
+
+- **阶段 1 后端加固全部完成**: ① `message_history` 表（4方法）; ② `config.yaml` 替代全部硬编码; ③ `validation.py` 输入验证; ④ 协议冻结 `PROTOCOL_VERSION 1.0.0`; ⑤ 离线文件过期清理
+- 测试体系扩展至 144 个（新增 `test_message_history.py` 20 个 + `test_input_validation.py` 34 个）
+- 数据库表数 8→9（新增 `message_history`）
 
 ### v3.1.0 (2026-06-14)
 

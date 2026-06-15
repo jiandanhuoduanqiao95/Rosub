@@ -5,6 +5,10 @@ from datetime import datetime, timedelta, UTC
 from protocol import send_message, recv_message
 from server.server_group_handler import GroupHandler
 from server.server_admin_handler import AdminHandler
+from config import config
+
+# 撤回时限（分钟）
+RECALL_TIMEOUT = timedelta(minutes=config.get("message.recall_timeout_minutes", 2))
 
 class MessageHandler:
     def __init__(self, server):
@@ -142,6 +146,8 @@ class MessageHandler:
                 message = data.decode("utf-8")
                 logging.info(f"来自 {username} 发往 {target} 的聊天消息: {message}, 消息ID={message_id}")
                 self.server.db.save_offline_message(username, target, "chat", message.encode('utf-8'), message_id=message_id)
+                # 同步写入永久消息历史
+                self.server.db.save_message_history(username, target, "chat", message.encode('utf-8'), message_id=message_id)
                 with self.server.client_map_lock:
                     recipient_socket = self.server.client_map.get(target)
                 if recipient_socket:
@@ -234,6 +240,8 @@ class MessageHandler:
                     sender_socket = self.server.client_map.get(sender)
                 if response == "accept":
                     self.server.db.save_offline_message(sender, receiver, "file", file_data, filename=filename, message_id=message_id)
+                    # 同步写入永久消息历史
+                    self.server.db.save_message_history(sender, receiver, "file", file_data, filename=filename, message_id=message_id)
                     if sender_socket:
                         try:
                             send_message(sender_socket, "chat", f"用户 {receiver} 已接受文件 {filename}")
@@ -398,9 +406,9 @@ class MessageHandler:
 
                             f"撤回消息时间检查: 消息ID={message_id}, 时间戳={timestamp}, 解析时间={message_time}, 当前时间={current_time}, 时间差={time_diff.total_seconds()}秒")
 
-                        if time_diff > timedelta(minutes=2):
+                        if time_diff > RECALL_TIMEOUT:
                             send_message(ssock, "error",
-                                         f"消息超过2分钟，无法撤回 (时间差: {time_diff.total_seconds()}秒)")
+                                         f"消息超过{RECALL_TIMEOUT.total_seconds() // 60:.0f}分钟，无法撤回 (时间差: {time_diff.total_seconds()}秒)")
 
                             logging.warning(f"撤回消息失败: 消息 {message_id} 超过2分钟")
 
@@ -523,8 +531,8 @@ class MessageHandler:
 
                             f"撤回消息时间检查: 消息ID={message_id}, 时间戳={timestamp}, 解析时间={message_time}, 当前时间={current_time}, 时间差={time_diff.total_seconds()}秒")
 
-                        if time_diff > timedelta(minutes=2):
-                            send_message(ssock, "error", f"消息超过2分钟，无法撤回")
+                        if time_diff > RECALL_TIMEOUT:
+                            send_message(ssock, "error", f"消息超过{RECALL_TIMEOUT.total_seconds() // 60:.0f}分钟，无法撤回")
 
                             logging.warning(f"撤回消息失败: 消息 {message_id} 超过2分钟")
 
@@ -609,8 +617,8 @@ class MessageHandler:
 
                         time_diff = current_time - request_time
 
-                        if time_diff > timedelta(minutes=2):
-                            send_message(ssock, "error", f"文件请求超过2分钟，无法撤回")
+                        if time_diff > RECALL_TIMEOUT:
+                            send_message(ssock, "error", f"文件请求超过{RECALL_TIMEOUT.total_seconds() // 60:.0f}分钟，无法撤回")
 
                             logging.warning(f"撤回文件请求失败: {message_id} 超过2分钟")
 
@@ -688,8 +696,8 @@ class MessageHandler:
 
                         time_diff = current_time - request_time
 
-                        if time_diff > timedelta(minutes=2):
-                            send_message(ssock, "error", f"群组文件请求超过2分钟，无法撤回")
+                        if time_diff > RECALL_TIMEOUT:
+                            send_message(ssock, "error", f"群组文件请求超过{RECALL_TIMEOUT.total_seconds() // 60:.0f}分钟，无法撤回")
 
                             logging.warning(f"撤回群组文件请求失败: {message_id} 超过2分钟")
 

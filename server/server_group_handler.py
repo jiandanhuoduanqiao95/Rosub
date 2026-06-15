@@ -93,6 +93,14 @@ class GroupHandler:
                         )
                         logging.info(f"保存群组消息: 消息ID={member_message_id}, 群组ID={group_id}, 接收者={member}")
 
+                # 同步写入永久消息历史（群聊消息只存一条）
+                self.server.db.save_message_history(
+                    username, "", "group_chat",
+                    message.encode('utf-8'),
+                    group_id=group_id,
+                    message_id=original_message_id
+                )
+
                 # 通知群组成员，使用原始消息ID
                 self.notify_group_members(
                     group_id, "group_chat", message,

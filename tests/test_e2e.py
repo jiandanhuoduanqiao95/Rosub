@@ -312,11 +312,11 @@ class TestE2EAuthentication:
         bob = HeadlessTestClient(port=srv.port)
 
         alice.connect()
-        alice.register("alice", "a123")
+        alice.register("alice", "alice123")
         alice.consume_initial()
 
         bob.connect()
-        bob.register("bob", "b123")
+        bob.register("bob", "bob12345")
         bob.consume_initial()
 
         # 加好友
@@ -344,7 +344,7 @@ class TestE2EAuthentication:
         # bob 重新上线
         bob2 = HeadlessTestClient(port=srv.port)
         bob2.connect()
-        bob2.login("bob", "b123")
+        bob2.login("bob", "bob12345")
         r = bob2.consume_initial(max_msg=15)
 
         # 检查离线消息
@@ -378,7 +378,7 @@ class TestE2EGroupScenarios:
         bob = HeadlessTestClient(port=srv.port)
 
         # 注册
-        for c, name, pw in [(alice, "alice", "a"), (bob, "bob", "b")]:
+        for c, name, pw in [(alice, "alice", "alice123"), (bob, "bob", "bob12345")]:
             c.connect()
             c.register(name, pw)
             c.consume_initial()
@@ -431,7 +431,7 @@ class TestE2EMessageRecall:
         alice = HeadlessTestClient(port=srv.port)
         bob = HeadlessTestClient(port=srv.port)
 
-        for c, name, pw in [(alice, "alice", "a"), (bob, "bob", "b")]:
+        for c, name, pw in [(alice, "alice", "alice123"), (bob, "bob", "bob12345")]:
             c.connect()
             c.register(name, pw)
             c.consume_initial()
