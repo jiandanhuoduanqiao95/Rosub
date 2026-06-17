@@ -731,6 +731,23 @@ class MessageHandler:
 
                         logging.error(f"撤回群组文件请求失败: {message_id}")
 
+            elif msg_type == "receipt":
+                # 客户端发来的回执，转发给原发送者作为状态更新
+                message_id = header.get("message_id")
+                target = header.get("to")
+                if message_id and target:
+                    with self.server.client_map_lock:
+                        sender_socket = self.server.client_map.get(target)
+                    if sender_socket:
+                        try:
+                            send_message(sender_socket, "status_update", "",
+                                         extra_headers={"message_id": message_id, "status": "delivered"})
+                            logging.info(f"回执已转发: 消息ID={message_id}, 目标={target}")
+                        except Exception as e:
+                            logging.error(f"转发回执失败: 消息ID={message_id}, 错误={e}")
+                            with self.server.client_map_lock:
+                                self.server.client_map.pop(target, None)
+
             elif msg_type == "admin_command":
                 self.admin_handler.handle_admin_command(username, ssock, header, data)
 

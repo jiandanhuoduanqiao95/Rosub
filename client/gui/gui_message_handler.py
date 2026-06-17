@@ -92,6 +92,9 @@ class MessageHandler:
                         if sender == "[系统公告]":
                             self.client_gui.root.after(0, lambda: self.client_gui.chat_ui.switch_chat_window("服务器"))
                             self.client_gui.root.after(0, lambda: messagebox.showinfo("系统公告", f"收到新公告: {msg}"))
+                        elif "群组" in msg and ("创建成功" in msg or "已加入" in msg):
+                            self.client_gui.root.after(0, self.refresh_user_list)
+                            self.client_gui.root.after(0, lambda: messagebox.showinfo("成功", msg))
                     else:
                         self.client_gui.message_status[message_id] = status
                         self.client_gui.chat_ui.append_chat(sender, f"{tag}{sender}: {msg} [{status}] ({message_id})",
@@ -134,13 +137,20 @@ class MessageHandler:
                 logging.info(f"消息状态更新: {message_id} -> {status} (发送者: {self.client_gui.username})")
             else:
                 logging.warning(f"状态更新失败: 消息ID={message_id} 不存在")
+        elif msg_type == "error":
+            # 服务端返回的错误消息：弹窗提示并显示在服务器聊天窗口
+            error_msg = data.decode() if data else "未知错误"
+            self.client_gui.root.after(0, lambda: messagebox.showerror("错误", error_msg))
+            self.client_gui.chat_ui.append_chat("服务器", f"错误: {error_msg}")
+            logging.warning(f"服务端错误: {error_msg}")
         elif msg_type == "friend_request":
             sender = header.get("from")
             self.client_gui.chat_ui.append_chat("服务器", f"收到好友请求: {sender}")
         elif msg_type == "list_friend_requests":
             try:
                 requests = json.loads(data.decode())
-                self.show_friend_requests(requests)
+                # 将 UI 操作调度到主线程
+                self.client_gui.root.after(0, lambda: self.show_friend_requests(requests))
             except json.JSONDecodeError:
                 self.client_gui.chat_ui.append_chat("服务器", "解析好友请求列表失败")
                 logging.error("解析好友请求列表失败")
@@ -149,20 +159,17 @@ class MessageHandler:
             if response_type == "list_users":
                 try:
                     users = json.loads(data.decode())
-                    self.client_gui.admin_ui.show_users(users)
+                    # 将 UI 操作调度到主线程
+                    self.client_gui.root.after(0, lambda: self.client_gui.admin_ui.show_users(users))
                 except json.JSONDecodeError:
                     self.client_gui.chat_ui.append_chat("服务器", "解析用户列表失败")
                     logging.error("解析用户列表失败")
             elif response_type == "list_friends":
                 try:
                     friends = json.loads(data.decode())
-                    for item in self.client_gui.chat_ui.user_list.get_children():
-                        self.client_gui.chat_ui.user_list.delete(item)
-                    for friend, online in friends:
-                        status = "在线" if online else "离线"
-                        self.client_gui.chat_ui.user_list.insert("", "end", values=(friend, status))
-                    if header.get("action_result"):
-                        self.client_gui.chat_ui.append_chat("服务器", header.get("action_result"))
+                    action_result = header.get("action_result")
+                    # 将 Treeview 更新调度到主线程，确保 tkinter 线程安全
+                    self.client_gui.root.after(0, lambda: self._update_friend_list(friends, action_result))
                 except json.JSONDecodeError:
                     self.client_gui.chat_ui.append_chat("服务器", "解析好友列表失败")
                     logging.error("解析好友列表失败")
@@ -180,14 +187,8 @@ class MessageHandler:
             try:
                 groups = json.loads(data.decode())
                 self.client_gui.group_list = {str(g["id"]): g["group_name"] for g in groups}
-                for item in self.client_gui.chat_ui.user_list.get_children():
-                    if item.startswith("group_"):
-                        self.client_gui.chat_ui.user_list.delete(item)
-                for group in groups:
-                    group_id = str(group["id"])
-                    group_name = group["group_name"]
-                    self.client_gui.chat_ui.user_list.insert("", "end", values=(f"群组 {group_id}", ""),
-                                                             iid=f"group_{group_id}")
+                # 将 Treeview 更新调度到主线程，确保 tkinter 线程安全
+                self.client_gui.root.after(0, lambda: self._update_group_list(groups))
                 self.client_gui.chat_ui.append_chat("服务器", "群组列表已更新")
             except json.JSONDecodeError:
                 self.client_gui.chat_ui.append_chat("服务器", "解析群组列表失败")
@@ -209,17 +210,7 @@ class MessageHandler:
             except UnicodeDecodeError:
                 logging.error(f"群组消息解码失败: 发送者={sender}, 群组ID={group_id}")
                 self.client_gui.chat_ui.append_chat(f"群组 {group_id}", f"消息解码失败")
-        elif msg_type == "chat":
-            try:
-                msg = data.decode()
-                if header.get("from") == "服务器":
-                    self.client_gui.chat_ui.append_chat("服务器", msg)
-                    if "群组" in msg and ("创建成功" in msg or "已加入" in msg):
-                        self.refresh_user_list()
-                        messagebox.showinfo("成功", msg)
-            except UnicodeDecodeError:
-                logging.error(f"消息解码失败: {header}")
-                self.client_gui.chat_ui.append_chat("服务器", "消息解码失败")
+
 
     def update_message_status_in_chat(self, message_id, new_status, sender=None, group_name=None):
         target_message_ids = []
@@ -538,6 +529,32 @@ class MessageHandler:
                     self.client_gui.root.after(0, self.process_file_queue)
 
             self.client_gui.root.after(0, show_group_dialog)
+
+    def _update_friend_list(self, friends, action_result=None):
+        """在主线程中安全更新好友列表 Treeview（仅清除好友条目，保留群组）"""
+        tree = self.client_gui.chat_ui.user_list
+        # 仅删除好友条目（无 "group_" 前缀的 iid），保留群组条目
+        for item in tree.get_children():
+            if not item.startswith("group_"):
+                tree.delete(item)
+        for friend, online in friends:
+            status = "在线" if online else "离线"
+            tree.insert("", "end", values=(friend, status))
+        if action_result:
+            self.client_gui.chat_ui.append_chat("服务器", action_result)
+
+    def _update_group_list(self, groups):
+        """在主线程中安全更新群组列表 Treeview"""
+        tree = self.client_gui.chat_ui.user_list
+        # 删除旧群组条目
+        for item in tree.get_children():
+            if item.startswith("group_"):
+                tree.delete(item)
+        for group in groups:
+            group_id = str(group["id"])
+            group_name = group["group_name"]
+            tree.insert("", "end", values=(f"群组 {group_id}", ""),
+                        iid=f"group_{group_id}")
 
     def logout(self):
         if self.client_gui.ssock:

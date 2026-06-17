@@ -73,4 +73,5 @@ class LoginUI:
     def show_login(self):
         self.client_gui.chat_ui.chat_frame.grid_forget()
         self.login_frame.grid()
+        self.client_gui.root.title("网络通讯客户端")
         self.client_gui.root.geometry("300x200")
