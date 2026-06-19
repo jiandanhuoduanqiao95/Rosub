@@ -156,7 +156,7 @@ class GroupHandler:
                 if self.server.client_map.get(username):
                     try:
                         send_message(self.server.client_map[username], "file", file_data,
-                                     extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id, "status": "sent"})
+                                     extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id})
                         logging.info(f"群组文件已传输: {sender} -> {username}, 文件名={filename}, 消息ID={message_id}")
                     except Exception as e:
                         logging.error(f"传输群组文件失败: {sender} -> {username}, 文件名={filename}, 消息ID={message_id}, 错误={e}")

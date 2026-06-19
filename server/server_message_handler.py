@@ -20,8 +20,7 @@ class MessageHandler:
         """发送初始好友和群组列表"""
         # 发送好友列表
         users = self.server.db.get_friends(username)
-        with self.server.client_map_lock:
-            users_list = [[user, user in self.server.client_map] for user in users]
+        users_list = users
         send_message(ssock, "admin_response", json.dumps(users_list), extra_headers={"response_type": "list_friends"})
         logging.info(f"发送初始好友列表给用户: {username}, 好友数={len(users_list)}")
 
@@ -42,12 +41,11 @@ class MessageHandler:
 
             if msg_type == "chat":
                 send_message(ssock, "chat", content.decode('utf-8'),
-                             extra_headers={"from": sender, "history": "true", "message_id": message_id,
-                                            "status": status})
+                             extra_headers={"from": sender, "history": "true", "message_id": message_id})
             elif msg_type == "file":
                 send_message(ssock, "file", content,
                              extra_headers={"from": sender, "filename": filename, "history": "true",
-                                            "message_id": message_id, "status": status})
+                                            "message_id": message_id})
             elif msg_type == "group_chat":
                 try:
                     # 尝试从content解析群组ID
@@ -78,8 +76,7 @@ class MessageHandler:
                                          "from": sender,
                                          "group_id": str(group_id),
                                          "history": "true",
-                                         "message_id": message_id.split('_')[0] if '_' in message_id else message_id,
-                                         "status": status
+                                         "message_id": message_id.split('_')[0] if '_' in message_id else message_id
                                      })
                         logging.info(f"发送离线群聊消息: 发送者={sender}, 群组ID={group_id}, 消息ID={message_id}")
                     else:
@@ -153,7 +150,7 @@ class MessageHandler:
                 if recipient_socket:
                     try:
                         send_message(recipient_socket, "chat", message,
-                                     extra_headers={"from": username, "message_id": message_id, "status": "sent"})
+                                     extra_headers={"from": username, "message_id": message_id})
                         logging.info(f"消息已转发: {username} -> {target}, 消息ID={message_id}")
                     except Exception as e:
                         logging.error(f"发送消息失败: {username} -> {target}, 消息ID={message_id}, 错误={e}")
@@ -253,7 +250,7 @@ class MessageHandler:
                     if self.server.client_map.get(receiver):
                         try:
                             send_message(self.server.client_map[receiver], "file", file_data,
-                                         extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id, "status": "sent"})
+                                         extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id})
                             logging.info(f"文件已传输: {sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}")
                         except Exception as e:
                             logging.error(f"传输文件失败: {sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
@@ -308,8 +305,7 @@ class MessageHandler:
 
             elif msg_type == "list_friends":
                 users = self.server.db.get_friends(username)
-                with self.server.client_map_lock:
-                    users_list = [[user, user in self.server.client_map] for user in users]
+                users_list = users
                 send_message(ssock, "admin_response", json.dumps(users_list), extra_headers={"response_type": "list_friends"})
                 logging.info(f"用户 {username} 请求好友列表")
 
@@ -730,23 +726,6 @@ class MessageHandler:
                         send_message(ssock, "error", f"撤回群组文件请求 {message_id} 失败")
 
                         logging.error(f"撤回群组文件请求失败: {message_id}")
-
-            elif msg_type == "receipt":
-                # 客户端发来的回执，转发给原发送者作为状态更新
-                message_id = header.get("message_id")
-                target = header.get("to")
-                if message_id and target:
-                    with self.server.client_map_lock:
-                        sender_socket = self.server.client_map.get(target)
-                    if sender_socket:
-                        try:
-                            send_message(sender_socket, "status_update", "",
-                                         extra_headers={"message_id": message_id, "status": "delivered"})
-                            logging.info(f"回执已转发: 消息ID={message_id}, 目标={target}")
-                        except Exception as e:
-                            logging.error(f"转发回执失败: 消息ID={message_id}, 错误={e}")
-                            with self.server.client_map_lock:
-                                self.server.client_map.pop(target, None)
 
             elif msg_type == "admin_command":
                 self.admin_handler.handle_admin_command(username, ssock, header, data)

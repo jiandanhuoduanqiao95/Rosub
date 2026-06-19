@@ -227,10 +227,9 @@ class TestAuthentication:
             assert initial["login_response"][0]["type"] == "chat"
             assert "登录成功" in initial["login_response"][1].decode()
 
-            # 验证好友列表中有 bob，且在线状态格式正确
+            # 验证好友列表中有 bob
             assert len(initial["friends"]) == 1
-            assert initial["friends"][0][0] == "bob"  # username
-            assert initial["friends"][0][1] in (True, False)  # online status
+            assert initial["friends"][0] == "bob"  # username
 
             # 群组列表为空
             assert initial["groups"] == []
