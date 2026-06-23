@@ -441,7 +441,7 @@ PYEOF
 ```bash
 cd ~/PycharmProjects/chatroom/dart_protocol
 
-dart run -e "
+cat > /tmp/frame_test.dart << 'EOF'
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -476,7 +476,8 @@ void main() {
   final full = <int>[...headerLen, ...headerJson, ...contentBytes];
   print(full.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' '));
 }
-"
+EOF
+dart /tmp/frame_test.dart
 ```
 
 ### 6.4 逐字节对比

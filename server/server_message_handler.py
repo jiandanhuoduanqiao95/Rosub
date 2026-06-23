@@ -36,16 +36,24 @@ class MessageHandler:
         logging.info(f"用户 {username} 的离线消息: {len(messages)} 条")
 
         for msg in messages:
-            sender, msg_type, content, filename, message_id, status = msg
+            sender, msg_type, content, filename, message_id, status, msg_receiver = msg
             logging.info(f"发送离线消息: 发送者={sender}, 类型={msg_type}, 消息ID={message_id}")
 
             if msg_type == "chat":
+                # 构建 header: from + to 让客户端知道消息应归类到哪个会话
+                extra_headers = {"from": sender, "history": "true", "message_id": message_id}
+                if sender == username:
+                    # 这是自己发出的消息，to 是对应的收件人
+                    extra_headers["to"] = msg_receiver
                 send_message(ssock, "chat", content.decode('utf-8'),
-                             extra_headers={"from": sender, "history": "true", "message_id": message_id})
+                             extra_headers=extra_headers)
             elif msg_type == "file":
+                extra_headers = {"from": sender, "filename": filename, "history": "true",
+                                 "message_id": message_id}
+                if sender == username:
+                    extra_headers["to"] = msg_receiver
                 send_message(ssock, "file", content,
-                             extra_headers={"from": sender, "filename": filename, "history": "true",
-                                            "message_id": message_id})
+                             extra_headers=extra_headers)
             elif msg_type == "group_chat":
                 try:
                     # 尝试从content解析群组ID
@@ -172,9 +180,14 @@ class MessageHandler:
                 filename = header.get("filename", "received_file")
                 filesize = header.get("filesize", len(data))
                 file_data = data
-                if target.startswith("群组 "):
+                # 支持两种群组前缀：中文「群组 」和 Flutter 客户端「group_」
+                is_group = target.startswith("群组 ") or target.startswith("group_")
+                if is_group:
                     try:
-                        group_id = int(target.split(" ")[1])
+                        if target.startswith("group_"):
+                            group_id = int(target.split("_")[1])
+                        else:
+                            group_id = int(target.split(" ")[1])
                         with self.server.db._get_connection() as conn:
                             cursor = conn.cursor()
                             cursor.execute('SELECT 1 FROM groups WHERE id = ?', (group_id,))

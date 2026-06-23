@@ -171,21 +171,39 @@ class Database:
             logging.error(f"保存离线消息失败: {e}")
 
     def get_offline_messages(self, receiver):
+        """获取离线消息（接收到的 + 自己发出的）。
+        
+        接收方登录时看到的离线消息包括：
+          1. 别人发给自己的消息（receiver = self）
+          2. 自己发给别人的消息（sender = self），用于恢复会话上下文
+        """
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            # 获取别人发给自己的离线消息
             cursor.execute('''
-                SELECT sender, message_type, content, filename, message_id, status
+                SELECT sender, message_type, content, filename, message_id, status, receiver
                 FROM offline_messages 
                 WHERE receiver = ? AND status = 'sent'
             ''', (receiver,))
-            messages = cursor.fetchall()
+            received = cursor.fetchall()
+            # 获取自己发出的离线消息（对方未接收的）
+            cursor.execute('''
+                SELECT sender, message_type, content, filename, message_id, status, receiver
+                FROM offline_messages 
+                WHERE sender = ? AND receiver != ? AND status = 'sent'
+            ''', (receiver, receiver))
+            sent = cursor.fetchall()
+
+            # 将接收到的消息标记为已送达
             cursor.execute('''
                 UPDATE offline_messages 
                 SET status = 'delivered'
                 WHERE receiver = ? AND status = 'sent'
             ''', (receiver,))
             conn.commit()
-            logging.info(f"获取离线消息: 接收者={receiver}, 消息数={len(messages)}")
+
+            messages = received + sent
+            logging.info(f"获取离线消息: 用户={receiver}, 接收={len(received)}条, 发出={len(sent)}条, 合计={len(messages)}条")
             return messages
 
     def cleanup_delivered_messages(self, receiver):

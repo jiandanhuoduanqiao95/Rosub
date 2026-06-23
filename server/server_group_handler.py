@@ -23,7 +23,10 @@ class GroupHandler:
                     self.notify_group_members(group_id, "chat", f"{username} 创建了群组 {group_name}", from_user="系统")
                     with self.server.client_map_lock:
                         if username in self.server.client_map:
-                            send_message(self.server.client_map[username], "list_groups", json.dumps([{"id": group_id, "group_name": group_name}]))
+                            # 发送全部群组列表，而非仅新创建的群组
+                            groups = self.server.db.get_user_groups(username)
+                            send_message(self.server.client_map[username], "list_groups",
+                                         json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
                 else:
                     send_message(ssock, "error", "群组创建失败，可能已存在")
                     logging.error(f"用户 {username} 创建群组失败: {group_name}")
@@ -190,8 +193,8 @@ class GroupHandler:
                 members = [row[0] for row in cursor.fetchall()]
             logging.info(f"通知群组 {group_id} 的成员: {members}")
             for member in members:
-                if msg_type == "group_file_request" and member == from_user:
-                    logging.info(f"跳过向发送者 {from_user} 发送群组文件请求: 群组ID={group_id}")
+                if member == from_user and msg_type in ("group_file_request", "group_chat"):
+                    logging.info(f"跳过向发送者 {from_user} 发送 {msg_type}: 群组ID={group_id}")
                     continue
                 with self.server.client_map_lock:
                     member_socket = self.server.client_map.get(member)
