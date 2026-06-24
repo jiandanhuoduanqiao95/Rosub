@@ -1,37 +1,42 @@
 # 聊天室 —— 基于 TCP+SSL 的 C/S 即时通讯系统
 
-> 版本 3.2.1 | 2026-06-15
+> 版本 3.3.0 | 2026-06-24
 
 ---
 
 ## 项目简介
 
-基于 TCP 协议的客户端-服务器(C/S)通信程序，使用 Python 实现。
+基于 TCP 协议的客户端-服务器(C/S)通信程序，支持 SSL 加密、好友管理、群组聊天、文件传输。
 
-- **服务端**: 多线程 TCP Server + SSL 加密 + SQLite 持久化
-- **客户端**: tkinter 图形界面（当前）/ Flutter (Dart) 跨平台客户端（规划中，Windows+Linux+Android 三端统一）
-- **协议**: 自定义二进制协议（4字节头长度 + JSON 头 + 消息体）
+- **服务端**: 多线程 TCP Server + SSL 加密 + SQLite 持久化（Python 3.12）
+- **客户端**: 
+  - **Flutter (Dart) 桌面客户端** —— Linux 桌面端主体功能已完成（`chatroom_flutter/`）
+  - tkinter 图形界面 —— 保留作为功能参照（`client/gui/`）
+- **协议**: 自定义二进制协议（4字节头长度 + JSON 头 + 消息体，v1.0.0 已冻结）
 - **认证**: bcrypt 密码哈希
-- **测试**: pytest 全量自动化（89 个测试，4 层覆盖）
+- **测试**: pytest 全量自动化（151 个测试，4 层覆盖）
 
 ---
 
 ## 快速开始
 
 ```bash
-# 1. 激活虚拟环境
+# === 1. 启动服务端 ===
+cd ~/PycharmProjects/chatroom
 source .venv/bin/activate
-
-# 2. 生成 SSL 证书（如过期需重新生成）
-python SSL/gen_cert.py
-
-# 3. 启动服务端
 python server/server_main.py
 
-# 4. 启动客户端（新终端）
+# === 2. 启动 Flutter 客户端（推荐，Linux 桌面） ===
+cd chatroom_flutter
+flutter pub get
+flutter run -d linux
+
+# === 2b. 或启动 tkinter 客户端（Python） ===
+cd ~/PycharmProjects/chatroom
+source .venv/bin/activate
 python client/gui/gui_main.py
 
-# 5. 运行自动化测试
+# === 3. 运行自动化测试 ===
 ./run_tests.sh
 ```
 
@@ -41,27 +46,52 @@ python client/gui/gui_main.py
 
 ```
 chatroom/
-├── server/                         # 服务端
+├── server/                         # 服务端（Python）
 │   ├── server_main.py              #   入口：监听 127.0.0.1:8090
 │   ├── server_client_handler.py    #   客户端连接 & bcrypt 认证
 │   ├── server_message_handler.py   #   消息路由：私聊/群聊/好友/文件/撤回
 │   ├── server_admin_handler.py     #   管理员命令：列出用户/删除/发公告
 │   └── server_group_handler.py     #   群组管理：创建/加入/广播/群文件
-├── client/gui/                     # 客户端 (tkinter)
+├── client/gui/                     # tkinter 客户端（保留，功能参照）
 │   ├── gui_main.py                 #   主窗口，全局状态管理
 │   ├── gui_login_ui.py             #   登录/注册界面
 │   ├── gui_chat_ui.py              #   主聊天界面（好友列表/聊天窗口）
 │   ├── gui_message_handler.py      #   消息收发处理
 │   ├── gui_admin_ui.py             #   管理员面板
 │   └── gui_group_ui.py             #   群组管理
-├── protocol.py                     # 自定义二进制通信协议（v1.0.0，已冻结）
+├── chatroom_flutter/               # 🆕 Flutter 桌面客户端（Linux）
+│   ├── lib/
+│   │   ├── main.dart               #   入口
+│   │   ├── config.dart             #   客户端配置
+│   │   ├── models/chat_models.dart #   数据模型 + 输入验证
+│   │   ├── services/
+│   │   │   ├── socket_service.dart #   SSL 连接 + 协议通信
+│   │   │   ├── state_manager.dart  #   全局状态 (ChangeNotifier)
+│   │   │   ├── ime_bridge.dart     #   中文输入法桥接管理
+│   │   │   └── x11_ime.dart        #   X11 输入法 FFI 接口
+│   │   ├── screens/
+│   │   │   ├── login_screen.dart   #   登录/注册界面
+│   │   │   └── chat_screen.dart    #   主聊天界面
+│   │   └── widgets/
+│   │       ├── raw_text_field.dart #   绕过系统 IME 的文本框
+│   │       ├── chat_view.dart      #   消息列表 + 输入栏
+│   │       ├── sidebar.dart        #   好友/群组侧边栏
+│   │       └── dialogs.dart        #   全部对话框 + 文件选择器
+│   ├── bridge/                     #   IME 桥接（Python GTK 进程）
+│   │   ├── persistent_ime.py       #   常驻 GTK 输入法窗口
+│   │   └── x11_ime_wrapper.c       #   X11 IME C 包装
+│   ├── pubspec.yaml
+│   └── TESTING_GUIDE_FLUTTER.md    #   Flutter 客户端测试指南
+├── dart_protocol/                  # Dart 协议层（共享库）
+│   └── lib/protocol.dart
+├── protocol.py                     # Python 协议层（v1.0.0，已冻结）
 ├── database.py                     # SQLite 数据库层（9 张表）
-├── config.yaml                     # 全局配置文件（替代硬编码）
+├── config.yaml                     # 全局配置文件
 ├── config.py                       # 配置加载模块
 ├── validation.py                   # 用户名/密码格式验证
 ├── SSL/                            # SSL 证书（自签名）
-│   ├── gen_cert.py                 #   证书生成脚本
-│   ├── tsetcn.crt / .key / .pem    #   证书文件
+│   ├── gen_cert.py
+│   └── tsetcn.crt / .key / .pem
 ├── tests/                          # 自动化测试（151 个）
 │   ├── test_protocol.py            #   协议层 (15)
 │   ├── test_database.py            #   数据层 (36)
@@ -71,8 +101,8 @@ chatroom/
 │   ├── test_message_history.py     #   消息历史持久化 (20)
 │   ├── test_input_validation.py    #   输入验证 (34)
 │   └── test_backend_integration.py #   后端加固集成验证 (7)
-├── run_tests.sh                    # 一键测试脚本
-├── pyproject.toml                  # pytest 配置
+├── run_tests.sh
+├── pyproject.toml
 └── README.md
 ```
 
@@ -103,28 +133,28 @@ chatroom/
 
 ### 计划中 📋
 
-> **战略决策（2026-06-14）**: 经全面评估，决定采用 **Flutter (Dart)** 统一 Windows / Linux / Android 三端客户端，替代当前 tkinter。详见 `软件开发文档3.0.0.md` 第 11 章。
+#### 🟡 Flutter 客户端优化（当前）
 
-#### 🔴 阶段 1：后端加固 ✅ 已完成
+> Flutter Linux 桌面客户端重构已**初步完成**（33/35 项功能测试通过），存在以下待优化问题：
 
-| 功能 | 说明 |
-|------|------|
-| ✅ **聊天记录持久化** | `message_history` 表永久保存，分页拉取，支持搜索 |
-| ✅ 配置文件替代硬编码 | `config.yaml` + `config.py`，文件缺失时自动回退默认值 |
-| ✅ 用户名格式验证 | `validation.py`：长度 3–32，仅字母数字下划线连字符 |
-| ✅ 协议冻结 | `protocol.py` 声明 `PROTOCOL_VERSION = "1.0.0"` |
-| ✅ 离线文件过期清理 | `database.cleanup_expired_file_requests()` 定期清理 |
+| 优化项 | 说明 |
+|--------|------|
+| 🔧 输入法切换卡顿/无效 | Linux 下 fcitx IME 与 Flutter GTK 嵌入器存在死锁风险，当前通过 Python GTK 桥接进程绕过，切换延迟约 200-300ms |
+| 🎨 操作逻辑与显示打磨 | 消息气泡边距、长消息换行、列表滚动行为等可进一步优化 |
+| ✨ 美观增进 | 聊天气泡圆角、渐入动画、自定义主题色等视觉增强 |
+| 🔒 安全性增强 | 管理员注册与登录需增加额外验证（配置文件预设管理员密钥等） |
 
-#### 🟡 阶段 2–5：Flutter 客户端迁移
+#### 阶段完成状态
 
-| 阶段 | 内容 | 周期 |
+| 阶段 | 内容 | 状态 |
 |------|------|------|
-| 阶段 2 | **Dart 协议层移植** —— 用 Dart 实现 protocol.py 编解码 + 单元测试 | 1–2天 |
-| 阶段 3 | **Flutter 桌面端** —— 登录/注册、好友+私聊、群聊、文件传输、管理员面板 | 2–4周 |
-| 阶段 4 | **Flutter 安卓端** —— 移动端布局适配、通知推送、触控优化 | 1–2周 |
-| 阶段 5 | **打包发布** —— Windows `.exe`、Linux AppImage/snap、Android `.apk` | 1周 |
+| 阶段 1 | 后端加固 | ✅ 已完成 |
+| 阶段 2 | Dart 协议层移植 + 单元测试 | ✅ 已完成 |
+| 阶段 3 | Flutter Linux 桌面端（主体功能） | ✅ 已完成 |
+| — | Flutter Windows / Android 适配 | 🔜 待进行 |
+| 阶段 5 | 打包发布 | 🔜 待进行 |
 
-#### 🟢 阶段 6+：长期展望
+#### 🟢 长期展望
 
 | 功能 | 说明 |
 |------|------|
@@ -238,7 +268,13 @@ chatroom/
 
 ## 变更日志
 
-### v3.2.1 (2026-06-15)
+### v3.3.0 (2026-06-24)
+
+- **Flutter Linux 桌面客户端初步完成**: 33/35 项功能测试通过，覆盖注册/登录、好友系统、私聊、群聊、文件传输、消息撤回、管理员功能
+- 新增 `chatroom_flutter/` 完整项目：含配置、数据模型、网络服务、状态管理、IME桥接、4 个界面和 4 个 widget
+- 服务端适配 Flutter 客户端（群组文件前缀 `group_`、发送者离线消息回显等）
+- 修复多项集成问题（输入框焦点、群组列表覆盖、消息撤回 UI 更新、系统公告投递等）
+- 已知待优化：输入法切换卡顿、操作逻辑打磨、美观增进、管理员注册安全性增强
 
 - **集成审计与修复**: 发现并修复 5 个集成缺陷（validation/save_message_history/cleanup 未被调用、密码未验证、E2E 密码过短），确保所有后端加固功能已集成到运行时路径
 - 新增 `tests/test_backend_integration.py`（7 个集成验证测试），测试总数 144 → 151
