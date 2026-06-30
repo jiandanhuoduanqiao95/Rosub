@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# SSL 密钥和证书（绝对不能提交！）
+SSL/tsetcn.key
+SSL/tsetcn.pem
+SSL/tsetcn.crt
+SSL/*.bak
+
+# IDE 配置
+.idea/
+
+# 编译后的二进制文件
+*.so
+*.dll
+*.exe
+
+# 数据库文件（可能包含真实用户数据）
+*.db
+*.sqlite
+*.sqlite3
+
+# 运行时数据
+files/
+chatroom_flutter/received_files/
+
+# 临时文件
+*_tmp.dart
+*_tmp.py
+
+# 项目文件列表
+project_files.txt
+
+# Flutter
+.dart_tool/
+.packages
+build/
