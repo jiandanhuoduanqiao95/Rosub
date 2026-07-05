@@ -11,9 +11,11 @@ import 'raw_text_field.dart';
 
 class ChatView extends StatelessWidget {
   final String chatKey;
+  final String chatTitle;
   final List<ChatMessage> messages;
   final String username;
   final TextEditingController inputCtrl;
+  final bool canSend;
   final VoidCallback onSend;
   final VoidCallback onSendFile;
   final ValueChanged<String> onRecall;
@@ -21,9 +23,11 @@ class ChatView extends StatelessWidget {
   const ChatView({
     super.key,
     required this.chatKey,
+    required this.chatTitle,
     required this.messages,
     required this.username,
     required this.inputCtrl,
+    this.canSend = true,
     required this.onSend,
     required this.onSendFile,
     required this.onRecall,
@@ -36,30 +40,70 @@ class ChatView extends StatelessWidget {
         // 标题栏
         Container(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
           decoration: BoxDecoration(
             color: Theme.of(context).colorScheme.surfaceContainerLow,
-            border: const Border(bottom: BorderSide(color: Color(0xFFE0E0E0))),
+            border: Border(
+              bottom: BorderSide(
+                  color: Theme.of(context).colorScheme.outlineVariant),
+            ),
           ),
-          child: Text(
-            _chatTitle,
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.bold,
+          child: Row(
+            children: [
+              CircleAvatar(
+                radius: 18,
+                backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+                child: Icon(
+                  chatKey.startsWith('group_')
+                      ? Icons.groups_rounded
+                      : chatKey == '服务器'
+                          ? Icons.notifications_rounded
+                          : Icons.person_rounded,
+                  size: 20,
+                  color: Theme.of(context).colorScheme.onPrimaryContainer,
                 ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  chatKey.startsWith('group_') || chatKey == '服务器'
+                      ? chatTitle
+                      : '与 $chatTitle 的聊天',
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                ),
+              ),
+            ],
           ),
         ),
 
         // 消息列表
         Expanded(
           child: messages.isEmpty
-              ? const Center(
-                  child: Text(
-                    '暂无消息',
-                    style: TextStyle(color: Colors.grey),
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.forum_outlined,
+                        size: 56,
+                        color: Theme.of(context).colorScheme.outline,
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        '暂无消息',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
                   ),
                 )
               : ListView.builder(
                   reverse: true,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
                   itemCount: messages.length,
                   itemBuilder: (context, index) {
                     final msgIndex = messages.length - 1 - index;
@@ -76,49 +120,89 @@ class ChatView extends StatelessWidget {
         ),
 
         // 输入栏
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surfaceContainerLow,
-            border: const Border(top: BorderSide(color: Color(0xFFE0E0E0))),
-          ),
-          child: Row(
-            children: [
-              // 文件按钮
-              IconButton(
-                icon: const Icon(Icons.attach_file),
-                tooltip: '发送文件',
-                onPressed: onSendFile,
-              ),
-              // 输入框（中文通过 IME 桥接支持，无死锁风险）
-              Expanded(
-                child: RawTextField(
-                  controller: inputCtrl,
-                  hintText: '输入消息...',
-                  showChineseInput: true,
-                  onSubmitted: (_) => onSend(),
-                ),
-              ),
-              const SizedBox(width: 8),
-              // 发送按钮
-              IconButton.filled(
-                icon: const Icon(Icons.send_rounded),
-                tooltip: '发送',
-                onPressed: onSend,
-              ),
-            ],
-          ),
-        ),
+        if (canSend)
+          _InputBar(
+            inputCtrl: inputCtrl,
+            onSend: onSend,
+            onSendFile: onSendFile,
+          )
+        else
+          _ReadOnlyBar(chatTitle: chatTitle),
       ],
     );
   }
+}
 
-  String get _chatTitle {
-    if (chatKey.startsWith('group_')) {
-      final id = chatKey.substring(6);
-      return '群组 $id 的聊天';
-    }
-    return '与 $chatKey 的聊天';
+class _InputBar extends StatelessWidget {
+  final TextEditingController inputCtrl;
+  final VoidCallback onSend;
+  final VoidCallback onSendFile;
+
+  const _InputBar({
+    required this.inputCtrl,
+    required this.onSend,
+    required this.onSendFile,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerLow,
+        border: Border(
+          top: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+        ),
+      ),
+      child: Row(
+        children: [
+          IconButton(
+            icon: const Icon(Icons.attach_file),
+            tooltip: '发送文件',
+            onPressed: onSendFile,
+          ),
+          Expanded(
+            child: RawTextField(
+              controller: inputCtrl,
+              hintText: '输入消息，Enter 发送...',
+              showChineseInput: true,
+              onSubmitted: (_) => onSend(),
+            ),
+          ),
+          const SizedBox(width: 8),
+          IconButton.filled(
+            icon: const Icon(Icons.send_rounded),
+            tooltip: '发送',
+            onPressed: onSend,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ReadOnlyBar extends StatelessWidget {
+  final String chatTitle;
+
+  const _ReadOnlyBar({required this.chatTitle});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerLow,
+        border: Border(
+          top: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+        ),
+      ),
+      child: Text(
+        '$chatTitle 为只读会话，操作结果和错误会显示在这里。',
+        textAlign: TextAlign.center,
+        style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant),
+      ),
+    );
   }
 }
 
@@ -136,95 +220,89 @@ class _MessageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (message.type == 'system') {
+      return _SystemMessage(message: message);
+    }
     final isRecalled = message.isRecalled;
-    final alignment = isSelf ? CrossAxisAlignment.start : CrossAxisAlignment.end;
+    final alignment =
+        isSelf ? CrossAxisAlignment.end : CrossAxisAlignment.start;
     final color = isSelf
-        ? Theme.of(context).colorScheme.primaryContainer
+        ? Theme.of(context).colorScheme.primary
         : Theme.of(context).colorScheme.surfaceContainerHighest;
 
-    return GestureDetector(
-      onTap: onRecall,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        child: Column(
-          crossAxisAlignment: alignment,
-          children: [
-            // 发送者名称 + 时间
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (!isSelf)
+    return MouseRegion(
+      cursor: onRecall == null ? MouseCursor.defer : SystemMouseCursors.click,
+      child: GestureDetector(
+        onLongPress: onRecall,
+        onSecondaryTap: onRecall,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
+          child: Column(
+            crossAxisAlignment: alignment,
+            children: [
+              // 发送者名称 + 时间
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (!isSelf)
+                    Text(
+                      message.sender,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey[600],
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  if (!isSelf) const SizedBox(width: 8),
                   Text(
-                    message.sender,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.grey[600],
-                      fontWeight: FontWeight.w600,
-                    ),
+                    _formatTime(message.timestamp),
+                    style: TextStyle(fontSize: 11, color: Colors.grey[400]),
                   ),
-                if (!isSelf) const SizedBox(width: 8),
-                Text(
-                  _formatTime(message.timestamp),
-                  style: TextStyle(fontSize: 11, color: Colors.grey[400]),
+                ],
+              ),
+              const SizedBox(height: 2),
+              // 消息内容气泡
+              Container(
+                constraints: BoxConstraints(
+                  maxWidth: MediaQuery.of(context).size.width * 0.58,
                 ),
-                if (message.isHistory)
-                  Container(
-                    margin: const EdgeInsets.only(left: 4),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                    decoration: BoxDecoration(
-                      color: Colors.orange.shade100,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Text(
-                      '历史',
-                      style: TextStyle(
-                          fontSize: 10, color: Colors.orange.shade800),
-                    ),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: isRecalled ? Colors.grey.shade200 : color,
+                  borderRadius: BorderRadius.only(
+                    topLeft: const Radius.circular(18),
+                    topRight: const Radius.circular(18),
+                    bottomLeft: isSelf
+                        ? const Radius.circular(18)
+                        : const Radius.circular(4),
+                    bottomRight: isSelf
+                        ? const Radius.circular(4)
+                        : const Radius.circular(18),
                   ),
-              ],
-            ),
-            const SizedBox(height: 2),
-            // 消息内容气泡
-            Container(
-              constraints: BoxConstraints(
-                maxWidth: MediaQuery.of(context).size.width * 0.5,
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: isRecalled ? Colors.grey.shade200 : color,
-                borderRadius: BorderRadius.only(
-                  topLeft: const Radius.circular(12),
-                  topRight: const Radius.circular(12),
-                  bottomLeft:
-                      isSelf ? Radius.zero : const Radius.circular(12),
-                  bottomRight:
-                      isSelf ? const Radius.circular(12) : Radius.zero,
                 ),
+                child: isRecalled
+                    ? Text(
+                        '${message.sender}: [消息已撤回]',
+                        style: TextStyle(
+                          color: Colors.grey[500],
+                          fontStyle: FontStyle.italic,
+                        ),
+                      )
+                    : Text(
+                        message.type == 'system'
+                            ? message.content
+                            : message.content,
+                        style: TextStyle(
+                          color: isSelf
+                              ? Theme.of(context).colorScheme.onPrimary
+                              : Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
               ),
-              child: isRecalled
-                  ? Text(
-                      '${message.sender}: [消息已撤回]',
-                      style: TextStyle(
-                        color: Colors.grey[500],
-                        fontStyle: FontStyle.italic,
-                      ),
-                    )
-                  : Text(
-                      message.type == 'system'
-                          ? message.content
-                          : message.content,
-                      style: TextStyle(
-                        color: isSelf
-                            ? Theme.of(context).colorScheme.onPrimaryContainer
-                            : Theme.of(context)
-                                .colorScheme
-                                .onSurfaceVariant,
-                      ),
-                    ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -242,5 +320,37 @@ class _MessageBubble extends StatelessWidget {
     final mo = dt.month.toString().padLeft(2, '0');
     final d = dt.day.toString().padLeft(2, '0');
     return '$mo-$d $h:$m';
+  }
+}
+
+class _SystemMessage extends StatelessWidget {
+  final ChatMessage message;
+
+  const _SystemMessage({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+      child: Center(
+        child: Container(
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.62,
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.secondaryContainer,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Text(
+            message.content,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Theme.of(context).colorScheme.onSecondaryContainer,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }

@@ -50,6 +50,9 @@ from server.server_main import Server
 from protocol import send_message, recv_message
 
 
+TEST_ADMIN_SECRET = "test-admin-secret"
+
+
 # ============================================================
 # 全局辅助：初始化测试数据库
 # ============================================================
@@ -65,6 +68,7 @@ def create_test_db(db_path):
     
     预置好友关系：alice <-> bob
     """
+    os.environ["CHATROOM_ADMIN_SECRET"] = TEST_ADMIN_SECRET
     db = Database(db_path)
 
     # 创建用户
@@ -262,13 +266,61 @@ class TestAuthentication:
             t = start_mock_client(server, s1, db_path)
 
             send_message(s2, "login", "admin",
-                         extra_headers={"password": "adminpass"})
+                         extra_headers={"password": "adminpass", "admin_secret": TEST_ADMIN_SECRET})
 
             # 管理员登录的第一个响应是 admin_auth，不是 chat
             h, d = expect_response(s2, "admin_auth")
             assert h["type"] == "admin_auth"
 
             # 清理
+            s2.close()
+            t.join(timeout=2)
+
+        finally:
+            s1.close()
+
+    def test_login_admin_requires_secret(self, tmp_path):
+        """管理员账号缺少二次密钥时应拒绝登录。"""
+        db_path = str(tmp_path / "test.db")
+        create_test_db(db_path)
+
+        server = Server()
+        s1, s2 = socket.socketpair()
+
+        try:
+            t = start_mock_client(server, s1, db_path)
+
+            send_message(s2, "login", "admin",
+                         extra_headers={"password": "adminpass"})
+
+            h, d = expect_response(s2, "error")
+            assert h["type"] == "error"
+            assert "管理员密钥" in d.decode()
+
+            s2.close()
+            t.join(timeout=2)
+
+        finally:
+            s1.close()
+
+    def test_login_admin_rejects_wrong_secret(self, tmp_path):
+        """管理员账号二次密钥错误时应拒绝登录。"""
+        db_path = str(tmp_path / "test.db")
+        create_test_db(db_path)
+
+        server = Server()
+        s1, s2 = socket.socketpair()
+
+        try:
+            t = start_mock_client(server, s1, db_path)
+
+            send_message(s2, "login", "admin",
+                         extra_headers={"password": "adminpass", "admin_secret": "wrong"})
+
+            h, d = expect_response(s2, "error")
+            assert h["type"] == "error"
+            assert "管理员密钥" in d.decode()
+
             s2.close()
             t.join(timeout=2)
 
@@ -602,7 +654,7 @@ class TestFriendOperations:
         try:
             t2 = start_mock_client(server, s3, db_path)
             send_message(s4, "login", "admin",
-                         extra_headers={"password": "adminpass"})
+                         extra_headers={"password": "adminpass", "admin_secret": TEST_ADMIN_SECRET})
 
             # admin_auth 响应
             expect_response(s4, "admin_auth")
@@ -663,7 +715,7 @@ class TestFriendOperations:
         try:
             t2 = start_mock_client(server, s3, db_path)
             send_message(s4, "login", "admin",
-                         extra_headers={"password": "adminpass"})
+                         extra_headers={"password": "adminpass", "admin_secret": TEST_ADMIN_SECRET})
             recv_all_initial_data(s4)
 
             send_message(s4, "reject_friend", "",
@@ -870,10 +922,7 @@ class TestGroupOperations:
                          extra_headers={"group_id": str(group_id),
                                         "message_id": msg_id})
 
-            # alice 收到发送确认
-            h_alice, _ = expect_response(s_alice_cli, "chat")
-
-            # bob 应收到群聊消息
+            # bob 应收到群聊消息（服务端不再回发"已发送"确认给 alice）
             h_bob, d_bob = expect_response(s_bob_cli2, "group_chat")
             assert h_bob.get("from") == "alice"
             assert h_bob.get("group_id") == str(group_id)
@@ -916,7 +965,7 @@ class TestAdminCommands:
         try:
             t = start_mock_client(server, s1, db_path)
             send_message(s2, "login", "admin",
-                         extra_headers={"password": "adminpass"})
+                         extra_headers={"password": "adminpass", "admin_secret": TEST_ADMIN_SECRET})
 
             # 消费初始数据（管理员登录响应是 admin_auth，不适用于 recv_all_initial_data）
             h, _ = expect_response(s2, "admin_auth")
@@ -969,7 +1018,7 @@ class TestAdminCommands:
             # admin 登录
             t_admin = start_mock_client(server, s_admin, db_path)
             send_message(s_admin_cli, "login", "admin",
-                         extra_headers={"password": "adminpass"})
+                         extra_headers={"password": "adminpass", "admin_secret": TEST_ADMIN_SECRET})
             expect_response(s_admin_cli, "admin_auth")
             # 好友列表
             expect_response(s_admin_cli, "admin_response")

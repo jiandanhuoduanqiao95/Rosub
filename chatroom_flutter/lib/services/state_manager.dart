@@ -65,6 +65,10 @@ class AppState extends ChangeNotifier {
   UnmodifiableListView<String> get statusLog =>
       UnmodifiableListView(_statusLog);
 
+  // ---- 临时通知（SnackBar）----
+  final List<String> _noticeQueue = [];
+  List<String> get noticeQueue => UnmodifiableListView(_noticeQueue);
+
   void _log(String msg) {
     _statusLog.add('[${DateTime.now().toString().substring(11, 19)}] $msg');
     if (_statusLog.length > 500) _statusLog.removeRange(0, 100);
@@ -99,6 +103,7 @@ class AppState extends ChangeNotifier {
     _pendingFileRequests.clear();
     _messageMap.clear();
     _currentChat = null;
+    _noticeQueue.clear();
     _log('已断开连接');
     notifyListeners();
   }
@@ -243,11 +248,39 @@ class AppState extends ChangeNotifier {
     _log(msg);
   }
 
+  /// 显示临时通知（SnackBar），不进入系统消息会话
+  void showNotice(String msg) {
+    _noticeQueue.add(msg);
+    notifyListeners();
+  }
+
+  /// 消费一条通知（SnackBar 已展示后调用）
+  void consumeNotice() {
+    if (_noticeQueue.isNotEmpty) {
+      _noticeQueue.removeAt(0);
+    }
+  }
+
   /// 获取群组名称
   String? getGroupName(int groupId) {
     for (final g in _groups) {
       if (g.id == groupId) return g.name;
     }
     return null;
+  }
+
+  String displayNameForChat(String key) {
+    if (key == '服务器') return '系统消息';
+    if (key.startsWith('group_')) {
+      final groupId = int.tryParse(key.substring(6));
+      if (groupId != null) {
+        final groupName = getGroupName(groupId);
+        if (groupName != null && groupName.isNotEmpty) {
+          return '$groupName (ID:$groupId)';
+        }
+        return '群组 $groupId';
+      }
+    }
+    return key;
   }
 }

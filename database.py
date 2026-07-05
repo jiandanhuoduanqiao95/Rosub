@@ -132,19 +132,28 @@ class Database:
             ''')
             conn.commit()
 
-    def add_user(self, username, password_hash):
+    def add_user(self, username, password_hash, is_admin=False):
         with self._get_connection() as conn:
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO users (username, password_hash)
-                    VALUES (?, ?)
-                ''', (username, password_hash))
+                    INSERT INTO users (username, password_hash, is_admin)
+                    VALUES (?, ?, ?)
+                ''', (username, password_hash, 1 if is_admin else 0))
                 conn.commit()
                 return True
             except sqlite3.IntegrityError as e:
                 logging.error(f"添加用户失败: {username}, 错误: {e}")
                 return False
+
+    def set_admin(self, username, is_admin=True):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE users SET is_admin = ? WHERE username = ?
+            ''', (1 if is_admin else 0, username))
+            conn.commit()
+            return cursor.rowcount > 0
 
     def get_user(self, username):
         with self._get_connection() as conn:
@@ -171,39 +180,33 @@ class Database:
             logging.error(f"保存离线消息失败: {e}")
 
     def get_offline_messages(self, receiver):
-        """获取离线消息（接收到的 + 自己发出的）。
-        
-        接收方登录时看到的离线消息包括：
-          1. 别人发给自己的消息（receiver = self）
-          2. 自己发给别人的消息（sender = self），用于恢复会话上下文
+        """获取用户的所有聊天消息（持久化历史 + 未读消息）。
+
+        合并接收和发出的消息，按时间戳升序返回，实现微信式持久化历史。
+        包含 status='sent'（未读）和 status='delivered'（已读历史）。
         """
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            # 获取别人发给自己的离线消息
+            # 单条查询合并接收+发出，按时间戳排序，限制 500 条避免过载
             cursor.execute('''
                 SELECT sender, message_type, content, filename, message_id, status, receiver
-                FROM offline_messages 
-                WHERE receiver = ? AND status = 'sent'
-            ''', (receiver,))
-            received = cursor.fetchall()
-            # 获取自己发出的离线消息（对方未接收的）
-            cursor.execute('''
-                SELECT sender, message_type, content, filename, message_id, status, receiver
-                FROM offline_messages 
-                WHERE sender = ? AND receiver != ? AND status = 'sent'
-            ''', (receiver, receiver))
-            sent = cursor.fetchall()
+                FROM offline_messages
+                WHERE (receiver = ? OR (sender = ? AND receiver != ?))
+                  AND status IN ('sent', 'delivered')
+                ORDER BY timestamp ASC
+                LIMIT 500
+            ''', (receiver, receiver, receiver))
+            messages = cursor.fetchall()
 
-            # 将接收到的消息标记为已送达
+            # 将接收到的未读消息标记为已送达
             cursor.execute('''
-                UPDATE offline_messages 
+                UPDATE offline_messages
                 SET status = 'delivered'
                 WHERE receiver = ? AND status = 'sent'
             ''', (receiver,))
             conn.commit()
 
-            messages = received + sent
-            logging.info(f"获取离线消息: 用户={receiver}, 接收={len(received)}条, 发出={len(sent)}条, 合计={len(messages)}条")
+            logging.info(f"获取聊天历史: 用户={receiver}, 共={len(messages)}条")
             return messages
 
     def cleanup_delivered_messages(self, receiver):
@@ -406,9 +409,11 @@ class Database:
                 if not (self.user_exists(requester) and self.user_exists(target)):
                     logging.error(f"好友请求失败：用户 {requester} 或 {target} 不存在")
                     return False
+                # 仅在已有 pending 请求或 accepted 好友关系时阻止
                 cursor.execute('''
-                    SELECT 1 FROM friends 
-                    WHERE (user1 = ? AND user2 = ?) OR (user1 = ? AND user2 = ?)
+                    SELECT 1 FROM friends
+                    WHERE ((user1 = ? AND user2 = ?) OR (user1 = ? AND user2 = ?))
+                      AND status IN ('pending', 'accepted')
                 ''', (requester, target, target, requester))
                 if cursor.fetchone():
                     logging.error(f"好友请求已存在或已是好友：{requester} -> {target}")
@@ -455,8 +460,9 @@ class Database:
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
+                # 删除该方向的所有记录（不论 status），确保拒绝后可重新发送请求
                 cursor.execute('''
-                    DELETE FROM friends WHERE user1 = ? AND user2 = ? AND status = 'pending'
+                    DELETE FROM friends WHERE user1 = ? AND user2 = ?
                 ''', (requester, target))
                 conn.commit()
                 if cursor.rowcount > 0:
@@ -519,12 +525,18 @@ class Database:
                     WHERE message_id = ?
                 ''', (status, message_id))
                 conn.commit()
-                if cursor.rowcount > 0:
+                # SQLite rowcount 仅统计实际变更的行，状态未变时返回 0。
+                # 补充查询确认行存在，避免误报"不存在"。
+                cursor.execute('SELECT 1 FROM offline_messages WHERE message_id = ?', (message_id,))
+                if cursor.fetchone() is not None:
                     logging.info(f"消息状态更新：{message_id} -> {status}")
                     return True
                 else:
-                    logging.error(f"消息状态更新失败：{message_id} 不存在")
+                    logging.error(f"消息状态更新失败: {message_id} 不存在")
                     return False
+        except sqlite3.Error as e:
+            logging.error(f"消息状态更新失败: {e}")
+            return False
         except sqlite3.Error as e:
             logging.error(f"消息状态更新失败: {e}")
             return False

@@ -42,6 +42,10 @@ class Config:
         "database": {
             "path": "users.db",
         },
+        "security": {
+            "admin_secret": "",
+            "admin_secret_env": "CHATROOM_ADMIN_SECRET",
+        },
     }
 
     def __init__(self):

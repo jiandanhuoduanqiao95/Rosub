@@ -205,7 +205,6 @@ class MessageHandler:
                             from_user=username,
                             extra_headers={"filename": filename, "filesize": filesize, "message_id": message_id}
                         )
-                        send_message(ssock, "chat", f"文件请求已发送至群组 {group_id}")
                         logging.info(f"群组文件请求已保存: 群组ID={group_id}, 文件名={filename}, 消息ID={message_id}")
                     except ValueError:
                         send_message(ssock, "error", "无效的群组ID")
@@ -246,20 +245,10 @@ class MessageHandler:
                     send_message(ssock, "error", "无权限响应此文件请求")
                     logging.warning(f"文件响应失败: 用户 {username} 无权限响应消息ID={message_id}")
                     continue
-                with self.server.client_map_lock:
-                    sender_socket = self.server.client_map.get(sender)
                 if response == "accept":
                     self.server.db.save_offline_message(sender, receiver, "file", file_data, filename=filename, message_id=message_id)
                     # 同步写入永久消息历史
                     self.server.db.save_message_history(sender, receiver, "file", file_data, filename=filename, message_id=message_id)
-                    if sender_socket:
-                        try:
-                            send_message(sender_socket, "chat", f"用户 {receiver} 已接受文件 {filename}")
-                            logging.info(f"通知发送方: {receiver} 接受文件 {filename}, 消息ID={message_id}")
-                        except Exception as e:
-                            logging.error(f"通知发送方失败: {receiver} 接受文件 {filename}, 消息ID={message_id}, 错误={e}")
-                            with self.server.client_map_lock:
-                                self.server.client_map.pop(sender, None)
                     if self.server.client_map.get(receiver):
                         try:
                             send_message(self.server.client_map[receiver], "file", file_data,
@@ -272,14 +261,6 @@ class MessageHandler:
                     self.server.db.delete_file_request(message_id)
                     logging.info(f"文件请求已删除: 消息ID={message_id}")
                 else:
-                    if sender_socket:
-                        try:
-                            send_message(sender_socket, "chat", f"用户 {receiver} 已拒绝文件 {filename}")
-                            logging.info(f"通知发送方: {receiver} 拒绝文件 {filename}, 消息ID={message_id}")
-                        except Exception as e:
-                            logging.error(f"通知发送方失败: {receiver} 拒绝文件 {filename}, 消息ID={message_id}, 错误={e}")
-                            with self.server.client_map_lock:
-                                self.server.client_map.pop(sender, None)
                     self.server.db.delete_file_request(message_id)
                     logging.info(f"文件请求已删除: 消息ID={message_id}")
 
@@ -344,10 +325,7 @@ class MessageHandler:
 
             elif msg_type == "reject_friend":
                 requester = header.get("from")
-                if not self.server.db.has_pending_request(requester, username):
-                    send_message(ssock, "error", f"没有来自 {requester} 的好友请求")
-                    logging.warning(f"拒绝好友请求失败: 没有来自 {requester} 的请求")
-                    continue
+                # 直接删除好友请求记录（不论当前 status），避免残留记录阻止重新请求
                 self.server.db.reject_friend_request(requester, username)
                 send_message(ssock, "chat", f"已拒绝 {requester} 的好友请求")
                 logging.info(f"好友请求拒绝：{requester} -> {username}")
@@ -384,10 +362,8 @@ class MessageHandler:
                         message_info = cursor.fetchone()
 
                 if not message_info and not file_request and not group_file_request:
-                    send_message(ssock, "error", f"消息或文件请求 {message_id} 不存在")
-
-                    logging.warning(f"撤回消息失败: 消息ID={message_id} 不存在")
-
+                    # 目标不存在：可能已被接受或已撤回，静默成功（幂等）
+                    logging.info(f"撤回目标不存在（可能已接受或已撤回）: 消息ID={message_id}")
                     continue
 
                 # 处理群组消息撤回
@@ -501,8 +477,6 @@ class MessageHandler:
 
                         )
 
-                        send_message(ssock, "chat", f"群组消息 {message_id} 已撤回")
-
                         logging.info(f"群组消息撤回成功: 用户={username}, 群组ID={group_id}, 消息ID={message_id}")
 
 
@@ -586,8 +560,6 @@ class MessageHandler:
 
                                     self.server.client_map.pop(receiver, None)
 
-                        send_message(ssock, "chat", f"消息 {message_id} 已撤回")
-
                         logging.info(f"私聊消息撤回成功: {username} 撤回了 {message_id}")
 
                     else:
@@ -665,8 +637,6 @@ class MessageHandler:
 
                                     self.server.client_map.pop(receiver, None)
 
-                        send_message(ssock, "chat", f"文件请求 {message_id} 已撤回")
-
                         logging.info(f"私聊文件请求撤回成功: {username} 撤回了 {message_id}")
 
                     else:
@@ -729,8 +699,6 @@ class MessageHandler:
                             from_user="系统"
 
                         )
-
-                        send_message(ssock, "chat", f"群组文件请求 {message_id} 已撤回")
 
                         logging.info(f"群组文件请求撤回成功: {username} 撤回了 {message_id} 在群组 {group_id}")
 

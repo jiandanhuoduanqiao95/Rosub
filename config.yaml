@@ -26,3 +26,9 @@ message:
 
 database:
   path: "users.db"       # SQLite 数据库文件路径
+
+security:
+  # 管理员注册/登录密钥。生产环境建议不要把真实密钥写入此文件，
+  # 优先通过下方环境变量 CHATROOM_ADMIN_SECRET 注入。
+  admin_secret: ""
+  admin_secret_env: "CHATROOM_ADMIN_SECRET"

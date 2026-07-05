@@ -448,10 +448,8 @@ class TestE2EMessageRecall:
         h, d = bob.recv(timeout=3)
         assert h is not None and "将被撤回" in (d.decode() if d else ""), f"bob 未收到消息: {h}"
 
-        # 撤回
+        # 撤回（服务端不再回发"已撤回"确认，直接验证 bob 收到 recall 通知）
         alice.send("recall", "", message_id=msg_id)
-        h, d = alice.recv(timeout=2)
-        assert "已撤回" in (d.decode() if d else ""), f"撤回失败: {d.decode() if d else h}"
 
         # bob 收到撤回通知
         h, d = bob.recv(timeout=3)

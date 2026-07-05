@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+markers = [
+    "e2e: end-to-end tests that require a real TCP server (slower)",
+]

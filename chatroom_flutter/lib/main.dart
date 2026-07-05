@@ -20,8 +20,7 @@ class ChatroomApp extends StatefulWidget {
   State<ChatroomApp> createState() => _ChatroomAppState();
 }
 
-class _ChatroomAppState extends State<ChatroomApp>
-    with WidgetsBindingObserver {
+class _ChatroomAppState extends State<ChatroomApp> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
@@ -44,24 +43,47 @@ class _ChatroomAppState extends State<ChatroomApp>
 
   @override
   Widget build(BuildContext context) {
+    const seedColor = Color(0xFF2563EB);
     return MaterialApp(
       title: '聊天室',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorSchemeSeed: const Color(0xFF1976D2),
-        useMaterial3: true,
-        brightness: Brightness.light,
-      ),
-      darkTheme: ThemeData(
-        colorSchemeSeed: const Color(0xFF1976D2),
-        useMaterial3: true,
-        brightness: Brightness.dark,
-      ),
+      theme: _buildTheme(Brightness.light, seedColor),
+      darkTheme: _buildTheme(Brightness.dark, seedColor),
       themeMode: ThemeMode.system,
       home: const LoginScreen(),
       routes: {
         '/login': (_) => const LoginScreen(),
       },
+    );
+  }
+
+  ThemeData _buildTheme(Brightness brightness, Color seedColor) {
+    final scheme = ColorScheme.fromSeed(
+      seedColor: seedColor,
+      brightness: brightness,
+    );
+    return ThemeData(
+      colorScheme: scheme,
+      useMaterial3: true,
+      scaffoldBackgroundColor: scheme.surface,
+      appBarTheme: AppBarTheme(
+        centerTitle: false,
+        backgroundColor: scheme.surface,
+        foregroundColor: scheme.onSurface,
+        elevation: 0,
+      ),
+      cardTheme: CardThemeData(
+        clipBehavior: Clip.antiAlias,
+        surfaceTintColor: scheme.surfaceTint,
+      ),
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
+          minimumSize: const Size.fromHeight(46),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+      ),
     );
   }
 }

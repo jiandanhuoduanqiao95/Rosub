@@ -42,6 +42,7 @@ class RawTextField extends StatefulWidget {
 
 class _RawTextFieldState extends State<RawTextField> {
   late final FocusNode _focusNode;
+  final Object _imeOwner = Object();
   int _cursorPos = 0;
   int _selStart = 0;
   int _selEnd = 0;
@@ -49,6 +50,7 @@ class _RawTextFieldState extends State<RawTextField> {
   bool _bridgeActive = false;
   bool _stealingFocus = false;
   bool _submitting = false;
+  bool _updatingController = false;
   Timer? _cursorTimer;
   bool _showCursor = true;
   late bool _obscured;
@@ -69,9 +71,12 @@ class _RawTextFieldState extends State<RawTextField> {
     // 将 onKeyEvent 直接绑定到 FocusNode，避免 rebuild 时回调重建导致焦点脱钩
     _focusNode.onKeyEvent = _onKey;
 
+    widget.controller.addListener(_onControllerChanged);
+
     if (widget.showChineseInput) {
       ImeBridgeManager.instance.ensureStarted();
       ImeBridgeManager.instance.addTextListener(_onImeText);
+      ImeBridgeManager.instance.addCursorListener(_onImeCursor);
       ImeBridgeManager.instance.addSubmitListener(_onImeSubmit);
       ImeBridgeManager.instance.addEscapeListener(_onImeEscape);
     }
@@ -87,11 +92,8 @@ class _RawTextFieldState extends State<RawTextField> {
       },
     );
 
-    // 注意：不添加 controller listener 来重置 cursorPos，
-    // 因为这会在 _deleteBefore 等内部操作时产生竞态条件，
-    // 导致 _cursorPos 变为 -1（controller listener 将 _cursorPos 重置为 0，
-    // 然后 setState 中的 _cursorPos-- 将其变为 -1）。
-    // 所有文本修改操作均显式管理 _cursorPos，无需外部监听器干预。
+    // controller listener 只处理外部 clear/set；内部编辑用 _updatingController
+    // 屏蔽回调，避免删除键和 IME 同步产生竞态。
   }
 
   @override
@@ -99,13 +101,13 @@ class _RawTextFieldState extends State<RawTextField> {
     _cursorTimer?.cancel();
     _focusNode.onKeyEvent = null;
     _focusNode.removeListener(_onFocusChanged);
+    widget.controller.removeListener(_onControllerChanged);
     if (widget.showChineseInput) {
       // 确保桥接释放焦点，避免残留焦点阻塞其他界面输入
-      if (_bridgeActive) {
-        _bridgeActive = false;
-        ImeBridgeManager.instance.releaseFocus();
-      }
+      _bridgeActive = false;
+      ImeBridgeManager.instance.releaseOwner(_imeOwner);
       ImeBridgeManager.instance.removeTextListener(_onImeText);
+      ImeBridgeManager.instance.removeCursorListener(_onImeCursor);
       ImeBridgeManager.instance.removeSubmitListener(_onImeSubmit);
       ImeBridgeManager.instance.removeEscapeListener(_onImeEscape);
     }
@@ -138,47 +140,86 @@ class _RawTextFieldState extends State<RawTextField> {
   void _activateBridge() {
     _stealingFocus = true;
     _bridgeActive = true;
-    ImeBridgeManager.instance.grabFocus();
+    ImeBridgeManager.instance.setActiveOwner(_imeOwner);
+    ImeBridgeManager.instance.grabFocus(widget.controller.text);
 
-    // 短暂延迟后检查：如果桥接未能抢走焦点（某些 WM 禁止 focus stealing），
-    // 回退到纯 ASCII 模式
-    Future.delayed(const Duration(milliseconds: 250), () {
-      if (mounted) {
-        _stealingFocus = false;
-        if (_hasFocus && _bridgeActive) {
-          _bridgeActive = false;
-          ImeBridgeManager.instance.releaseFocus();
-          setState(() {});
-        }
-      }
+    Future.delayed(const Duration(milliseconds: 120), () {
+      if (mounted) _stealingFocus = false;
     });
   }
 
   void _deactivateBridge() {
     _bridgeActive = false;
-    ImeBridgeManager.instance.releaseFocus();
+    ImeBridgeManager.instance.releaseOwner(_imeOwner);
     if (_hasSelection) _clearSelection();
   }
+
+  void _onControllerChanged() {
+    if (_updatingController) return;
+    final len = widget.controller.text.length;
+    final nextCursor = _clampIndex(_cursorPos, len);
+    setState(() {
+      _cursorPos = nextCursor;
+      _clearSelection();
+    });
+    if (widget.showChineseInput &&
+        _bridgeActive &&
+        ImeBridgeManager.instance.isActiveOwner(_imeOwner)) {
+      if (widget.controller.text.isEmpty) {
+        ImeBridgeManager.instance.clearText();
+      } else {
+        ImeBridgeManager.instance.setText(widget.controller.text);
+      }
+    }
+  }
+
+  void _setControllerText(String text, int cursor) {
+    _updatingController = true;
+    widget.controller.text = text;
+    _updatingController = false;
+    _cursorPos = _clampIndex(cursor, text.length);
+    _clearSelection();
+  }
+
+  int _clampIndex(int value, int length) => value.clamp(0, length).toInt();
 
   // ---- IME 桥接回调 ----
 
   /// 收到桥接的完整文本 → 直接替换显示内容
   void _onImeText(String text) {
-    if (_submitting || !mounted) return;
+    if (_submitting ||
+        !mounted ||
+        !_bridgeActive ||
+        !ImeBridgeManager.instance.isActiveOwner(_imeOwner)) {
+      return;
+    }
     setState(() {
-      widget.controller.text = text;
-      _cursorPos = text.length;
+      _setControllerText(text, text.length);
+    });
+  }
+
+  /// 收到桥接的光标位置变化 → 更新视觉光标（方向键、点击等）
+  void _onImeCursor(int position) {
+    if (!mounted ||
+        !_bridgeActive ||
+        !ImeBridgeManager.instance.isActiveOwner(_imeOwner)) {
+      return;
+    }
+    setState(() {
+      _cursorPos = _clampIndex(position, widget.controller.text.length);
       _clearSelection();
     });
   }
 
   /// 收到桥接的提交信号 → 触发 onSubmitted
   void _onImeSubmit() {
-    if (!_bridgeActive) return;
+    if (!_bridgeActive || !ImeBridgeManager.instance.isActiveOwner(_imeOwner)) {
+      return;
+    }
     _submitting = true;
     final text = widget.controller.text;
     _bridgeActive = false;
-    ImeBridgeManager.instance.releaseFocus();
+    ImeBridgeManager.instance.releaseOwner(_imeOwner);
     if (text.isNotEmpty) {
       widget.onSubmitted?.call(text);
     }
@@ -187,13 +228,13 @@ class _RawTextFieldState extends State<RawTextField> {
 
   /// 收到桥接的取消信号 → 放弃输入
   void _onImeEscape() {
-    if (!_bridgeActive) return;
+    if (!_bridgeActive || !ImeBridgeManager.instance.isActiveOwner(_imeOwner)) {
+      return;
+    }
     _bridgeActive = false;
-    ImeBridgeManager.instance.releaseFocus();
+    ImeBridgeManager.instance.releaseOwner(_imeOwner);
     setState(() {
-      widget.controller.clear();
-      _cursorPos = 0;
-      _clearSelection();
+      _setControllerText('', 0);
     });
   }
 
@@ -213,11 +254,11 @@ class _RawTextFieldState extends State<RawTextField> {
   void _deleteSelection() {
     if (!_hasSelection) return;
     final t = widget.controller.text;
-    widget.controller.text =
-        t.substring(0, _selLow) + t.substring(_selHigh);
     setState(() {
-      _cursorPos = _selLow;
-      _clearSelection();
+      _setControllerText(
+        t.substring(0, _selLow) + t.substring(_selHigh),
+        _selLow,
+      );
     });
   }
 
@@ -381,33 +422,31 @@ class _RawTextFieldState extends State<RawTextField> {
 
   void _insert(String ch) {
     final t = widget.controller.text;
-    final pos = _cursorPos.clamp(0, t.length);
-    widget.controller.text =
-        t.substring(0, pos) + ch + t.substring(pos);
+    final pos = _clampIndex(_cursorPos, t.length);
     setState(() {
-      _cursorPos = pos + 1;
-      _clearSelection();
+      _setControllerText(t.substring(0, pos) + ch + t.substring(pos), pos + 1);
     });
   }
 
   void _deleteBefore() {
     if (_cursorPos <= 0) return;
     final t = widget.controller.text;
-    final newPos = (_cursorPos - 1).clamp(0, t.length);
-    widget.controller.text =
-        t.substring(0, newPos) + t.substring(_cursorPos.clamp(0, t.length));
+    final newPos = _clampIndex(_cursorPos - 1, t.length);
     setState(() {
-      _cursorPos = newPos;
-      _clearSelection();
+      _setControllerText(
+        t.substring(0, newPos) + t.substring(_clampIndex(_cursorPos, t.length)),
+        newPos,
+      );
     });
   }
 
   void _deleteAfter() {
     final t = widget.controller.text;
-    final pos = _cursorPos.clamp(0, t.length);
+    final pos = _clampIndex(_cursorPos, t.length);
     if (pos >= t.length) return;
-    widget.controller.text =
-        t.substring(0, pos) + t.substring(pos + 1);
+    setState(() {
+      _setControllerText(t.substring(0, pos) + t.substring(pos + 1), pos);
+    });
   }
 
   // ---- UI ----
@@ -419,59 +458,65 @@ class _RawTextFieldState extends State<RawTextField> {
     final text = widget.controller.text;
     final display = _obscured ? '●' * text.length : text;
 
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () {
-        _focusNode.requestFocus();
-        // 如果桥接活跃但用户点击了输入框，重新抢占焦点
-        // （处理用户点击别处后返回输入框的场景）
-        if (_bridgeActive) {
-          ImeBridgeManager.instance.grabFocus();
-        }
-        if (_hasSelection) setState(() => _clearSelection());
+    return TapRegion(
+      onTapOutside: (_) {
+        if (_bridgeActive) _deactivateBridge();
+        _focusNode.unfocus();
       },
-      child: Focus(
-        focusNode: _focusNode,
-        // onKeyEvent 已在 initState 中直接绑定到 _focusNode，
-        // 不通过 widget 参数传递，避免 rebuild 时脱钩
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          height: 56,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-          alignment: Alignment.centerLeft,
-          decoration: BoxDecoration(
-            color: _visuallyFocused
-                ? Theme.of(context).colorScheme.surfaceContainerHighest
-                : Theme.of(context).colorScheme.surfaceContainerLow,
-            border: Border.all(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          _focusNode.requestFocus();
+          // 如果桥接活跃但用户点击了输入框，重新抢占焦点
+          // （处理用户点击别处后返回输入框的场景）
+          if (_bridgeActive) {
+            ImeBridgeManager.instance.setActiveOwner(_imeOwner);
+            ImeBridgeManager.instance.grabFocus(widget.controller.text);
+          }
+          if (_hasSelection) setState(() => _clearSelection());
+        },
+        child: Focus(
+          focusNode: _focusNode,
+          // onKeyEvent 已在 initState 中直接绑定到 _focusNode，
+          // 不通过 widget 参数传递，避免 rebuild 时脱钩
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            height: 56,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+            alignment: Alignment.centerLeft,
+            decoration: BoxDecoration(
               color: _visuallyFocused
-                  ? Theme.of(context).colorScheme.primary
-                  : Colors.grey.shade400,
-              width: _visuallyFocused ? 2.0 : 1.0,
+                  ? Theme.of(context).colorScheme.surfaceContainerHighest
+                  : Theme.of(context).colorScheme.surfaceContainerLow,
+              border: Border.all(
+                color: _visuallyFocused
+                    ? Theme.of(context).colorScheme.primary
+                    : Colors.grey.shade400,
+                width: _visuallyFocused ? 2.0 : 1.0,
+              ),
+              borderRadius: BorderRadius.circular(4),
             ),
-            borderRadius: BorderRadius.circular(4),
-          ),
-          child: Row(
-            children: [
-              Expanded(child: _buildContent(text, display)),
-              if (widget.showVisibilityToggle)
-                SizedBox(
-                  width: 36,
-                  height: 36,
-                  child: IconButton(
-                    icon: Icon(
-                      _obscured
-                          ? Icons.visibility_off_rounded
-                          : Icons.visibility_rounded,
-                      size: 20,
-                      color: Colors.grey.shade600,
+            child: Row(
+              children: [
+                Expanded(child: _buildContent(text, display)),
+                if (widget.showVisibilityToggle)
+                  SizedBox(
+                    width: 36,
+                    height: 36,
+                    child: IconButton(
+                      icon: Icon(
+                        _obscured
+                            ? Icons.visibility_off_rounded
+                            : Icons.visibility_rounded,
+                        size: 20,
+                        color: Colors.grey.shade600,
+                      ),
+                      padding: EdgeInsets.zero,
+                      onPressed: () => setState(() => _obscured = !_obscured),
                     ),
-                    padding: EdgeInsets.zero,
-                    onPressed: () =>
-                        setState(() => _obscured = !_obscured),
                   ),
-                ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -493,12 +538,11 @@ class _RawTextFieldState extends State<RawTextField> {
       );
     }
 
-    final low = _selLow.clamp(0, display.length);
-    final high = _selHigh.clamp(0, display.length);
-    final cursor = _cursorPos.clamp(0, display.length);
+    final low = _clampIndex(_selLow, display.length);
+    final high = _clampIndex(_selHigh, display.length);
+    final cursor = _clampIndex(_cursorPos, display.length);
     final spans = <InlineSpan>[];
-    final baseStyle =
-        DefaultTextStyle.of(context).style.copyWith(fontSize: 16);
+    final baseStyle = DefaultTextStyle.of(context).style.copyWith(fontSize: 16);
 
     int i = 0;
     while (i < display.length || (i == cursor && i == display.length)) {
@@ -521,10 +565,8 @@ class _RawTextFieldState extends State<RawTextField> {
         spans.add(TextSpan(
           text: display.substring(i, high),
           style: TextStyle(
-            backgroundColor: Theme.of(context)
-                .colorScheme
-                .primary
-                .withValues(alpha: 0.35),
+            backgroundColor:
+                Theme.of(context).colorScheme.primary.withValues(alpha: 0.35),
           ),
         ));
         i = high;
@@ -536,14 +578,10 @@ class _RawTextFieldState extends State<RawTextField> {
             text: display[i],
             style: TextStyle(
               backgroundColor: _showCursor
-                  ? Theme.of(context)
-                      .colorScheme
-                      .primary
-                      .withValues(alpha: 0.7)
+                  ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.7)
                   : Colors.transparent,
-              color: _showCursor
-                  ? Theme.of(context).colorScheme.onPrimary
-                  : null,
+              color:
+                  _showCursor ? Theme.of(context).colorScheme.onPrimary : null,
             ),
           ));
           i++;

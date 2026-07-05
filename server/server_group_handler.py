@@ -48,7 +48,6 @@ class GroupHandler:
                     self.server.db.join_group(group_id, username)
                     send_message(ssock, "chat", f"已加入群组 {group_id}")
                     logging.info(f"用户 {username} 加入群组: {group_id}")
-                    self.notify_group_members(group_id, "chat", f"{username} 加入了群组", from_user="系统")
                     # 通知客户端刷新群组列表
                     with self.server.client_map_lock:
                         if username in self.server.client_map:
@@ -110,7 +109,6 @@ class GroupHandler:
                     from_user=username,
                     extra_headers={"message_id": original_message_id}
                 )
-                send_message(ssock, "chat", f"群组消息已发送至群组 {group_id}")
                 logging.info(f"群组消息: 用户={username}, 群组ID={group_id}, 消息ID={original_message_id}")
 
             except ValueError:
@@ -144,18 +142,8 @@ class GroupHandler:
                 logging.warning(f"群组文件响应失败: 用户 {username} 不在群组 {group_id} 中")
                 return
             self.server.db.save_group_file_response(message_id, group_id, username, response)
-            with self.server.client_map_lock:
-                sender_socket = self.server.client_map.get(sender)
             if response == "accept":
                 self.server.db.save_offline_message(sender, username, "file", file_data, filename=filename, message_id=message_id)
-                if sender_socket:
-                    try:
-                        send_message(sender_socket, "chat", f"用户 {username} 已接受群组 {group_id} 的文件 {filename}")
-                        logging.info(f"通知发送方: {username} 接受群组文件 {filename}, 消息ID={message_id}")
-                    except Exception as e:
-                        logging.error(f"通知发送方失败: {username} 接受群组文件 {filename}, 消息ID={message_id}, 错误={e}")
-                        with self.server.client_map_lock:
-                            self.server.client_map.pop(sender, None)
                 if self.server.client_map.get(username):
                     try:
                         send_message(self.server.client_map[username], "file", file_data,
@@ -165,15 +153,6 @@ class GroupHandler:
                         logging.error(f"传输群组文件失败: {sender} -> {username}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
                         with self.server.client_map_lock:
                             self.server.client_map.pop(username, None)
-            else:
-                if sender_socket:
-                    try:
-                        send_message(sender_socket, "chat", f"用户 {username} 已拒绝群组 {group_id} 的文件 {filename}")
-                        logging.info(f"通知发送方: {username} 拒绝群组文件 {filename}, 消息ID={message_id}")
-                    except Exception as e:
-                        logging.error(f"通知发送方失败: {username} 拒绝群组文件 {filename}, 消息ID={message_id}, 错误={e}")
-                        with self.server.client_map_lock:
-                            self.server.client_map.pop(sender, None)
             if self.server.db.all_members_responded(message_id, group_id):
                 self.server.db.delete_group_file_request(message_id)
                 logging.info(f"群组文件请求已删除: 消息ID={message_id}, 所有成员已响应")

@@ -23,7 +23,7 @@ class SocketService {
 
   SecureSocket? _socket;
   MessageReader? _reader;
-  StreamSubscription? _listenSub;
+  Future<void>? _listenFuture;
   bool _running = false;
 
   /// 已连接的 socket（供外部查询）
@@ -63,7 +63,6 @@ class SocketService {
   /// 断开连接
   void disconnect() {
     _running = false;
-    _listenSub?.cancel();
     _reader?.close();
     try {
       _socket?.close();
@@ -78,14 +77,23 @@ class SocketService {
   // ============================================================
 
   /// 登录
-  Future<String?> login(String username, String password) async {
+  Future<String?> login(
+    String username,
+    String password, {
+    String? adminSecret,
+  }) async {
     if (_socket == null) return '未连接到服务器';
+
+    final extraHeaders = <String, String>{'password': password};
+    if (adminSecret != null && adminSecret.isNotEmpty) {
+      extraHeaders['admin_secret'] = adminSecret;
+    }
 
     await sendMessage(
       _socket!,
       'login',
       username,
-      extraHeaders: {'password': password},
+      extraHeaders: extraHeaders,
     );
 
     // 等待登录响应（阻塞式，在启动监听前处理初始数据）
@@ -110,14 +118,23 @@ class SocketService {
   }
 
   /// 注册
-  Future<String?> register(String username, String password) async {
+  Future<String?> register(
+    String username,
+    String password, {
+    String? adminSecret,
+  }) async {
     if (_socket == null) return '未连接到服务器';
+
+    final extraHeaders = <String, String>{'password': password};
+    if (adminSecret != null && adminSecret.isNotEmpty) {
+      extraHeaders['admin_secret'] = adminSecret;
+    }
 
     await sendMessage(
       _socket!,
       'register',
       username,
-      extraHeaders: {'password': password},
+      extraHeaders: extraHeaders,
     );
 
     final (header, body) = await recvMessage(_reader!, chunkSize: 65536);
@@ -128,8 +145,8 @@ class SocketService {
       return utf8.decode(body ?? Uint8List(0));
     }
 
-    // 注册成功（type == 'chat', body == '注册成功'）
-    state.setLoggedIn(username, false);
+    final isAdmin = type == 'admin_auth';
+    state.setLoggedIn(username, isAdmin);
 
     // 接收初始数据
     await _receiveInitialData();
@@ -176,7 +193,7 @@ class SocketService {
                 content: text,
                 type: 'chat',
                 messageId: messageId,
-                isHistory: true,
+                isHistory: false,
                 status: 'delivered',
               ),
             );
@@ -188,9 +205,7 @@ class SocketService {
             final filename = header['filename'] as String? ?? 'file';
             final to = header['to'] as String?;
             // 自己发的文件按收件人归类，别人发的按发送者归类
-            final chatKey = (from == state.username && to != null)
-                ? to
-                : from;
+            final chatKey = (from == state.username && to != null) ? to : from;
             state.addMessage(
               chatKey,
               ChatMessage(
@@ -200,7 +215,7 @@ class SocketService {
                 messageId: messageId,
                 filename: filename,
                 fileData: body,
-                isHistory: true,
+                isHistory: false,
                 status: 'delivered',
               ),
             );
@@ -219,7 +234,7 @@ class SocketService {
                 content: text,
                 type: 'group_chat',
                 messageId: messageId,
-                isHistory: true,
+                isHistory: false,
                 status: 'delivered',
                 groupId: groupId != null ? int.tryParse(groupId) : null,
               ),
@@ -297,10 +312,10 @@ class SocketService {
 
   /// 启动后台消息监听循环
   void _startListening() {
-    _listenSub?.cancel();
-    _listenSub = Stream<void>.periodic(const Duration(milliseconds: 10))
-        .asyncMap((_) => _listenLoop())
-        .listen(null);
+    if (_listenFuture != null) return;
+    _listenFuture = _listenLoop().whenComplete(() {
+      _listenFuture = null;
+    });
   }
 
   Future<void> _listenLoop() async {
@@ -331,37 +346,47 @@ class SocketService {
         final text = utf8.decode(body);
         if (isHistory) break; // 初始数据阶段已处理
         final sender = from ?? '系统';
-        // 系统来源消息（公告、服务器通知等）统一归入「服务器」会话，
-        // 否则按发送者归类（好友私聊）
-        final isSystemSender = sender == '系统' || sender == '服务器' || sender.startsWith('[');
-        // 非管理员只展示系统公告，其余系统消息一律忽略
-        // 注：好友刷新逻辑必须在过滤之前，否则被加好友方看不到对方
-        if (isSystemSender && !state.isAdmin && sender != '[系统公告]') {
-          // 即使不展示消息，仍需检测好友请求响应以自动刷新好友列表
+        // 系统来源消息：公告 → 系统消息会话；其余 → 临时通知
+        final isSystemSender =
+            sender == '系统' || sender == '服务器' || sender.startsWith('[');
+        if (isSystemSender) {
+          if (sender == '[系统公告]') {
+            // 管理员公告 → 进入系统消息会话
+            state.addMessage(
+              '服务器',
+              ChatMessage(
+                sender: sender,
+                content: text,
+                type: 'system',
+                messageId: messageId,
+                status: 'delivered',
+              ),
+            );
+          } else {
+            // 其他系统消息（操作确认、离线提示等）→ SnackBar 通知
+            state.showNotice(text);
+          }
+          // 检测好友请求被接受的系统通知，自动刷新好友列表
           if (sender == '系统' &&
               (text.contains('已接受') || text.contains('接受您的好友请求'))) {
             _requestFriendList();
           }
-          break;
-        }
-        final chatKey = isSystemSender ? '服务器' : sender;
-        state.addMessage(
-          chatKey,
-          ChatMessage(
-            sender: sender,
-            content: text,
-            type: 'chat',
-            messageId: messageId,
-            status: 'delivered',
-          ),
-        );
-        // 检测好友请求被接受的系统通知，自动刷新好友列表
-        if (sender == '系统' && (text.contains('已接受') || text.contains('接受您的好友请求'))) {
-          _requestFriendList();
-        }
-        // 自动发送回执（跳过系统消息）
-        if (from != null && !isHistory && !isSystemSender) {
-          _sendReceipt(messageId, from);
+        } else {
+          // 好友私聊
+          state.addMessage(
+            sender,
+            ChatMessage(
+              sender: sender,
+              content: text,
+              type: 'chat',
+              messageId: messageId,
+              status: 'delivered',
+            ),
+          );
+          // 自动发送回执
+          if (from != null && !isHistory) {
+            _sendReceipt(messageId, from);
+          }
         }
         break;
 
@@ -421,8 +446,7 @@ class SocketService {
       // ---- 群聊消息 ----
       case 'group_chat':
         final groupId = header['group_id'] as String?;
-        final chatKey =
-            groupId != null ? 'group_$groupId' : (from ?? '群组');
+        final chatKey = groupId != null ? 'group_$groupId' : (from ?? '群组');
         final text = utf8.decode(body);
         final sender = from ?? '未知';
         state.addMessage(
@@ -447,8 +471,7 @@ class SocketService {
               messageId: messageId,
               sender: from,
               filename: header['filename'] as String? ?? 'file',
-              filesize:
-                  int.tryParse(header['filesize'] as String? ?? '0') ?? 0,
+              filesize: int.tryParse(header['filesize'] as String? ?? '0') ?? 0,
               groupId: groupId != null ? int.tryParse(groupId) : null,
             ));
           }
@@ -497,7 +520,8 @@ class SocketService {
               final online = item[1] == true;
               final admin = item[2] == true;
               if (online) onlineCount++;
-              buf.writeln('  $uname ${online ? "🟢" : "⚪"}${admin ? " [管理员]" : ""}');
+              buf.writeln(
+                  '  $uname ${online ? "🟢" : "⚪"}${admin ? " [管理员]" : ""}');
             }
             buf.writeln('\n在线: $onlineCount / ${list.length}');
             state.addMessage(
@@ -533,9 +557,7 @@ class SocketService {
         try {
           final List<dynamic> list = jsonDecode(utf8.decode(body));
           state.setGroups(
-            list
-                .map((e) => Group.fromJson(e as Map<String, dynamic>))
-                .toList(),
+            list.map((e) => Group.fromJson(e as Map<String, dynamic>)).toList(),
           );
         } catch (_) {}
         break;
@@ -544,18 +566,7 @@ class SocketService {
       case 'error':
         final errorText = utf8.decode(body);
         state.log('错误: $errorText');
-        // 非管理员不展示错误消息
-        if (state.isAdmin) {
-          state.addMessage(
-            '服务器',
-            ChatMessage(
-              sender: '服务器',
-              content: '错误: $errorText',
-              type: 'system',
-              messageId: messageId,
-            ),
-          );
-        }
+        state.showNotice('错误: $errorText');
         break;
 
       default:

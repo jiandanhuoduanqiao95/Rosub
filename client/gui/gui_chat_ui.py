@@ -116,15 +116,17 @@ class ChatUI:
              self.switch_chat_window(friend)
 
      def show_chat(self):
-         self.client_gui.login_ui.username_entry.delete(0, 'end')
-         self.client_gui.login_ui.password_entry.delete(0, 'end')
-         self.client_gui.login_ui.login_frame.grid_forget()
-         self.chat_frame.grid()
-         if self.client_gui.is_admin:
-             self.admin_btn.grid(row=0, column=2, sticky='ne')
-         self.client_gui.root.geometry("800x500")
-         self.client_gui.root.title(f"聊天室 - {self.client_gui.username}")
-         self.client_gui.message_handler.refresh_user_list()
+          self.client_gui.login_ui.username_entry.delete(0, 'end')
+          self.client_gui.login_ui.password_entry.delete(0, 'end')
+          if self.client_gui.login_ui.admin_secret_entry is not None:
+              self.client_gui.login_ui.admin_secret_entry.delete(0, 'end')
+          self.client_gui.login_ui.login_frame.grid_forget()
+          self.chat_frame.grid()
+          if self.client_gui.is_admin:
+              self.admin_btn.grid(row=0, column=2, sticky='ne')
+          self.client_gui.root.geometry("800x500")
+          self.client_gui.root.title(f"聊天室 - {self.client_gui.username}")
+          self.client_gui.message_handler.refresh_user_list()
 
      def append_chat(self, friend, message, tag=None):
          self.client_gui.root.after(0, self._append_chat, friend, message, tag)

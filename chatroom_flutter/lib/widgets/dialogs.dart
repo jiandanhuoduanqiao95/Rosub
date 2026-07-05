@@ -26,14 +26,20 @@ void showAddFriendDialog(BuildContext context, ValueChanged<String> onAdd) {
         hintText: '好友用户名',
       ),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+        TextButton(
+            onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
         FilledButton(
           onPressed: () {
             final name = ctrl.text.trim();
-            if (name.isNotEmpty) {
-              onAdd(name);
-              Navigator.pop(ctx);
+            final valid = InputValidator.validateUsername(name);
+            if (!valid.valid) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(valid.error ?? '用户名不合法')),
+              );
+              return;
             }
+            onAdd(name);
+            Navigator.pop(ctx);
           },
           child: const Text('添加'),
         ),
@@ -59,7 +65,8 @@ void showCreateGroupDialog(
         showChineseInput: true,
       ),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+        TextButton(
+            onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
         FilledButton(
           onPressed: () {
             final name = ctrl.text.trim();
@@ -90,14 +97,19 @@ void showJoinGroupDialog(BuildContext context, ValueChanged<int> onJoin) {
         hintText: '群组 ID',
       ),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+        TextButton(
+            onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
         FilledButton(
           onPressed: () {
             final id = int.tryParse(ctrl.text.trim());
-            if (id != null) {
-              onJoin(id);
-              Navigator.pop(ctx);
+            if (id == null || id <= 0) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('请输入有效的群组 ID')),
+              );
+              return;
             }
+            onJoin(id);
+            Navigator.pop(ctx);
           },
           child: const Text('加入'),
         ),
@@ -189,15 +201,13 @@ void showFileRequestsDialog(
                 itemCount: requests.length,
                 itemBuilder: (_, i) {
                   final req = requests[i];
-                  final sizeStr =
-                      req.filesize > 1024 * 1024
-                          ? '${(req.filesize / (1024 * 1024)).toStringAsFixed(1)} MB'
-                          : req.filesize > 1024
-                              ? '${(req.filesize / 1024).toStringAsFixed(1)} KB'
-                              : '${req.filesize} B';
+                  final sizeStr = req.filesize > 1024 * 1024
+                      ? '${(req.filesize / (1024 * 1024)).toStringAsFixed(1)} MB'
+                      : req.filesize > 1024
+                          ? '${(req.filesize / 1024).toStringAsFixed(1)} KB'
+                          : '${req.filesize} B';
                   return ListTile(
-                    leading:
-                        const Icon(Icons.insert_drive_file_rounded),
+                    leading: const Icon(Icons.insert_drive_file_rounded),
                     title: Text(req.filename),
                     subtitle: Text(
                       '${req.sender} · $sizeStr${req.isGroupFile ? " · 群文件" : ""}',
@@ -241,73 +251,66 @@ void showFileRequestsDialog(
 // 管理员面板
 // ============================================================
 
-void showAdminPanel(
-    BuildContext context, SocketService service, AppState state) {
+void showAdminPanel(BuildContext context, SocketService service, AppState _) {
   showDialog(
     context: context,
-    builder: (ctx) => StatefulBuilder(
-      builder: (context, setDialogState) {
-        return AlertDialog(
-          title: const Row(
-            children: [
-              Icon(Icons.admin_panel_settings),
-              SizedBox(width: 8),
-              Text('管理面板'),
-            ],
-          ),
-          content: SizedBox(
-            width: 400,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // 查看所有用户
-                ListTile(
-                  leading:
-                      const Icon(Icons.people_rounded),
-                  title: const Text('查看所有用户'),
-                  subtitle: const Text('获取在线/离线状态'),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    service.adminCommand('list_users');
-                  },
-                ),
-                const Divider(),
-                // 发送公告
-                ListTile(
-                  leading: const Icon(Icons.campaign_rounded),
-                  title: const Text('发送系统公告'),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    _showAnnouncementDialog(context, service);
-                  },
-                ),
-                const Divider(),
-                // 删除用户
-                ListTile(
-                  leading: const Icon(Icons.person_remove_rounded),
-                  title: const Text('删除用户'),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    _showDeleteUserDialog(context, service);
-                  },
-                ),
-              ],
+    builder: (ctx) => AlertDialog(
+      title: const Row(
+        children: [
+          Icon(Icons.admin_panel_settings),
+          SizedBox(width: 8),
+          Text('管理面板'),
+        ],
+      ),
+      content: SizedBox(
+        width: 400,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // 查看所有用户
+            ListTile(
+              leading: const Icon(Icons.people_rounded),
+              title: const Text('查看所有用户'),
+              subtitle: const Text('获取在线/离线状态'),
+              onTap: () {
+                Navigator.pop(ctx);
+                service.adminCommand('list_users');
+              },
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('关闭'),
+            const Divider(),
+            // 发送公告
+            ListTile(
+              leading: const Icon(Icons.campaign_rounded),
+              title: const Text('发送系统公告'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _showAnnouncementDialog(context, service);
+              },
+            ),
+            const Divider(),
+            // 删除用户
+            ListTile(
+              leading: const Icon(Icons.person_remove_rounded),
+              title: const Text('删除用户'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _showDeleteUserDialog(context, service);
+              },
             ),
           ],
-        );
-      },
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('关闭'),
+        ),
+      ],
     ),
   );
 }
 
-void _showAnnouncementDialog(
-    BuildContext context, SocketService service) {
+void _showAnnouncementDialog(BuildContext context, SocketService service) {
   final ctrl = TextEditingController();
   showDialog(
     context: context,
@@ -316,9 +319,11 @@ void _showAnnouncementDialog(
       content: RawTextField(
         controller: ctrl,
         hintText: '公告内容',
+        showChineseInput: true,
       ),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+        TextButton(
+            onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
         FilledButton(
           onPressed: () {
             final text = ctrl.text.trim();
@@ -334,8 +339,7 @@ void _showAnnouncementDialog(
   );
 }
 
-void _showDeleteUserDialog(
-    BuildContext context, SocketService service) {
+void _showDeleteUserDialog(BuildContext context, SocketService service) {
   final ctrl = TextEditingController();
   showDialog(
     context: context,
@@ -346,15 +350,21 @@ void _showDeleteUserDialog(
         hintText: '要删除的用户名',
       ),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+        TextButton(
+            onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
         FilledButton(
           style: FilledButton.styleFrom(backgroundColor: Colors.red),
           onPressed: () {
             final name = ctrl.text.trim();
-            if (name.isNotEmpty) {
-              service.adminCommand('delete_user', targetUser: name);
-              Navigator.pop(ctx);
+            final valid = InputValidator.validateUsername(name);
+            if (!valid.valid) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(valid.error ?? '用户名不合法')),
+              );
+              return;
             }
+            service.adminCommand('delete_user', targetUser: name);
+            Navigator.pop(ctx);
           },
           child: const Text('删除'),
         ),

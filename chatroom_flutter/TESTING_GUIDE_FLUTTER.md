@@ -1,9 +1,10 @@
-# 聊天室项目 —— Flutter 桌面客户端测试指南 v1.0.0
+# 聊天室项目 —— Flutter 桌面客户端测试指南 v2.0.0
 
-> 阶段 3：Flutter 桌面端 | 最后更新：2026-06-19
+> 阶段 3：Flutter 桌面端 | 最后更新：2026-07-05
 >
 > 本文档是 `TESTING_GUIDE.md` 和 `TESTING_GUIDE_DART_PROTOCOL.md` 的姊妹篇，
-> 专注于阶段三 Flutter 桌面客户端的启动、功能测试和验证。
+> 专注于 Flutter 桌面客户端的启动、功能测试和验证。
+> v2.0.0 更新：管理员模式、IME 光标同步、消息持久化、SnackBar 通知、撤回确认框。
 
 ---
 
@@ -428,27 +429,21 @@ cat ~/PycharmProjects/chatroom/chatroom_flutter/received_files/flutter_test.txt
 ```bash
 cd ~/PycharmProjects/chatroom
 source .venv/bin/activate
-python -c "
-from database import Database
-import bcrypt
-db = Database()
-pw = bcrypt.hashpw(b'admin123', bcrypt.gensalt())
-db.add_user('admin', pw)
-import sqlite3
-conn = sqlite3.connect('users.db')
-conn.execute(\"UPDATE users SET is_admin = 1 WHERE username = 'admin'\")
-conn.commit()
-conn.close()
-print('管理员 admin 已创建，密码 admin123')
-"
+export CHATROOM_ADMIN_SECRET='<你的管理员密钥>'
+python admin.py
+# 按提示输入管理员用户名和密码
 ```
+
+> **安全须知**：管理员密钥仅通过环境变量传入，不写入任何被 git 跟踪的文件。服务端启动时也必须设置同一环境变量。
 
 ### 10.2 管理员登录
 
 | 步骤 | 操作 | 预期 |
 |------|------|------|
-| 1 | 启动新 Flutter 窗口，用 `admin` / `admin123` 登录 | 进入聊天主界面 |
-| 2 | 标题栏出现 **🛡️**（管理面板）按钮 | 普通用户无此按钮 |
+| 1 | 启动服务端时设置 `CHATROOM_ADMIN_SECRET` 环境变量 | 服务端正常启动 |
+| 2 | 启动 Flutter 客户端，切换「管理员模式」开关 | 出现管理员密钥输入框 |
+| 3 | 输入管理员用户名、密码、管理员密钥，点击登录 | 进入聊天主界面 |
+| 4 | 标题栏出现管理面板按钮 | 普通用户无此按钮 |
 
 ### 10.3 查看所有用户
 

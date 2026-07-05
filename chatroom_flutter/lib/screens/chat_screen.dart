@@ -41,9 +41,23 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _onStateChanged() {
-    if (!_state.isLoggedIn) {
+    if (mounted && !_state.isLoggedIn) {
       // 被踢出或断开连接 → 返回登录
       Navigator.of(context).pushReplacementNamed('/login');
+      return;
+    }
+    // 展示临时通知（操作确认、错误等），不进入系统消息会话
+    while (_state.noticeQueue.isNotEmpty) {
+      final notice = _state.noticeQueue.first;
+      _state.consumeNotice();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(notice),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
     }
   }
 
@@ -52,7 +66,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty) return;
 
     final current = _state.currentChat;
-    if (current == null) return;
+    if (current == null || current == '服务器') return;
 
     if (current.startsWith('group_')) {
       final groupId = int.tryParse(current.substring(6));
@@ -68,7 +82,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _sendFile() async {
     final current = _state.currentChat;
-    if (current == null) return;
+    if (current == null || current == '服务器') return;
 
     final result = await showFilePicker(context);
     if (result != null) {
@@ -102,6 +116,31 @@ class _ChatScreenState extends State<ChatScreen> {
     widget.socketService.disconnect();
     if (mounted) {
       Navigator.of(context).pushReplacementNamed('/login');
+    }
+  }
+
+  Future<void> _confirmRecall(String messageId) async {
+    final current = _state.currentChat;
+    if (current == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('撤回消息'),
+        content: const Text('确定撤回这条消息吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('撤回'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      widget.socketService.recallMessage(messageId, current);
     }
   }
 
@@ -178,27 +217,27 @@ class _ChatScreenState extends State<ChatScreen> {
                 child: _state.currentChat != null
                     ? ChatView(
                         chatKey: _state.currentChat!,
+                        chatTitle:
+                            _state.displayNameForChat(_state.currentChat!),
                         messages: _state.getMessages(_state.currentChat!),
                         username: _state.username!,
                         inputCtrl: _inputCtrl,
+                        canSend: _state.currentChat != '服务器',
                         onSend: _sendMessage,
                         onSendFile: _sendFile,
-                        onRecall: (msgId) {
-                          widget.socketService.recallMessage(
-                            msgId,
-                            _state.currentChat!,
-                          );
-                        },
+                        onRecall: _confirmRecall,
                       )
                     : const Center(
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(Icons.chat_rounded, size: 64, color: Colors.grey),
+                            Icon(Icons.chat_rounded,
+                                size: 64, color: Colors.grey),
                             SizedBox(height: 16),
                             Text(
                               '选择一个会话开始聊天',
-                              style: TextStyle(color: Colors.grey, fontSize: 16),
+                              style:
+                                  TextStyle(color: Colors.grey, fontSize: 16),
                             ),
                           ],
                         ),

@@ -9,10 +9,12 @@
 协议(stdout 每行一条消息)：
   READY        —— 桥接启动完成
   T:<text>     —— 当前条目完整文本(每次变更时发送)
+  P:<pos>      —— 光标位置变化(方向键、点击等)
   S:           —— 用户按 Enter 提交
   ESC:         —— 用户按 Esc 取消
 """
 
+import base64
 import sys, os
 os.environ['GTK_IM_MODULE'] = 'fcitx'
 os.environ['XMODIFIERS'] = '@im=fcitx'
@@ -66,11 +68,13 @@ class PersistentIme:
         self.entry.connect('changed', self._on_changed)
         self.entry.connect('activate', self._on_activate)
         self.entry.connect('key-press-event', self._on_key)
+        self.entry.connect('notify::cursor-position', self._on_cursor_pos)
 
         self.win.add(self.entry)
         self.win.show_all()
 
         self._last_text = ''
+        self._suppress_changed = False
 
         GLib.io_add_watch(sys.stdin, GLib.IO_IN, self._on_stdin)
 
@@ -92,10 +96,9 @@ class PersistentIme:
             Gtk.main_quit()
             return False
         cmd = line.strip()
-        if cmd == 'focus':
-            # 清空上次残留文本再获取焦点
-            self.entry.set_text('')
-            self._last_text = ''
+        if cmd == 'focus' or cmd.startswith('focus:'):
+            # 同步 Flutter 侧已有文本后获取焦点，避免重新聚焦后丢失草稿。
+            self._sync_text(self._decode_payload(cmd, 'focus:'))
             self.win.show()
             self.win.present()
             gdk_win = self.win.get_window()
@@ -103,6 +106,10 @@ class PersistentIme:
                 gdk_win.raise_()
                 gdk_win.focus(Gdk.CURRENT_TIME)
             self.entry.grab_focus_without_selecting()
+        elif cmd == 'clear':
+            self._sync_text('')
+        elif cmd.startswith('set:'):
+            self._sync_text(self._decode_payload(cmd, 'set:'))
         elif cmd == 'blur':
             self._release_focus()
         elif cmd == 'quit':
@@ -116,12 +123,31 @@ class PersistentIme:
 
     def _release_focus(self):
         """释放 X11 键盘焦点，避免残留焦点阻塞其他窗口输入"""
-        self.entry.set_text('')
-        self._last_text = ''
+        self._sync_text('')
         self.win.hide()
+
+    def _decode_payload(self, cmd, prefix):
+        if not cmd.startswith(prefix):
+            return ''
+        payload = cmd[len(prefix):]
+        if not payload:
+            return ''
+        try:
+            return base64.b64decode(payload.encode('ascii')).decode('utf-8')
+        except Exception:
+            return ''
+
+    def _sync_text(self, text):
+        self._suppress_changed = True
+        self.entry.set_text(text)
+        self.entry.set_position(len(text))
+        self._last_text = text
+        self._suppress_changed = False
 
     def _on_changed(self, entry):
         """文本变更 → 发送完整文本给 Flutter"""
+        if self._suppress_changed:
+            return
         text = entry.get_text()
         if text == self._last_text:
             return
@@ -141,6 +167,14 @@ class PersistentIme:
             sys.stdout.flush()
             return True
         return False
+
+    def _on_cursor_pos(self, entry, param):
+        """光标位置变化 → 发送位置给 Flutter（方向键、点击等）"""
+        if self._suppress_changed:
+            return
+        pos = entry.get_position()
+        sys.stdout.write(f'P:{pos}\n')
+        sys.stdout.flush()
 
     def run(self):
         sys.stdout.write('READY\n')

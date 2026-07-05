@@ -8,7 +8,8 @@ class AdminHandler:
 
     def handle_admin_command(self, username, ssock, header, data):
         """处理管理员命令"""
-        if not self.server.db.get_user(username)[1]:
+        user_data = self.server.db.get_user(username)
+        if not user_data or not user_data[1]:
             send_message(ssock, "error", "无管理员权限")
             logging.warning(f"管理员命令失败: 用户 {username} 无权限")
             return
@@ -21,6 +22,10 @@ class AdminHandler:
             logging.info(f"列出所有用户: 用户={username}")
         elif command == "delete_user":
             target_user = data.decode("utf-8").strip()
+            if target_user == username:
+                send_message(ssock, "error", "不能删除当前登录的管理员账号")
+                logging.warning(f"管理员 {username} 尝试删除自己的账号")
+                return
             if self.server.db.delete_user(target_user):
                 users = self.server.db.get_all_users()
                 with self.server.client_map_lock:

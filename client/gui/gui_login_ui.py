@@ -15,6 +15,7 @@ class LoginUI:
         self.action_var = None
         self.username_entry = None
         self.password_entry = None
+        self.admin_secret_entry = None
         self.setup_login_ui()
 
     def setup_login_ui(self):
@@ -28,13 +29,17 @@ class LoginUI:
         ttk.Label(self.login_frame, text="密码:").grid(row=2, column=0, pady=5)
         self.password_entry = ttk.Entry(self.login_frame, show="*")
         self.password_entry.grid(row=2, column=1, pady=5)
+        ttk.Label(self.login_frame, text="管理员密钥(可选):").grid(row=3, column=0, pady=5)
+        self.admin_secret_entry = ttk.Entry(self.login_frame, show="*")
+        self.admin_secret_entry.grid(row=3, column=1, pady=5)
         login_btn = ttk.Button(self.login_frame, text="确定", command=self.do_auth)
-        login_btn.grid(row=3, columnspan=2, pady=10)
+        login_btn.grid(row=4, columnspan=2, pady=10)
 
     def do_auth(self):
         action = self.action_var.get()
         username = self.username_entry.get().strip()
         password = self.password_entry.get()
+        admin_secret = self.admin_secret_entry.get().strip()
 
         # 客户端预验证
         valid, error = validate_username(username)
@@ -56,7 +61,10 @@ class LoginUI:
                 client_socket,
                 server_hostname=config.get("client.server_hostname", "tset.cn")
             )
-            send_message(self.client_gui.ssock, action, username, extra_headers={"password": password})
+            extra_headers = {"password": password}
+            if admin_secret:
+                extra_headers["admin_secret"] = admin_secret
+            send_message(self.client_gui.ssock, action, username, extra_headers=extra_headers)
             header, data = recv_message(self.client_gui.ssock)
             if header.get("type") == "error":
                 messagebox.showerror("错误", data.decode())
@@ -74,4 +82,4 @@ class LoginUI:
         self.client_gui.chat_ui.chat_frame.grid_forget()
         self.login_frame.grid()
         self.client_gui.root.title("网络通讯客户端")
-        self.client_gui.root.geometry("300x200")
+        self.client_gui.root.geometry("360x240")
