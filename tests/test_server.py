@@ -152,8 +152,11 @@ def recv_all_initial_data(sock):
     """
     登录后接收服务器推送的初始数据：
     1. 登录成功响应（chat 或 admin_auth）
-    2. 好友列表（admin_response, response_type=list_friends）
-    3. 群组列表（list_groups）
+    2. 离线消息（chat/file/group_chat, history=true）— 0或多条
+    3. 文件请求（file_request/group_file_request）— 0或多条
+    4. 好友请求（friend_request）— 0或多条
+    5. 好友列表（admin_response, response_type=list_friends）
+    6. 群组列表（list_groups）
     
     返回一个 dict 方便后续测试使用。
     """
@@ -161,6 +164,8 @@ def recv_all_initial_data(sock):
         "login_response": None,
         "friends": [],
         "groups": [],
+        "offline": [],
+        "friend_requests": [],
     }
 
     # 第 1 条：登录响应（普通用户是 'chat'，管理员是 'admin_auth'）
@@ -176,17 +181,33 @@ def recv_all_initial_data(sock):
     except socket.timeout:
         pytest.fail("超时：等待登录响应超过 3s")
 
-    # 第 2 条：好友列表
-    h, d = expect_response(sock, "admin_response")
-    if h.get("response_type") == "list_friends":
-        friends_data = json.loads(d.decode())
-        result["friends"] = friends_data
-    else:
-        result["extra"] = (h, d)
-
-    # 第 3 条：群组列表
-    h, d = expect_response(sock, "list_groups")
-    result["groups"] = json.loads(d.decode())
+    # 接收后续初始数据（离线消息/文件请求/好友请求/好友列表/群组列表）
+    got_friends = False
+    got_groups = False
+    for _ in range(50):
+        try:
+            h, d = expect_response(sock, "initial_data", timeout=3)
+        except Exception:
+            break
+        t = h.get("type")
+        if h.get("history") == "true":
+            result["offline"].append((h, d))
+        elif t == "file_request":
+            result.setdefault("file_requests", []).append((h, d))
+        elif t == "group_file_request":
+            result.setdefault("group_file_requests", []).append((h, d))
+        elif t == "friend_request":
+            result["friend_requests"].append((h, d))
+        elif t == "admin_response" and h.get("response_type") == "list_friends":
+            result["friends"] = json.loads(d.decode()) if d else []
+            got_friends = True
+        elif t == "list_groups":
+            result["groups"] = json.loads(d.decode()) if d else []
+            got_groups = True
+        else:
+            result.setdefault("extra", []).append((h, d))
+        if got_friends and got_groups:
+            break
 
     return result
 
@@ -656,12 +677,12 @@ class TestFriendOperations:
             send_message(s4, "login", "admin",
                          extra_headers={"password": "adminpass", "admin_secret": TEST_ADMIN_SECRET})
 
-            # admin_auth 响应
-            expect_response(s4, "admin_auth")
-            # 好友列表
-            expect_response(s4, "admin_response")
-            # 群组列表
-            expect_response(s4, "list_groups")
+            # 接收初始数据（含 alice 的好友请求推送）
+            initial = recv_all_initial_data(s4)
+
+            # 验证 admin 收到了 alice 的好友请求推送
+            fr_senders = [h.get("from") for h, d in initial["friend_requests"]]
+            assert "alice" in fr_senders, f"应在初始数据中收到 alice 的好友请求，收到: {fr_senders}"
 
             # admin 查看好友请求列表
             send_message(s4, "list_friend_requests", "")
@@ -1051,8 +1072,245 @@ class TestAdminCommands:
 
 
 # ============================================================
-# 总结：如何运行服务端集成测试
+# 第 6 组：离线功能全链路测试
 # ============================================================
+
+class TestOfflineFeatures:
+    """
+    【离线功能集成测试】
+    
+    测试离线补发机制：用户离线期间发生的操作（好友请求、接受通知、公告、撤回）
+    在用户重新登录后应正确推送。
+    """
+
+    def test_offline_friend_request_delivered_on_login(self, tmp_path):
+        """
+        【测试OFF-1】离线好友请求在登录时推送
+        
+        流程：B 离线 → A 向 B 发好友请求 → B 登录 → B 收到 friend_request 推送
+        """
+        db_path = str(tmp_path / "test.db")
+        db = create_test_db(db_path)
+        server = Server()
+
+        # 创建用户 charlie（离线用户）
+        db.add_user("charlie", bcrypt.hashpw("pass456".encode(), bcrypt.gensalt()))
+
+        # alice 登录，向 charlie 发好友请求
+        s1, s2 = socket.socketpair()
+        try:
+            t = start_mock_client(server, s1, db_path)
+            send_message(s2, "login", "alice",
+                         extra_headers={"password": "password123"})
+            recv_all_initial_data(s2)
+
+            send_message(s2, "friend_request", "",
+                         extra_headers={"to": "charlie"})
+            h, d = expect_response(s2, "chat")
+            assert "好友请求已发送" in d.decode()
+            s2.close()
+            t.join(timeout=2)
+        finally:
+            s1.close()
+
+        # charlie 登录，应收到 alice 的好友请求推送
+        s3, s4 = socket.socketpair()
+        try:
+            t2 = start_mock_client(server, s3, db_path)
+            send_message(s4, "login", "charlie",
+                         extra_headers={"password": "pass456"})
+            initial = recv_all_initial_data(s4)
+
+            # 验证 charlie 收到了 alice 的好友请求
+            assert len(initial["friend_requests"]) >= 1, \
+                f"应收到好友请求推送，收到: {initial['friend_requests']}"
+            fr = initial["friend_requests"][0]
+            assert fr[0].get("from") == "alice", \
+                f"好友请求发送者应为 alice，收到: {fr[0].get('from')}"
+
+            s4.close()
+            t2.join(timeout=2)
+        finally:
+            s3.close()
+
+    def test_offline_friend_accept_notification(self, tmp_path):
+        """
+        【测试OFF-2】好友接受通知在离线请求方登录时推送
+        
+        流程：A 发好友请求给 B → A 离线 → B 登录并接受 → A 登录 → A 收到接受通知
+        """
+        db_path = str(tmp_path / "test.db")
+        db = create_test_db(db_path)
+        server = Server()
+
+        # 创建用户 dave
+        db.add_user("dave", bcrypt.hashpw("pass789".encode(), bcrypt.gensalt()))
+
+        # alice 登录，向 dave 发好友请求，然后 alice 离线
+        s1, s2 = socket.socketpair()
+        try:
+            t = start_mock_client(server, s1, db_path)
+            send_message(s2, "login", "alice",
+                         extra_headers={"password": "password123"})
+            recv_all_initial_data(s2)
+            send_message(s2, "friend_request", "",
+                         extra_headers={"to": "dave"})
+            expect_response(s2, "chat")
+            s2.close()
+            t.join(timeout=2)
+        finally:
+            s1.close()
+
+        # dave 登录并接受 alice 的好友请求
+        s3, s4 = socket.socketpair()
+        try:
+            t2 = start_mock_client(server, s3, db_path)
+            send_message(s4, "login", "dave",
+                         extra_headers={"password": "pass789"})
+            initial = recv_all_initial_data(s4)
+            assert "alice" in [h.get("from") for h, d in initial["friend_requests"]]
+
+            send_message(s4, "accept_friend", "",
+                         extra_headers={"from": "alice"})
+            h, d = expect_response(s4, "chat")
+            assert "已接受" in d.decode()
+            s4.close()
+            t2.join(timeout=2)
+        finally:
+            s3.close()
+
+        # alice 重新登录，应收到接受通知（作为离线消息）
+        s5, s6 = socket.socketpair()
+        try:
+            t3 = start_mock_client(server, s5, db_path)
+            send_message(s6, "login", "alice",
+                         extra_headers={"password": "password123"})
+            initial = recv_all_initial_data(s6)
+
+            # 验证 alice 收到了 dave 的接受通知
+            accept_found = False
+            for h, d in initial["offline"]:
+                if d and "已接受您的好友请求" in d.decode():
+                    accept_found = True
+                    break
+            assert accept_found, \
+                f"alice 应在离线消息中收到接受通知，离线消息: {[(h.get('type'), d.decode() if d else '') for h, d in initial['offline']]}"
+
+            s6.close()
+            t3.join(timeout=2)
+        finally:
+            s5.close()
+
+    def test_offline_announcement_persisted(self, tmp_path):
+        """
+        【测试OFF-3】公告对离线用户持久化
+        
+        流程：alice 离线 → admin 发公告 → alice 登录 → alice 在系统消息中看到公告
+        """
+        db_path = str(tmp_path / "test.db")
+        db = create_test_db(db_path)
+        server = Server()
+
+        # admin 登录并发送公告（alice 离线）
+        s1, s2 = socket.socketpair()
+        try:
+            t = start_mock_client(server, s1, db_path)
+            send_message(s2, "login", "admin",
+                         extra_headers={"password": "adminpass", "admin_secret": TEST_ADMIN_SECRET})
+            recv_all_initial_data(s2)
+
+            send_message(s2, "admin_command", "紧急维护通知",
+                         extra_headers={"action": "announcement"})
+            # admin 自己收到广播的公告
+            expect_response(s2, "chat")
+            # 然后收到 "公告发送成功"
+            h, d = expect_response(s2, "chat")
+            assert "公告发送成功" in d.decode()
+
+            s2.close()
+            t.join(timeout=2)
+        finally:
+            s1.close()
+
+        # alice 登录，应在离线消息中看到公告
+        s3, s4 = socket.socketpair()
+        try:
+            t2 = start_mock_client(server, s3, db_path)
+            send_message(s4, "login", "alice",
+                         extra_headers={"password": "password123"})
+            initial = recv_all_initial_data(s4)
+
+            # 验证 alice 在离线消息中收到了公告
+            announcement_found = False
+            for h, d in initial["offline"]:
+                if h.get("from") == "[系统公告]" and d and "紧急维护通知" in d.decode():
+                    announcement_found = True
+                    break
+            assert announcement_found, \
+                f"alice 应在离线消息中收到公告，离线消息: {[(h.get('from'), d.decode() if d else '') for h, d in initial['offline']]}"
+
+            s4.close()
+            t2.join(timeout=2)
+        finally:
+            s3.close()
+
+    def test_offline_recall_placeholder(self, tmp_path):
+        """
+        【测试OFF-4】撤回消息对离线用户显示占位符
+        
+        流程：A 发消息给 B → B 离线 → A 撤回 → B 登录 → B 看到"撤回了一条消息"占位符
+        """
+        db_path = str(tmp_path / "test.db")
+        db = create_test_db(db_path)
+        server = Server()
+
+        # alice 登录，向 bob 发消息，然后撤回（bob 离线）
+        s1, s2 = socket.socketpair()
+        try:
+            t = start_mock_client(server, s1, db_path)
+            send_message(s2, "login", "alice",
+                         extra_headers={"password": "password123"})
+            recv_all_initial_data(s2)
+
+            msg_id = str(uuid.uuid4())
+            send_message(s2, "chat", "测试消息", extra_headers={"to": "bob", "message_id": msg_id})
+            # alice 收到 "离线消息已保存" 或类似
+            time.sleep(0.3)
+
+            # alice 撤回消息
+            send_message(s2, "recall", "", extra_headers={"message_id": msg_id})
+
+            s2.close()
+            t.join(timeout=2)
+        finally:
+            s1.close()
+
+        # bob 登录，应在离线消息中看到撤回占位符，而非原消息
+        s3, s4 = socket.socketpair()
+        try:
+            t2 = start_mock_client(server, s3, db_path)
+            send_message(s4, "login", "bob",
+                         extra_headers={"password": "password456"})
+            initial = recv_all_initial_data(s4)
+
+            # 验证 bob 看到了撤回占位符
+            recall_found = False
+            original_found = False
+            for h, d in initial["offline"]:
+                text = d.decode('utf-8') if d else ""
+                if "撤回了一条消息" in text:
+                    recall_found = True
+                if "测试消息" == text:
+                    original_found = True
+            assert recall_found, \
+                f"bob 应在离线消息中看到撤回占位符，离线消息: {[d.decode('utf-8') if d else '' for h, d in initial['offline']]}"
+            assert not original_found, \
+                "bob 不应在离线消息中看到已撤回的原消息内容"
+
+            s4.close()
+            t2.join(timeout=2)
+        finally:
+            s3.close()
 """
 运行所有集成测试:
   .venv/bin/python -m pytest tests/test_server.py -v

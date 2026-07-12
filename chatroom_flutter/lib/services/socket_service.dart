@@ -178,25 +178,43 @@ class SocketService {
 
       switch (type) {
         case 'chat':
-          // 离线消息：用 to/from 确定正确的会话 key
-          // 自己发的消息按 recipient 归类，别人发的按 sender 归类
           final text = utf8.decode(body ?? Uint8List(0));
           if (isHistory) {
-            final to = header['to'] as String?;
-            final chatKey = (from != null && from == state.username)
-                ? (to ?? from)
-                : (from ?? '系统');
-            state.addMessage(
-              chatKey,
-              ChatMessage(
-                sender: from ?? '系统',
-                content: text,
-                type: 'chat',
-                messageId: messageId,
-                isHistory: false,
-                status: 'delivered',
-              ),
-            );
+            final sender = from ?? '系统';
+            final isSystemSender =
+                sender == '系统' || sender == '服务器' || sender.startsWith('[');
+            if (isSystemSender) {
+              if (sender == '[系统公告]') {
+                state.addMessage(
+                  '服务器',
+                  ChatMessage(
+                    sender: sender,
+                    content: text,
+                    type: 'system',
+                    messageId: messageId,
+                    status: 'delivered',
+                  ),
+                );
+              } else {
+                state.showNotice(text);
+              }
+            } else {
+              final to = header['to'] as String?;
+              final chatKey = (from != null && from == state.username)
+                  ? (to ?? from)
+                  : sender;
+              state.addMessage(
+                chatKey,
+                ChatMessage(
+                  sender: sender,
+                  content: text,
+                  type: 'chat',
+                  messageId: messageId,
+                  isHistory: false,
+                  status: 'delivered',
+                ),
+              );
+            }
           }
           break;
 
@@ -266,6 +284,13 @@ class SocketService {
                 groupId: groupId != null ? int.tryParse(groupId) : null,
               ));
             }
+          }
+          break;
+
+        case 'friend_request':
+          if (from != null) {
+            state.addPendingRequest(from);
+            state.log('收到好友请求: $from');
           }
           break;
 

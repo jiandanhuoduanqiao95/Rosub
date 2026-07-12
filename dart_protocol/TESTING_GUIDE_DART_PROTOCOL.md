@@ -1,8 +1,9 @@
-# Dart 协议层移植 —— 测试指南 v1.0.0
+# Dart 协议层 —— 测试指南 v1.0.0
 
-> 阶段 2：Dart 协议层移植 | 2026-06-19
+> 阶段 2：Dart 协议层移植 | 2026-06-19 | ✅ 已完成
 >
-> 本文档是 `TESTING_GUIDE.md` 的姊妹篇，专注于阶段二 Dart 协议层的实操测试。
+> 本文档专注于 Dart 协议层（`dart_protocol/`）的测试验证。
+> Dart 协议层已实现并通过全部 15 个单元测试，作为 Flutter 客户端的通信基石。
 
 ---
 
@@ -46,7 +47,7 @@
 ### 1.2 文件结构
 
 ```
-dart_protocol/                    ← 新建目录（阶段二产物）
+dart_protocol/                    # Dart 协议层（已完成）
 ├── pubspec.yaml                  # Dart 包配置
 ├── lib/
 │   └── protocol.dart             # 协议编解码实现（对应 protocol.py）

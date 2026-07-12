@@ -198,7 +198,7 @@ class _ReadOnlyBar extends StatelessWidget {
         ),
       ),
       child: Text(
-        '$chatTitle 为只读会话，操作结果和错误会显示在这里。',
+        '$chatTitle 为只读会话',
         textAlign: TextAlign.center,
         style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant),
       ),

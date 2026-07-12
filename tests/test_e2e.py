@@ -99,7 +99,7 @@ class HeadlessTestClient:
         消费登录后的初始推送。
         返回 (login_ok, friends_json, groups_json, offline_msgs)
         """
-        result = {"login_ok": False, "friends": [], "groups": [], "offline": []}
+        result = {"login_ok": False, "friends": [], "groups": [], "offline": [], "friend_requests": []}
         for _ in range(max_msg):
             h, d = self.recv(timeout=2)
             if h is None:
@@ -118,6 +118,8 @@ class HeadlessTestClient:
                 result["friends"] = json.loads(d.decode()) if d else []
             elif t == "list_groups":
                 result["groups"] = json.loads(d.decode()) if d else []
+            elif t == "friend_request":
+                result["friend_requests"].append((h, d))
         return result
 
     def drain(self, timeout=0.5):

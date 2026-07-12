@@ -460,10 +460,13 @@ class Database:
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                # 删除该方向的所有记录（不论 status），确保拒绝后可重新发送请求
+                # 删除该方向的所有记录 + 反方向的 pending 记录
+                # 确保拒绝后双方都可重新发送请求
                 cursor.execute('''
-                    DELETE FROM friends WHERE user1 = ? AND user2 = ?
-                ''', (requester, target))
+                    DELETE FROM friends
+                    WHERE (user1 = ? AND user2 = ?)
+                       OR (user1 = ? AND user2 = ? AND status = 'pending')
+                ''', (requester, target, target, requester))
                 conn.commit()
                 if cursor.rowcount > 0:
                     logging.info(f"好友请求已拒绝：{requester} -> {target}")

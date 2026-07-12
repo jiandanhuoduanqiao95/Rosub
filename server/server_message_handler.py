@@ -131,6 +131,17 @@ class MessageHandler:
                     logging.info(
                         f"跳过发送群组文件请求给发送者本人: 发送者={sender}, 文件名={filename}, 群组ID={group_id}, 消息ID={message_id}")
 
+        # 加载待处理好友请求
+        pending_requests = self.server.db.get_pending_friend_requests(username)
+        logging.info(f"用户 {username} 的待处理好友请求: {len(pending_requests)} 条")
+        for requester in pending_requests:
+            try:
+                send_message(ssock, "friend_request", f"来自 {requester} 的好友请求",
+                             extra_headers={"from": requester})
+                logging.info(f"发送待处理好友请求: 请求者={requester}, 接收者={username}")
+            except Exception as e:
+                logging.error(f"发送待处理好友请求失败: 请求者={requester}, 接收者={username}, 错误={e}")
+
     def process_messages(self, username, ssock):
         """处理客户端发送的消息"""
         while True:
@@ -321,6 +332,13 @@ class MessageHandler:
                         logging.error(f"通知请求者失败: {username} 接受好友请求, 错误={e}")
                         with self.server.client_map_lock:
                             self.server.client_map.pop(requester, None)
+                else:
+                    # 请求方离线：保存离线通知，上线后可见
+                    self.server.db.save_offline_message(
+                        username, requester, "chat",
+                        f"{username} 已接受您的好友请求".encode('utf-8'),
+                        message_id=str(uuid.uuid4()))
+                    logging.info(f"请求方离线，保存接受通知: {requester} <- {username}")
                 logging.info(f"好友请求接受：{requester} <-> {username}")
 
             elif msg_type == "reject_friend":
@@ -477,6 +495,19 @@ class MessageHandler:
 
                         )
 
+                        # 为离线群成员保存撤回占位符
+                        members = self.server.db.get_group_members(group_id)
+                        for member in members:
+                            if member == username:
+                                continue
+                            with self.server.client_map_lock:
+                                if member not in self.server.client_map:
+                                    recall_content = json.dumps({"group_id": group_id, "text": f"{username} 撤回了一条消息"})
+                                    self.server.db.save_offline_message(
+                                        username, member, "group_chat", recall_content.encode('utf-8'),
+                                        message_id=str(uuid.uuid4()))
+                                    logging.info(f"离线群成员 {member} 的撤回占位符已保存")
+
                         logging.info(f"群组消息撤回成功: 用户={username}, 群组ID={group_id}, 消息ID={message_id}")
 
 
@@ -559,6 +590,14 @@ class MessageHandler:
                                 with self.server.client_map_lock:
 
                                     self.server.client_map.pop(receiver, None)
+
+                        else:
+                            # 接收方离线：保存撤回占位符通知，上线后可见
+                            self.server.db.save_offline_message(
+                                username, receiver, "chat",
+                                f"{username} 撤回了一条消息".encode('utf-8'),
+                                message_id=str(uuid.uuid4()))
+                            logging.info(f"接收方离线，保存撤回占位符: {receiver} <- {username}")
 
                         logging.info(f"私聊消息撤回成功: {username} 撤回了 {message_id}")
 

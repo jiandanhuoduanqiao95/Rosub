@@ -50,20 +50,33 @@ class AdminHandler:
                 logging.error(f"删除用户失败: {target_user}")
         elif command == "announcement":
             announcement_msg = data.decode("utf-8").strip()
+            # 获取所有用户列表，用于离线用户持久化
+            all_users = self.server.db.get_all_users()
+            all_usernames = [u[0] for u in all_users]
             with self.server.client_map_lock:
                 invalid_clients = []
+                online_users = set()
                 for user, sock in self.server.client_map.items():
                     try:
                         send_message(sock, "chat", announcement_msg,
                                      extra_headers={"from": "[系统公告]"})
+                        online_users.add(user)
                         logging.info(f"向用户 {user} 发送公告")
                     except Exception as e:
                         logging.error(f"向用户 {user} 发送公告失败: {e}")
                         invalid_clients.append(user)
                 for user in invalid_clients:
                     self.server.client_map.pop(user, None)
-                send_message(ssock, "chat", "公告发送成功")
-                logging.info(f"管理员 {username} 发送公告成功")
+            # 对离线用户保存离线公告消息，上线后可见
+            import uuid as _uuid
+            for username in all_usernames:
+                if username not in online_users:
+                    self.server.db.save_offline_message(
+                        "[系统公告]", username, "chat", announcement_msg.encode('utf-8'),
+                        message_id=str(_uuid.uuid4()))
+                    logging.info(f"离线用户 {username} 的公告已持久化")
+            send_message(ssock, "chat", "公告发送成功")
+            logging.info(f"管理员 {username} 发送公告成功")
         elif command == "exit":
             send_message(ssock, "admin_response", "退出成功")
             logging.info(f"管理员 {username} 退出")
