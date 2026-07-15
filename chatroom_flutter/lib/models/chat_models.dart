@@ -5,7 +5,12 @@
 import 'dart:typed_data';
 
 /// 连接状态
-enum ConnectionStatus { disconnected, connecting, connected }
+enum ConnectionStatus {
+  disconnected,
+  connecting,
+  connected,
+  reconnecting,
+}
 
 /// 一条聊天消息
 class ChatMessage {

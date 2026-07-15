@@ -152,7 +152,13 @@ class MessageHandler:
             msg_type = header.get("type")
             logging.info(f"收到消息: 用户={username}, 类型={msg_type}, 头信息={header}")
 
-            if msg_type == "chat":
+            if msg_type == "ping":
+                try:
+                    send_message(ssock, "pong", b"")
+                except Exception as e:
+                    logging.warning(f"回复 pong 失败: {username}, {e}")
+
+            elif msg_type == "chat":
                 target = header.get("to")
                 message_id = header.get("message_id", str(uuid.uuid4()))
                 if not self.server.db.is_friend(username, target):

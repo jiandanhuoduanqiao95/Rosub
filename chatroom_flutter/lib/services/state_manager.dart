@@ -18,6 +18,10 @@ class AppState extends ChangeNotifier {
   ConnectionStatus _connectionStatus = ConnectionStatus.disconnected;
   ConnectionStatus get connectionStatus => _connectionStatus;
 
+  // ---- 重连计数（仅 reconnecting 状态下有意义）----
+  int _reconnectAttempts = 0;
+  int get reconnectAttempts => _reconnectAttempts;
+
   // ---- 用户信息 ----
   String? _username;
   String? get username => _username;
@@ -84,10 +88,23 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 进入重连状态（不清空好友/群组/消息，区别于 setLoggedOut）
+  void setReconnecting() {
+    _connectionStatus = ConnectionStatus.reconnecting;
+    notifyListeners();
+  }
+
+  /// 更新重连尝试次数（UI banner 显示用）
+  void setReconnectAttempt(int attempt) {
+    _reconnectAttempts = attempt;
+    notifyListeners();
+  }
+
   void setLoggedIn(String username, bool isAdmin) {
     _username = username;
     _isAdmin = isAdmin;
     _connectionStatus = ConnectionStatus.connected;
+    _reconnectAttempts = 0;
     _log('登录成功: $username${isAdmin ? " (管理员)" : ""}');
     notifyListeners();
   }

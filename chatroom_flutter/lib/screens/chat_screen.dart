@@ -5,6 +5,7 @@
 
 import 'package:flutter/material.dart';
 
+import '../models/chat_models.dart';
 import '../services/ime_bridge.dart';
 import '../services/socket_service.dart';
 import '../services/state_manager.dart';
@@ -197,51 +198,92 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ],
           ),
-          body: Row(
+          body: Column(
             children: [
-              // === 左侧：会话列表 ===
-              Sidebar(
-                chatTargets: _state.chatTargets,
-                currentChat: _state.currentChat,
-                onSelectChat: (key) => _state.selectChat(key),
-                onAddFriend: _showAddFriendDialog,
-                onCreateGroup: _showCreateGroupDialog,
-                onJoinGroup: _showJoinGroupDialog,
-              ),
-
-              // 分隔线
-              const VerticalDivider(width: 1),
-
-              // === 右侧：聊天区域 ===
-              Expanded(
-                child: _state.currentChat != null
-                    ? ChatView(
-                        chatKey: _state.currentChat!,
-                        chatTitle:
-                            _state.displayNameForChat(_state.currentChat!),
-                        messages: _state.getMessages(_state.currentChat!),
-                        username: _state.username!,
-                        inputCtrl: _inputCtrl,
-                        canSend: _state.currentChat != '服务器',
-                        onSend: _sendMessage,
-                        onSendFile: _sendFile,
-                        onRecall: _confirmRecall,
-                      )
-                    : const Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.chat_rounded,
-                                size: 64, color: Colors.grey),
-                            SizedBox(height: 16),
-                            Text(
-                              '选择一个会话开始聊天',
-                              style:
-                                  TextStyle(color: Colors.grey, fontSize: 16),
-                            ),
-                          ],
+              // === 重连中横幅 ===
+              if (_state.connectionStatus == ConnectionStatus.reconnecting)
+                Material(
+                  color: Theme.of(context).colorScheme.errorContainer,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 10),
+                    child: Row(
+                      children: [
+                        const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
                         ),
-                      ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            '连接断开，正在重连…'
+                            '（第 ${_state.reconnectAttempts} 次）',
+                            style: TextStyle(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onErrorContainer),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: _logout,
+                          child: const Text('退出'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              Expanded(
+                child: Row(
+                  children: [
+                    // === 左侧：会话列表 ===
+                    Sidebar(
+                      chatTargets: _state.chatTargets,
+                      currentChat: _state.currentChat,
+                      onSelectChat: (key) => _state.selectChat(key),
+                      onAddFriend: _showAddFriendDialog,
+                      onCreateGroup: _showCreateGroupDialog,
+                      onJoinGroup: _showJoinGroupDialog,
+                    ),
+
+                    // 分隔线
+                    const VerticalDivider(width: 1),
+
+                    // === 右侧：聊天区域 ===
+                    Expanded(
+                      child: _state.currentChat != null
+                          ? ChatView(
+                              chatKey: _state.currentChat!,
+                              chatTitle:
+                                  _state.displayNameForChat(_state.currentChat!),
+                              messages: _state.getMessages(_state.currentChat!),
+                              username: _state.username!,
+                              inputCtrl: _inputCtrl,
+                              canSend: _state.currentChat != '服务器' &&
+                                  _state.connectionStatus !=
+                                      ConnectionStatus.reconnecting,
+                              onSend: _sendMessage,
+                              onSendFile: _sendFile,
+                              onRecall: _confirmRecall,
+                            )
+                          : const Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.chat_rounded,
+                                      size: 64, color: Colors.grey),
+                                  SizedBox(height: 16),
+                                  Text(
+                                    '选择一个会话开始聊天',
+                                    style: TextStyle(
+                                        color: Colors.grey, fontSize: 16),
+                                  ),
+                                ],
+                              ),
+                            ),
+                    ),
+                  ],
+                ),
               ),
             ],
           ),

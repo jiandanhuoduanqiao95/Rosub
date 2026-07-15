@@ -476,6 +476,82 @@ class TestAuthentication:
 
 
 # ============================================================
+# 第 1.5 组：心跳 ping/pong 测试
+# ============================================================
+
+class TestPingPong:
+    """
+    【心跳 ping/pong 测试】
+
+    验证客户端发送 ping 后服务端立即回复 pong。
+    阶段 D 断线重连的 keepalive 依赖此机制检测半开连接。
+    """
+
+    def test_ping_returns_pong(self, tmp_path):
+        """登录后发送 ping，应立即收到 pong。"""
+        db_path = str(tmp_path / "test.db")
+        create_test_db(db_path)
+
+        server = Server()
+        s1, s2 = socket.socketpair()
+
+        try:
+            t = start_mock_client(server, s1, db_path)
+
+            send_message(s2, "login", "alice",
+                         extra_headers={"password": "password123"})
+            recv_all_initial_data(s2)
+
+            send_message(s2, "ping", b"")
+            h, d = expect_response(s2, "pong")
+            assert h["type"] == "pong"
+
+            s2.close()
+            t.join(timeout=2)
+        finally:
+            s1.close()
+
+    def test_ping_does_not_disrupt_chat(self, tmp_path):
+        """ping/pong 不应干扰正常聊天消息收发。"""
+        db_path = str(tmp_path / "test.db")
+        create_test_db(db_path)
+
+        server = Server()
+        s1, s2 = socket.socketpair()
+        s1b, s2b = socket.socketpair()
+
+        try:
+            t = start_mock_client(server, s1, db_path)
+            t2 = start_mock_client(server, s1b, db_path)
+
+            send_message(s2, "login", "alice",
+                         extra_headers={"password": "password123"})
+            recv_all_initial_data(s2)
+
+            send_message(s2b, "login", "bob",
+                         extra_headers={"password": "password456"})
+            recv_all_initial_data(s2b)
+
+            send_message(s2, "ping", b"")
+            h, _ = expect_response(s2, "pong")
+            assert h["type"] == "pong"
+
+            send_message(s2, "chat", "hello after ping",
+                         extra_headers={"to": "bob", "message_id": "m1"})
+            h2, d2 = expect_response(s2b, "chat")
+            assert h2["type"] == "chat"
+            assert d2.decode() == "hello after ping"
+
+            s2.close()
+            s2b.close()
+            t.join(timeout=2)
+            t2.join(timeout=2)
+        finally:
+            s1.close()
+            s1b.close()
+
+
+# ============================================================
 # 第 2 组：私聊消息测试
 # ============================================================
 

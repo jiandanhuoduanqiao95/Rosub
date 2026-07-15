@@ -26,8 +26,27 @@ class SocketService {
   Future<void>? _listenFuture;
   bool _running = false;
 
+  /// 主动断开标志：true 表示用户主动退出，不应触发重连
+  bool _intentionalDisconnect = false;
+
+  /// 重连相关
+  bool _reconnecting = false;
+  int _reconnectAttempts = 0;
+
+  /// 保存的登录凭据（仅内存，用于重连后自动重新登录；不落盘）
+  String? _savedUsername;
+  String? _savedPassword;
+  String? _savedAdminSecret;
+
+  /// 心跳相关
+  Timer? _keepaliveTimer;
+  DateTime _lastPong = DateTime.now();
+
   /// 已连接的 socket（供外部查询）
   SecureSocket? get socket => _socket;
+
+  /// 当前是否处于重连流程
+  bool get isReconnecting => _reconnecting;
 
   /// 生成唯一的消息 ID
   String _generateMessageId() {
@@ -51,17 +70,21 @@ class SocketService {
       );
       _reader = MessageReader(_socket!);
       _running = true;
+      _intentionalDisconnect = false;
+      _lastPong = DateTime.now();
       state.log('已连接到 ${AppConfig.serverHost}:${AppConfig.serverPort}');
       return true;
     } catch (e) {
       state.log('连接失败: $e');
-      state.setConnectionStatus(ConnectionStatus.disconnected);
       return false;
     }
   }
 
-  /// 断开连接
+  /// 主动断开连接（用户退出）—— 清空状态、回登录页，不触发重连
   void disconnect() {
+    _intentionalDisconnect = true;
+    _stopKeepalive();
+    _cancelReconnect();
     _running = false;
     _reader?.close();
     try {
@@ -69,7 +92,171 @@ class SocketService {
     } catch (_) {}
     _socket = null;
     _reader = null;
+    _clearSavedCredentials();
     state.setLoggedOut();
+  }
+
+  // ============================================================
+  // 凭据管理（仅内存，用于重连）
+  // ============================================================
+
+  void _saveCredentials(String username, String password, String? adminSecret) {
+    _savedUsername = username;
+    _savedPassword = password;
+    _savedAdminSecret = adminSecret;
+  }
+
+  void _clearSavedCredentials() {
+    _savedUsername = null;
+    _savedPassword = null;
+    _savedAdminSecret = null;
+  }
+
+  // ============================================================
+  // 心跳（keepalive）
+  // ============================================================
+
+  /// 启动心跳定时器：每 30s 发送 ping，超过 45s 未收到 pong 判定断开
+  void _startKeepalive() {
+    _stopKeepalive();
+    _lastPong = DateTime.now();
+    _keepaliveTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (!_running || _socket == null) {
+        _stopKeepalive();
+        return;
+      }
+      try {
+        sendMessage(_socket!, 'ping', '');
+        state.log('发送心跳 ping');
+      } catch (e) {
+        state.log('心跳发送失败: $e');
+        _onConnectionLost();
+        return;
+      }
+      // 检查 pong 超时
+      final elapsed = DateTime.now().difference(_lastPong);
+      if (elapsed > const Duration(seconds: 45)) {
+        state.log('心跳超时（${elapsed.inSeconds}s 未收到 pong），判定连接断开');
+        _onConnectionLost();
+      }
+    });
+  }
+
+  void _stopKeepalive() {
+    _keepaliveTimer?.cancel();
+    _keepaliveTimer = null;
+  }
+
+  // ============================================================
+  // 断线重连
+  // ============================================================
+
+  /// 网络断开时调用：切到 reconnecting 状态并启动重连循环
+  /// 与 disconnect() 的区别：不清空好友/群组/消息，不回登录页
+  void _onConnectionLost() {
+    if (_intentionalDisconnect || _reconnecting) return;
+    _reconnecting = true;
+    _stopKeepalive();
+    _running = false;
+    try {
+      _reader?.close();
+    } catch (_) {}
+    try {
+      _socket?.close();
+    } catch (_) {}
+    _socket = null;
+    _reader = null;
+    _reconnectAttempts = 0;
+    state.setReconnecting();
+    state.log('连接断开，开始自动重连…');
+    _reconnectLoop();
+  }
+
+  /// 指数退避重连循环：1→2→4→8→16→30s（上限 30s）
+  Future<void> _reconnectLoop() async {
+    while (_reconnecting && !_intentionalDisconnect) {
+      try {
+        _reconnectAttempts++;
+        state.setReconnectAttempt(_reconnectAttempts);
+        final delay = _backoffSeconds(_reconnectAttempts);
+        state.log('第 $_reconnectAttempts 次重连，${delay}s 后尝试…');
+        await Future.delayed(Duration(seconds: delay));
+        if (_intentionalDisconnect || !_reconnecting) break;
+
+        final ok = await connect();
+        if (!ok) {
+          state.setReconnecting();
+          continue;
+        }
+
+        // 重连成功 → 重新登录并同步离线消息
+        final err = await _relogin();
+        if (err != null) {
+          state.log('重连后重新登录失败: $err');
+          // 登录失败通常凭据失效，停止重连
+          _reconnecting = false;
+          state.setLoggedOut();
+          return;
+        }
+
+        // 重连 + 重登录成功
+        _reconnecting = false;
+        _reconnectAttempts = 0;
+        state.setLoggedIn(_savedUsername!,
+            _savedAdminSecret != null && _savedAdminSecret!.isNotEmpty);
+        _startListening();
+        _startKeepalive();
+        state.log('重连成功，已恢复连接');
+        return;
+      } catch (e) {
+        // 重连过程中异常（连接被拒、读写失败等）→ 继续退避重试
+        state.log('第 $_reconnectAttempts 次重连异常: $e');
+        state.setReconnecting();
+        continue;
+      }
+    }
+    // 循环退出且非成功 → 用户主动取消
+    if (_reconnecting) {
+      _reconnecting = false;
+      state.setLoggedOut();
+    }
+  }
+
+  /// 取消正在进行的重连循环
+  void _cancelReconnect() {
+    _reconnecting = false;
+  }
+
+  /// 退避秒数：1,2,4,8,16,30,30,30…
+  int _backoffSeconds(int attempt) {
+    if (attempt <= 0) return 1;
+    final seconds = 1 << (attempt - 1); // 2^(n-1)
+    return seconds > 30 ? 30 : seconds;
+  }
+
+  /// 重连后用保存的凭据重新登录（不触发首次登录的 _receiveInitialData 以外逻辑）
+  Future<String?> _relogin() async {
+    if (_socket == null || _savedUsername == null || _savedPassword == null) {
+      return '凭据缺失';
+    }
+    final extraHeaders = <String, String>{'password': _savedPassword!};
+    if (_savedAdminSecret != null && _savedAdminSecret!.isNotEmpty) {
+      extraHeaders['admin_secret'] = _savedAdminSecret!;
+    }
+    await sendMessage(
+      _socket!,
+      'login',
+      _savedUsername!,
+      extraHeaders: extraHeaders,
+    );
+
+    final (header, _) = await recvMessage(_reader!, chunkSize: 65536);
+    if (header == null) return '服务器无响应';
+    final type = header['type'] as String?;
+    if (type == 'error') return '登录被拒（凭据可能已失效）';
+    // 同步离线期间消息（依赖 addMessage 的 messageId 去重兜底重复）
+    await _receiveInitialData();
+    return null;
   }
 
   // ============================================================
@@ -108,11 +295,17 @@ class SocketService {
     final isAdmin = type == 'admin_auth';
     state.setLoggedIn(username, isAdmin);
 
+    // 保存凭据以备重连（仅内存）
+    _saveCredentials(username, password, adminSecret);
+
     // 接收初始数据：离线消息 + 好友列表 + 群组列表
     await _receiveInitialData();
 
     // 启动后台消息监听
     _startListening();
+
+    // 启动心跳
+    _startKeepalive();
 
     return null; // null = 成功
   }
@@ -148,11 +341,17 @@ class SocketService {
     final isAdmin = type == 'admin_auth';
     state.setLoggedIn(username, isAdmin);
 
+    // 保存凭据以备重连（仅内存）
+    _saveCredentials(username, password, adminSecret);
+
     // 接收初始数据
     await _receiveInitialData();
 
     // 启动后台消息监听
     _startListening();
+
+    // 启动心跳
+    _startKeepalive();
 
     return null; // null = 成功
   }
@@ -345,16 +544,29 @@ class SocketService {
 
   Future<void> _listenLoop() async {
     while (_running && _reader != null) {
-      final (header, body) = await recvMessage(_reader!, chunkSize: 65536);
-      if (header == null) {
-        // 连接断开
-        if (_running) {
-          state.log('与服务器的连接已断开');
-          disconnect();
+      try {
+        final (header, body) = await recvMessage(_reader!, chunkSize: 65536);
+        if (header == null) {
+          // 连接断开
+          if (_running && !_intentionalDisconnect) {
+            // 网络断开：触发自动重连（保留状态）
+            state.log('与服务器的连接已断开（recv 返回 null）');
+            _onConnectionLost();
+          } else if (_running && _intentionalDisconnect) {
+            state.log('已主动断开连接');
+          }
+          break;
+        }
+        _handleMessage(header, body ?? Uint8List(0));
+      } catch (e) {
+        // recvMessage 抛异常（SocketException / FormatException 等）
+        // 视为连接断开，触发重连而非静默退出
+        state.log('监听循环异常，判定连接断开: $e');
+        if (_running && !_intentionalDisconnect) {
+          _onConnectionLost();
         }
         break;
       }
-      _handleMessage(header, body ?? Uint8List(0));
     }
   }
 
@@ -501,6 +713,11 @@ class SocketService {
             ));
           }
         }
+        break;
+
+      // ---- 心跳响应 ----
+      case 'pong':
+        _lastPong = DateTime.now();
         break;
 
       // ---- 消息状态更新 ----
