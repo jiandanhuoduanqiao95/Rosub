@@ -15,8 +15,10 @@
 """
 
 import base64
+import ctypes
+import os
 import signal
-import sys, os
+import sys
 os.environ['GTK_IM_MODULE'] = 'fcitx'
 os.environ['XMODIFIERS'] = '@im=fcitx'
 
@@ -24,6 +26,21 @@ import cairo
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk, GLib
+
+
+def _enable_parent_death_signal():
+    """让 OS 在父进程退出时自动向本进程发 SIGKILL。
+
+    Flutter 桌面端关闭窗口时进程直接被 OS 终止，detached 回调不可靠，
+    shutdown() 可能来不及执行。prctl 确保桥接进程不会成为孤儿残留。
+    """
+    try:
+        libc = ctypes.CDLL('libc.so.6', use_errno=True)
+        PR_SET_PDEATHSIG = 1
+        SIGKILL = 9
+        libc.prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0)
+    except Exception:
+        pass
 
 CSS = b'''
 window, entry {
@@ -37,6 +54,9 @@ window, entry {
 
 class PersistentIme:
     def __init__(self):
+        # 父进程退出时自动被 SIGKILL，避免成为孤儿进程残留烧 CPU
+        _enable_parent_death_signal()
+
         self.win = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
         self.win.set_default_size(200, 20)
         self.win.set_decorated(False)
