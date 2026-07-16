@@ -516,6 +516,12 @@ class MessageHandler:
 
                         logging.info(f"群组消息撤回成功: 用户={username}, 群组ID={group_id}, 消息ID={message_id}")
 
+                        try:
+                            send_message(ssock, "recall", "",
+                                         extra_headers={"message_id": message_id})
+                        except Exception as e:
+                            logging.warning(f"发送撤回确认失败: {username}, {e}")
+
 
                     except json.JSONDecodeError:
 
@@ -607,6 +613,12 @@ class MessageHandler:
 
                         logging.info(f"私聊消息撤回成功: {username} 撤回了 {message_id}")
 
+                        try:
+                            send_message(ssock, "recall", "",
+                                         extra_headers={"message_id": message_id})
+                        except Exception as e:
+                            logging.warning(f"发送撤回确认失败: {username}, {e}")
+
                     else:
 
                         send_message(ssock, "error", f"撤回消息 {message_id} 失败")
@@ -684,6 +696,12 @@ class MessageHandler:
 
                         logging.info(f"私聊文件请求撤回成功: {username} 撤回了 {message_id}")
 
+                        try:
+                            send_message(ssock, "recall", "",
+                                         extra_headers={"message_id": message_id})
+                        except Exception as e:
+                            logging.warning(f"发送撤回确认失败: {username}, {e}")
+
                     else:
 
                         send_message(ssock, "error", f"撤回文件请求 {message_id} 失败")
@@ -746,6 +764,12 @@ class MessageHandler:
                         )
 
                         logging.info(f"群组文件请求撤回成功: {username} 撤回了 {message_id} 在群组 {group_id}")
+
+                        try:
+                            send_message(ssock, "recall", "",
+                                         extra_headers={"message_id": message_id})
+                        except Exception as e:
+                            logging.warning(f"发送撤回确认失败: {username}, {e}")
 
                     else:
 

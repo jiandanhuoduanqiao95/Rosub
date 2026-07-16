@@ -42,6 +42,7 @@ import time
 import pytest
 import bcrypt
 import uuid
+from datetime import datetime, timedelta, UTC
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1387,6 +1388,92 @@ class TestOfflineFeatures:
             t2.join(timeout=2)
         finally:
             s3.close()
+
+
+# ============================================================
+# 第 6 组：撤回确认测试
+# ============================================================
+
+class TestRecallConfirmation:
+    """
+    【撤回确认测试】
+
+    验证撤回成功时服务端向发送方回发 recall 确认，
+    撤回失败（超时）时发送方收到 error 而非 recall，消息保持原样。
+    """
+
+    def test_recall_success_sends_confirmation_to_sender(self, tmp_path):
+        """撤回成功时，发送方应收到 recall 确认。"""
+        db_path = str(tmp_path / "test.db")
+        create_test_db(db_path)
+
+        server = Server()
+        s1, s2 = socket.socketpair()
+
+        try:
+            t = start_mock_client(server, s1, db_path)
+
+            send_message(s2, "login", "alice",
+                         extra_headers={"password": "password123"})
+            recv_all_initial_data(s2)
+
+            msg_id = str(uuid.uuid4())
+            send_message(s2, "chat", "test msg", extra_headers={"to": "bob", "message_id": msg_id})
+            # 消费"离线消息已保存"通知
+            expect_response(s2, "chat")
+
+            send_message(s2, "recall", "", extra_headers={"message_id": msg_id})
+
+            # alice 应收到 recall 确认（而非 error）
+            h, d = expect_response(s2, "recall")
+            assert h["type"] == "recall"
+            assert h["message_id"] == msg_id
+
+            s2.close()
+            t.join(timeout=2)
+        finally:
+            s1.close()
+
+    def test_recall_timeout_sends_error_not_recall(self, tmp_path):
+        """撤回超时时，发送方应收到 error 而非 recall 确认。"""
+        db_path = str(tmp_path / "test.db")
+        db = create_test_db(db_path)
+
+        server = Server()
+        s1, s2 = socket.socketpair()
+
+        try:
+            t = start_mock_client(server, s1, db_path)
+
+            send_message(s2, "login", "alice",
+                         extra_headers={"password": "password123"})
+            recv_all_initial_data(s2)
+
+            msg_id = str(uuid.uuid4())
+            send_message(s2, "chat", "old msg", extra_headers={"to": "bob", "message_id": msg_id})
+            # 消费"离线消息已保存"通知
+            expect_response(s2, "chat")
+
+            # 手动将消息时间戳改为 3 分钟前（超过 2 分钟撤回时限）
+            with db._get_connection() as conn:
+                conn.execute(
+                    "UPDATE offline_messages SET timestamp = ? WHERE message_id = ?",
+                    ((datetime.now(UTC) - timedelta(minutes=3)).strftime('%Y-%m-%d %H:%M:%S'), msg_id)
+                )
+                conn.commit()
+
+            send_message(s2, "recall", "", extra_headers={"message_id": msg_id})
+
+            # alice 应收到 error（超时），而非 recall 确认
+            h, d = expect_response(s2, "error")
+            assert h["type"] == "error"
+            assert "无法撤回" in d.decode()
+
+            s2.close()
+            t.join(timeout=2)
+        finally:
+            s1.close()
+
 """
 运行所有集成测试:
   .venv/bin/python -m pytest tests/test_server.py -v

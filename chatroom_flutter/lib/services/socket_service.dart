@@ -1011,8 +1011,8 @@ class SocketService {
   /// 撤回消息
   Future<void> recallMessage(String messageId, String target) async {
     if (_socket == null) return;
-    // 在本地先更新状态，再发送撤回请求
-    state.recallMessage(messageId);
+    // 不在此处乐观更新本地状态；等服务端撤回成功后回发 recall 确认再更新
+    // 这样撤回失败（超时等）时消息保持原样，不会丢失内容
     await sendMessage(_socket!, 'recall', '', extraHeaders: {
       'message_id': messageId,
       'to': target,
