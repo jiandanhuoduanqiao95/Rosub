@@ -15,6 +15,7 @@
 """
 
 import base64
+import signal
 import sys, os
 os.environ['GTK_IM_MODULE'] = 'fcitx'
 os.environ['XMODIFIERS'] = '@im=fcitx'
@@ -77,6 +78,15 @@ class PersistentIme:
         self._suppress_changed = False
 
         GLib.io_add_watch(sys.stdin, GLib.IO_IN, self._on_stdin)
+
+        # SIGTERM 兜底：Flutter 退出时可能直接发 SIGTERM，确保释放 X11 焦点后退出
+        signal.signal(signal.SIGTERM, self._on_sigterm)
+
+    def _on_sigterm(self, signum, frame):
+        self._release_focus()
+        while Gtk.events_pending():
+            Gtk.main_iteration()
+        Gtk.main_quit()
 
     def _on_window_draw(self, widget, cr):
         """绘制完全透明的窗口背景，防止默认黑色背景出现"""

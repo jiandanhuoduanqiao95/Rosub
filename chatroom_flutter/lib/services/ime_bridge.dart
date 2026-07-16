@@ -143,10 +143,10 @@ class ImeBridgeManager {
   void clearText() => _send('clear');
 
   void shutdown() {
-    if (_process == null) return;
-    debugPrint('[ime_bridge] 关闭桥接进程...');
     final proc = _process;
-    // 先发送 blur 释放 X11 焦点，再发送 quit 退出进程
+    if (proc == null) return;
+    debugPrint('[ime_bridge] 关闭桥接进程...');
+    // 先发送 blur 释放 X11 焦点，再发送 quit 让进程优雅退出
     _send('blur');
     _send('quit');
     _wantFocus = false;
@@ -154,13 +154,13 @@ class ImeBridgeManager {
     _started = false;
     _starting = null;
     _process = null;
-    // 给进程 200ms 优雅退出，之后强制 kill
-    Future.delayed(const Duration(milliseconds: 200), () {
-      if (proc != null) {
-        debugPrint('[ime_bridge] 强制终止桥接进程');
-        proc.kill(ProcessSignal.sigterm);
-      }
-    });
+    // 同步等待 50ms 让 Python 处理 quit 命令（优雅退出 + 释放 X11 焦点）
+    // 不用 Future.delayed —— 应用退出时事件循环可能已停止，异步回调不会执行
+    sleep(const Duration(milliseconds: 50));
+    // SIGTERM 兜底：确保进程被终止（即使 quit 命令丢失或 GTK 主循环卡住）
+    try {
+      proc.kill(ProcessSignal.sigterm);
+    } catch (_) {}
   }
 
   void addTextListener(ImeTextListener fn) => _textListeners.add(fn);
