@@ -54,6 +54,16 @@ class SocketService {
     return '${DateTime.now().millisecondsSinceEpoch}_$rand';
   }
 
+  /// 解析服务端时间戳（UTC 字符串 → 本地 DateTime）
+  DateTime _parseTimestamp(String? tsStr) {
+    if (tsStr == null || tsStr.isEmpty) return DateTime.now();
+    try {
+      return DateTime.parse('${tsStr.trim()}Z').toLocal();
+    } catch (_) {
+      return DateTime.now();
+    }
+  }
+
   // ============================================================
   // 连接管理
   // ============================================================
@@ -374,6 +384,8 @@ class SocketService {
       final from = header['from'] as String?;
       final messageId = header['message_id'] as String? ?? _generateMessageId();
       final isHistory = header['history'] == 'true';
+      final msgTimestamp = _parseTimestamp(header['timestamp'] as String?);
+      final msgStatus = header['status'] as String? ?? 'delivered';
 
       switch (type) {
         case 'chat':
@@ -391,7 +403,8 @@ class SocketService {
                     content: text,
                     type: 'system',
                     messageId: messageId,
-                    status: 'delivered',
+                    timestamp: msgTimestamp,
+                    status: msgStatus,
                   ),
                 );
               } else {
@@ -409,8 +422,9 @@ class SocketService {
                   content: text,
                   type: 'chat',
                   messageId: messageId,
+                  timestamp: msgTimestamp,
                   isHistory: false,
-                  status: 'delivered',
+                  status: msgStatus,
                 ),
               );
             }
@@ -421,7 +435,6 @@ class SocketService {
           if (isHistory && from != null) {
             final filename = header['filename'] as String? ?? 'file';
             final to = header['to'] as String?;
-            // 自己发的文件按收件人归类，别人发的按发送者归类
             final chatKey = (from == state.username && to != null) ? to : from;
             state.addMessage(
               chatKey,
@@ -432,8 +445,9 @@ class SocketService {
                 messageId: messageId,
                 filename: filename,
                 fileData: body,
+                timestamp: msgTimestamp,
                 isHistory: false,
-                status: 'delivered',
+                status: msgStatus,
               ),
             );
           }
@@ -451,8 +465,9 @@ class SocketService {
                 content: text,
                 type: 'group_chat',
                 messageId: messageId,
+                timestamp: msgTimestamp,
                 isHistory: false,
-                status: 'delivered',
+                status: msgStatus,
                 groupId: groupId != null ? int.tryParse(groupId) : null,
               ),
             );
@@ -617,7 +632,7 @@ class SocketService {
               content: text,
               type: 'chat',
               messageId: messageId,
-              status: 'delivered',
+              status: 'sent',
             ),
           );
           // 自动发送回执
@@ -693,7 +708,7 @@ class SocketService {
             content: text,
             type: 'group_chat',
             messageId: messageId,
-            status: 'delivered',
+            status: 'sent',
             groupId: groupId != null ? int.tryParse(groupId) : null,
           ),
         );
@@ -733,6 +748,53 @@ class SocketService {
         final recallId = header['message_id'] as String?;
         if (recallId != null) {
           state.recallMessage(recallId);
+        }
+        break;
+
+      // ---- 历史消息分页响应（阶段 E）----
+      case 'history_response':
+        final withUser = header['to'] as String?;
+        final groupId = header['group_id'] as String?;
+        final chatKey = (groupId != null && groupId.isNotEmpty)
+            ? 'group_$groupId'
+            : ((withUser != null && withUser.isNotEmpty) ? withUser : null);
+        if (chatKey == null) break;
+        try {
+          final List<dynamic> batch = jsonDecode(utf8.decode(body));
+          final msgs = <ChatMessage>[];
+          for (final item in batch) {
+            final m = item as Map<String, dynamic>;
+            final tsStr = m['timestamp'] as String?;
+            DateTime? ts;
+            if (tsStr != null) {
+              try {
+                // DB 存储的是 UTC 时间（YYYY-MM-DD HH:MM:SS），
+                // 加 Z 后缀解析为 UTC，再转本地时间
+                ts = DateTime.parse('${tsStr.trim()}Z').toLocal();
+              } catch (_) {}
+            }
+            msgs.add(ChatMessage(
+              sender: m['sender'] as String? ?? '',
+              content: m['content'] as String? ?? '',
+              type: m['type'] as String? ?? 'chat',
+              messageId: m['message_id'] as String? ?? _generateMessageId(),
+              filename: m['filename'] as String?,
+              groupId: m['group_id'] != null
+                  ? (m['group_id'] as num).toInt()
+                  : null,
+              timestamp: ts,
+              isHistory: true,
+              status: m['status'] as String? ?? 'delivered',
+            ));
+          }
+          if (batch.isEmpty) {
+            // 服务端返回空 → 没有更旧的历史了
+            state.setNoMoreHistory(chatKey);
+          } else {
+            state.prependHistoryMessages(chatKey, msgs);
+          }
+        } catch (e) {
+          state.log('解析历史消息失败: $e');
         }
         break;
 
@@ -1017,6 +1079,28 @@ class SocketService {
       'message_id': messageId,
       'to': target,
     });
+  }
+
+  /// 拉取历史消息（阶段 E 分页）
+  /// [to] 私聊对方用户名；[groupId] 群组 ID；两者二选一
+  /// [beforeMessageId] 游标：拉取此消息之前的消息；首次拉取传 null
+  /// [limit] 每页数量，默认 50
+  Future<void> fetchHistory({
+    String? to,
+    int? groupId,
+    String? beforeMessageId,
+    int limit = 50,
+  }) async {
+    if (_socket == null) return;
+    final extra = <String, String>{'limit': limit.toString()};
+    if (to != null) extra['to'] = to;
+    if (groupId != null) extra['group_id'] = groupId.toString();
+    if (beforeMessageId != null) extra['before_message_id'] = beforeMessageId;
+    try {
+      await sendMessage(_socket!, 'fetch_history', '', extraHeaders: extra);
+    } catch (e) {
+      state.log('拉取历史消息失败: $e');
+    }
   }
 
   /// 发送回执

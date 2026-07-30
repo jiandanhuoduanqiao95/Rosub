@@ -31,39 +31,35 @@ class MessageHandler:
 
     def load_offline_data(self, username, ssock):
         """加载用户的离线消息和文件请求"""
-        # 加载离线消息
         messages = self.server.db.get_offline_messages(username)
         logging.info(f"用户 {username} 的离线消息: {len(messages)} 条")
 
         for msg in messages:
-            sender, msg_type, content, filename, message_id, status, msg_receiver = msg
+            sender, msg_type, content, filename, message_id, status, msg_receiver, msg_timestamp = msg
             logging.info(f"发送离线消息: 发送者={sender}, 类型={msg_type}, 消息ID={message_id}")
 
             if msg_type == "chat":
-                # 构建 header: from + to 让客户端知道消息应归类到哪个会话
-                extra_headers = {"from": sender, "history": "true", "message_id": message_id}
+                extra_headers = {"from": sender, "history": "true", "message_id": message_id,
+                                 "timestamp": str(msg_timestamp), "status": status}
                 if sender == username:
-                    # 这是自己发出的消息，to 是对应的收件人
                     extra_headers["to"] = msg_receiver
                 send_message(ssock, "chat", content.decode('utf-8'),
                              extra_headers=extra_headers)
             elif msg_type == "file":
                 extra_headers = {"from": sender, "filename": filename, "history": "true",
-                                 "message_id": message_id}
+                                 "message_id": message_id, "timestamp": str(msg_timestamp),
+                                 "status": status}
                 if sender == username:
                     extra_headers["to"] = msg_receiver
                 send_message(ssock, "file", content,
                              extra_headers=extra_headers)
             elif msg_type == "group_chat":
                 try:
-                    # 尝试从content解析群组ID
                     message_data = json.loads(content.decode('utf-8'))
                     group_id = message_data.get("group_id")
                     message_text = message_data.get("text")
 
-                    # 如果解析失败，尝试旧方法获取群组ID
                     if not group_id:
-                        # 旧方法获取群组ID (兼容旧数据)
                         with self.server.db._get_connection() as conn:
                             cursor = conn.cursor()
                             cursor.execute('''
@@ -78,13 +74,14 @@ class MessageHandler:
                                 message_text = content.decode('utf-8')
 
                     if group_id and self.server.db.is_group_member(group_id, username):
-                        # 确认用户仍然是群成员
                         send_message(ssock, "group_chat", message_text,
                                      extra_headers={
                                          "from": sender,
                                          "group_id": str(group_id),
                                          "history": "true",
-                                         "message_id": message_id.split('_')[0] if '_' in message_id else message_id
+                                         "message_id": message_id.split('_')[0] if '_' in message_id else message_id,
+                                         "timestamp": str(msg_timestamp),
+                                         "status": status
                                      })
                         logging.info(f"发送离线群聊消息: 发送者={sender}, 群组ID={group_id}, 消息ID={message_id}")
                     else:
@@ -320,6 +317,48 @@ class MessageHandler:
                 send_message(ssock, "admin_response", json.dumps(users_list), extra_headers={"response_type": "list_friends"})
                 logging.info(f"用户 {username} 请求好友列表")
 
+            elif msg_type == "fetch_history":
+                # 分页拉取历史消息（阶段 E）
+                # header: to（私聊对方）/ group_id / before_message_id（游标）/ limit
+                with_user = header.get("to")
+                group_id = header.get("group_id")
+                before_message_id = header.get("before_message_id")
+                limit = header.get("limit", "50")
+                try:
+                    limit_int = int(limit)
+                except (ValueError, TypeError):
+                    limit_int = 50
+                # 通过 before_message_id 查 timestamp 作为游标（避免客户端时区问题）
+                before = None
+                if before_message_id:
+                    before = self.server.db.get_message_history_timestamp(before_message_id)
+                if group_id:
+                    gid = int(group_id)
+                    rows = self.server.db.get_message_history(
+                        username, group_id=gid, before=before, limit=limit_int)
+                elif with_user:
+                    rows = self.server.db.get_message_history(
+                        username, with_user=with_user, before=before, limit=limit_int)
+                else:
+                    rows = self.server.db.get_message_history(
+                        username, before=before, limit=limit_int)
+                # 回发 JSON 数组：每条含 sender/type/content/message_id/filename/timestamp/group_id/status
+                batch = []
+                for r in rows:
+                    sender, receiver, mtype, content, mid, fname, ts, gid, mstatus = r
+                    try:
+                        text = content.decode('utf-8') if isinstance(content, bytes) else str(content)
+                    except Exception:
+                        text = ""
+                    batch.append({
+                        "sender": sender, "type": mtype, "content": text,
+                        "message_id": mid, "filename": fname, "timestamp": ts,
+                        "group_id": gid, "status": mstatus or "sent",
+                    })
+                send_message(ssock, "history_response", json.dumps(batch),
+                             extra_headers={"to": with_user or "", "group_id": group_id or ""})
+                logging.info(f"历史消息拉取: 用户={username}, 会话={with_user or group_id}, 返回={len(batch)}条")
+
             elif msg_type == "accept_friend":
                 requester = header.get("from")
                 if not self.server.db.has_pending_request(requester, username):
@@ -344,6 +383,11 @@ class MessageHandler:
                         username, requester, "chat",
                         f"{username} 已接受您的好友请求".encode('utf-8'),
                         message_id=str(uuid.uuid4()))
+                    accept_msg_id = str(uuid.uuid4())
+                    self.server.db.save_message_history(
+                        username, requester, "chat",
+                        f"{username} 已接受您的好友请求".encode('utf-8'),
+                        message_id=accept_msg_id)
                     logging.info(f"请求方离线，保存接受通知: {requester} <- {username}")
                 logging.info(f"好友请求接受：{requester} <-> {username}")
 
@@ -489,6 +533,9 @@ class MessageHandler:
 
                                 logging.warning(f"群组消息状态更新失败: 消息ID={message_id}, 群组ID={group_id}")
 
+                        # 同步更新 message_history 的状态
+                        self.server.db.update_message_history_status(message_id, 'recalled')
+
                         # 通知群成员
 
                         self.group_handler.notify_group_members(
@@ -580,6 +627,9 @@ class MessageHandler:
                         continue
 
                     if self.server.db.update_message_status(message_id, 'recalled'):
+
+                        # 同步更新 message_history 的状态
+                        self.server.db.update_message_history_status(message_id, 'recalled')
 
                         with self.server.client_map_lock:
 

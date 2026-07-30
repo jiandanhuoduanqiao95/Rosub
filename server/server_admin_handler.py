@@ -71,7 +71,11 @@ class AdminHandler:
             import uuid as _uuid
             for username in all_usernames:
                 if username not in online_users:
+                    ann_msg_id = str(_uuid.uuid4())
                     self.server.db.save_offline_message(
+                        "[系统公告]", username, "chat", announcement_msg.encode('utf-8'),
+                        message_id=ann_msg_id)
+                    self.server.db.save_message_history(
                         "[系统公告]", username, "chat", announcement_msg.encode('utf-8'),
                         message_id=str(_uuid.uuid4()))
                     logging.info(f"离线用户 {username} 的公告已持久化")

@@ -13,6 +13,7 @@ class Sidebar extends StatelessWidget {
   final VoidCallback onAddFriend;
   final VoidCallback onCreateGroup;
   final VoidCallback onJoinGroup;
+  final int Function(String key) unreadOf;
 
   const Sidebar({
     super.key,
@@ -22,6 +23,7 @@ class Sidebar extends StatelessWidget {
     required this.onAddFriend,
     required this.onCreateGroup,
     required this.onJoinGroup,
+    required this.unreadOf,
   });
 
   @override
@@ -90,6 +92,7 @@ class Sidebar extends StatelessWidget {
                   ...systemTargets.map((s) => _ChatTile(
                         target: s,
                         isSelected: currentChat == s.key,
+                        unread: unreadOf(s.key),
                         onTap: () => onSelectChat(s.key),
                       )),
                 ],
@@ -99,6 +102,7 @@ class Sidebar extends StatelessWidget {
                   ...friends.map((f) => _ChatTile(
                         target: f,
                         isSelected: currentChat == f.key,
+                        unread: unreadOf(f.key),
                         onTap: () => onSelectChat(f.key),
                       )),
                 ],
@@ -108,6 +112,7 @@ class Sidebar extends StatelessWidget {
                   ...groups.map((g) => _ChatTile(
                         target: g,
                         isSelected: currentChat == g.key,
+                        unread: unreadOf(g.key),
                         onTap: () => onSelectChat(g.key),
                       )),
                 ],
@@ -165,11 +170,13 @@ class _SectionHeader extends StatelessWidget {
 class _ChatTile extends StatelessWidget {
   final ChatTarget target;
   final bool isSelected;
+  final int unread;
   final VoidCallback onTap;
 
   const _ChatTile({
     required this.target,
     required this.isSelected,
+    required this.unread,
     required this.onTap,
   });
 
@@ -202,6 +209,12 @@ class _ChatTile extends StatelessWidget {
               fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
             ),
           ),
+          trailing: unread > 0
+              ? Badge(
+                  label: Text('$unread'),
+                  isLabelVisible: true,
+                )
+              : null,
           dense: true,
           onTap: onTap,
         ),

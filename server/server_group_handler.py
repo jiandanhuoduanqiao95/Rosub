@@ -144,6 +144,7 @@ class GroupHandler:
             self.server.db.save_group_file_response(message_id, group_id, username, response)
             if response == "accept":
                 self.server.db.save_offline_message(sender, username, "file", file_data, filename=filename, message_id=message_id)
+                self.server.db.save_message_history(sender, username, "file", file_data, filename=filename, message_id=message_id)
                 if self.server.client_map.get(username):
                     try:
                         send_message(self.server.client_map[username], "file", file_data,
@@ -182,6 +183,10 @@ class GroupHandler:
                         send_message(member_socket, msg_type, message,
                                      extra_headers={"from": from_user, "group_id": str(group_id), **extra_headers})
                         logging.info(f"向 {member} 发送群组消息: 类型={msg_type}, 群组ID={group_id}")
+                        # 在线成员已实时收到，标记 offline_messages 为 delivered 避免下次登录误计未读
+                        msg_id = extra_headers.get("message_id")
+                        if msg_id:
+                            self.server.db.update_message_status(f"{msg_id}_{member}", 'delivered')
                     except Exception as e:
                         logging.error(f"向 {member} 发送群组消息失败: {e}")
                         with self.server.client_map_lock:

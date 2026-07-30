@@ -553,6 +553,128 @@ class TestPingPong:
 
 
 # ============================================================
+# 第 1.6 组：历史消息分页测试（阶段 E）
+# ============================================================
+
+class TestFetchHistory:
+    """
+    【历史消息分页测试】
+
+    验证 fetch_history 协议：客户端拉取历史消息，服务端回发 history_response。
+    """
+
+    def test_fetch_private_history(self, tmp_path):
+        """私聊历史拉取：发几条消息后 fetch_history 应返回这些消息。"""
+        db_path = str(tmp_path / "test.db")
+        create_test_db(db_path)
+
+        server = Server()
+        s1, s2 = socket.socketpair()
+
+        try:
+            t = start_mock_client(server, s1, db_path)
+
+            send_message(s2, "login", "alice",
+                         extra_headers={"password": "password123"})
+            recv_all_initial_data(s2)
+
+            # 发 3 条消息给 bob
+            for i in range(3):
+                send_message(s2, "chat", f"msg{i}",
+                             extra_headers={"to": "bob", "message_id": f"h{i}"})
+                # 消费"离线消息已保存"通知
+                expect_response(s2, "chat")
+
+            # 拉取历史
+            send_message(s2, "fetch_history", "",
+                         extra_headers={"to": "bob", "limit": "50"})
+            h, d = expect_response(s2, "history_response")
+            assert h["type"] == "history_response"
+            batch = json.loads(d.decode())
+            assert len(batch) == 3
+            # 按时间倒序（最新在前）
+            assert batch[0]["content"] == "msg2"
+            assert batch[2]["content"] == "msg0"
+
+            s2.close()
+            t.join(timeout=2)
+        finally:
+            s1.close()
+
+    def test_fetch_history_with_cursor(self, tmp_path):
+        """游标分页：用 before_message_id 拉取更旧的消息。"""
+        db_path = str(tmp_path / "test.db")
+        create_test_db(db_path)
+
+        server = Server()
+        s1, s2 = socket.socketpair()
+
+        try:
+            t = start_mock_client(server, s1, db_path)
+
+            send_message(s2, "login", "alice",
+                         extra_headers={"password": "password123"})
+            recv_all_initial_data(s2)
+
+            # 发 5 条消息
+            for i in range(5):
+                send_message(s2, "chat", f"msg{i}",
+                             extra_headers={"to": "bob", "message_id": f"c{i}"})
+                expect_response(s2, "chat")
+
+            # 首次拉取 2 条（最新的）
+            send_message(s2, "fetch_history", "",
+                         extra_headers={"to": "bob", "limit": "2"})
+            h, d = expect_response(s2, "history_response")
+            batch = json.loads(d.decode())
+            assert len(batch) == 2
+            assert batch[0]["content"] == "msg4"
+            assert batch[1]["content"] == "msg3"
+            oldest_id = batch[1]["message_id"]  # c3
+
+            # 用 c3 作为游标拉取更旧的
+            send_message(s2, "fetch_history", "",
+                         extra_headers={"to": "bob", "before_message_id": oldest_id, "limit": "2"})
+            h2, d2 = expect_response(s2, "history_response")
+            batch2 = json.loads(d2.decode())
+            assert len(batch2) == 2
+            assert batch2[0]["content"] == "msg2"
+            assert batch2[1]["content"] == "msg1"
+
+            s2.close()
+            t.join(timeout=2)
+        finally:
+            s1.close()
+
+    def test_fetch_history_empty(self, tmp_path):
+        """没有历史时返回空数组。"""
+        db_path = str(tmp_path / "test.db")
+        create_test_db(db_path)
+
+        server = Server()
+        s1, s2 = socket.socketpair()
+
+        try:
+            t = start_mock_client(server, s1, db_path)
+
+            send_message(s2, "login", "alice",
+                         extra_headers={"password": "password123"})
+            recv_all_initial_data(s2)
+
+            send_message(s2, "fetch_history", "",
+                         extra_headers={"to": "bob", "limit": "50"})
+            h, d = expect_response(s2, "history_response")
+            assert h["type"] == "history_response"
+            batch = json.loads(d.decode())
+            assert len(batch) == 0
+
+            s2.close()
+            t.join(timeout=2)
+        finally:
+            s1.close()
+
+
+# ============================================================
 # 第 2 组：私聊消息测试
 # ============================================================
 

@@ -127,9 +127,18 @@ class Database:
                     content BLOB NOT NULL,
                     filename TEXT,
                     group_id INTEGER,
+                    status TEXT DEFAULT 'sent',
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            # 迁移：为旧版 message_history 表添加 status 列
+            try:
+                cursor.execute("SELECT status FROM message_history LIMIT 1")
+            except sqlite3.OperationalError:
+                cursor.execute("ALTER TABLE message_history ADD COLUMN status TEXT DEFAULT 'sent'")
+                logging.info("message_history 表已迁移：新增 status 列")
+
             conn.commit()
 
     def add_user(self, username, password_hash, is_admin=False):
@@ -180,16 +189,16 @@ class Database:
             logging.error(f"保存离线消息失败: {e}")
 
     def get_offline_messages(self, receiver):
-        """获取用户的所有聊天消息（持久化历史 + 未读消息）。
+        """获取用户的聊天消息（未读 + 最近已读历史）。
 
-        合并接收和发出的消息，按时间戳升序返回，实现微信式持久化历史。
-        包含 status='sent'（未读）和 status='delivered'（已读历史）。
+        返回 status='sent'（未读）和 status='delivered'（已读历史）的消息，
+        按时间戳升序返回，限制 500 条。已读历史通过 fetch_history 上滑加载更早的。
+        返回元组包含 timestamp 字段（最后一列）。
         """
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            # 单条查询合并接收+发出，按时间戳排序，限制 500 条避免过载
             cursor.execute('''
-                SELECT sender, message_type, content, filename, message_id, status, receiver
+                SELECT sender, message_type, content, filename, message_id, status, receiver, timestamp
                 FROM offline_messages
                 WHERE (receiver = ? OR (sender = ? AND receiver != ?))
                   AND status IN ('sent', 'delivered')
@@ -206,7 +215,7 @@ class Database:
             ''', (receiver,))
             conn.commit()
 
-            logging.info(f"获取聊天历史: 用户={receiver}, 共={len(messages)}条")
+            logging.info(f"获取聊天消息: 用户={receiver}, 共={len(messages)}条")
             return messages
 
     def cleanup_delivered_messages(self, receiver):
@@ -615,6 +624,30 @@ class Database:
     # 消息历史持久化
     # ============================================================
 
+    def get_message_history_timestamp(self, message_id):
+        """查询某条历史消息的 (timestamp, id)，用作分页游标。
+
+        返回 (timestamp, id) 元组，或 None。
+        同一秒内的消息 timestamp 相同，用 id 作为二级游标确保正确分页。
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT timestamp, id FROM message_history WHERE message_id = ?",
+                (message_id,))
+            row = cursor.fetchone()
+            return (row[0], row[1]) if row else None
+
+    def update_message_history_status(self, message_id, status):
+        """更新历史消息的状态（如撤回时标记为 'recalled'）"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE message_history SET status = ? WHERE message_id = ? OR message_id LIKE ?",
+                (status, message_id, f"{message_id}_%"))
+            conn.commit()
+            return cursor.rowcount > 0
+
     def save_message_history(self, sender, receiver, message_type, content,
                              filename=None, group_id=None, message_id=None):
         """保存一条消息到 message_history 表（永久存储）"""
@@ -635,38 +668,81 @@ class Database:
             return False
 
     def get_message_history(self, user, with_user=None, group_id=None,
-                            limit=50, offset=0):
-        """分页拉取历史消息，按时间倒序（最新在前）"""
+                            limit=50, offset=0, before=None):
+        """分页拉取历史消息，按时间倒序（最新在前）。
+
+        支持两种分页方式：
+        - 游标分页（推荐）：before 为 (timestamp, id) 元组，返回该消息之前的消息。
+          用 (timestamp, id) 组合游标，同一秒内的消息也能正确分页。
+        - offset 分页：提供 offset，传统分页。向后兼容旧调用。
+        """
         with self._get_connection() as conn:
             cursor = conn.cursor()
             if group_id is not None:
-                cursor.execute('''
-                    SELECT sender, receiver, message_type, content, message_id,
-                           filename, timestamp, group_id
-                    FROM message_history
-                    WHERE group_id = ?
-                    ORDER BY timestamp DESC, id DESC
-                    LIMIT ? OFFSET ?
-                ''', (group_id, limit, offset))
+                if before is not None:
+                    ts, rid = before
+                    cursor.execute('''
+                        SELECT sender, receiver, message_type, content, message_id,
+                               filename, timestamp, group_id, status
+                        FROM message_history
+                        WHERE group_id = ?
+                          AND (timestamp < ? OR (timestamp = ? AND id < ?))
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ?
+                    ''', (group_id, ts, ts, rid, limit))
+                else:
+                    cursor.execute('''
+                        SELECT sender, receiver, message_type, content, message_id,
+                               filename, timestamp, group_id, status
+                        FROM message_history
+                        WHERE group_id = ?
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ? OFFSET ?
+                    ''', (group_id, limit, offset))
             elif with_user is not None:
-                cursor.execute('''
-                    SELECT sender, receiver, message_type, content, message_id,
-                           filename, timestamp, group_id
-                    FROM message_history
-                    WHERE (sender = ? AND receiver = ?)
-                       OR (sender = ? AND receiver = ?)
-                    ORDER BY timestamp DESC, id DESC
-                    LIMIT ? OFFSET ?
-                ''', (user, with_user, with_user, user, limit, offset))
+                if before is not None:
+                    ts, rid = before
+                    cursor.execute('''
+                        SELECT sender, receiver, message_type, content, message_id,
+                               filename, timestamp, group_id, status
+                        FROM message_history
+                        WHERE ((sender = ? AND receiver = ?)
+                           OR (sender = ? AND receiver = ?))
+                          AND (timestamp < ? OR (timestamp = ? AND id < ?))
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ?
+                    ''', (user, with_user, with_user, user, ts, ts, rid, limit))
+                else:
+                    cursor.execute('''
+                        SELECT sender, receiver, message_type, content, message_id,
+                               filename, timestamp, group_id, status
+                        FROM message_history
+                        WHERE (sender = ? AND receiver = ?)
+                           OR (sender = ? AND receiver = ?)
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ? OFFSET ?
+                    ''', (user, with_user, with_user, user, limit, offset))
             else:
-                cursor.execute('''
-                    SELECT sender, receiver, message_type, content, message_id,
-                           filename, timestamp, group_id
-                    FROM message_history
-                    WHERE sender = ? OR receiver = ?
-                    ORDER BY timestamp DESC, id DESC
-                    LIMIT ? OFFSET ?
-                ''', (user, user, limit, offset))
+                if before is not None:
+                    ts, rid = before
+                    cursor.execute('''
+                        SELECT sender, receiver, message_type, content, message_id,
+                               filename, timestamp, group_id, status
+                        FROM message_history
+                        WHERE (sender = ? OR receiver = ?)
+                          AND (timestamp < ? OR (timestamp = ? AND id < ?))
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ?
+                    ''', (user, user, ts, ts, rid, limit))
+                else:
+                    cursor.execute('''
+                        SELECT sender, receiver, message_type, content, message_id,
+                               filename, timestamp, group_id, status
+                        FROM message_history
+                        WHERE sender = ? OR receiver = ?
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ? OFFSET ?
+                    ''', (user, user, limit, offset))
             return cursor.fetchall()
 
     def search_message_history(self, user, keyword, with_user=None, limit=50):
@@ -677,7 +753,7 @@ class Database:
             if with_user is not None:
                 cursor.execute('''
                     SELECT sender, receiver, message_type, content, message_id,
-                           filename, timestamp, group_id
+                           filename, timestamp, group_id, status
                     FROM message_history
                     WHERE ((sender = ? AND receiver = ?)
                        OR (sender = ? AND receiver = ?))
@@ -688,7 +764,7 @@ class Database:
             else:
                 cursor.execute('''
                     SELECT sender, receiver, message_type, content, message_id,
-                           filename, timestamp, group_id
+                           filename, timestamp, group_id, status
                     FROM message_history
                     WHERE (sender = ? OR receiver = ?)
                       AND CAST(content AS TEXT) LIKE ?

@@ -64,6 +64,19 @@ class AppState extends ChangeNotifier {
   // ---- 消息 ID → 消息映射（用于撤回） ----
   final Map<String, ChatMessage> _messageMap = {};
 
+  // ---- 未读消息计数（阶段 E）----
+  final Map<String, int> _unreadCount = {};
+  int unreadOf(String key) => _unreadCount[key] ?? 0;
+  int get totalUnread => _unreadCount.values.fold(0, (a, b) => a + b);
+
+  // ---- 历史分页状态（阶段 E）----
+  final Set<String> _noMoreHistory = {};
+  bool hasMoreHistory(String key) => !_noMoreHistory.contains(key);
+  void setNoMoreHistory(String key) {
+    _noMoreHistory.add(key);
+    notifyListeners();
+  }
+
   // ---- 状态日志 ----
   final List<String> _statusLog = [];
   UnmodifiableListView<String> get statusLog =>
@@ -119,6 +132,8 @@ class AppState extends ChangeNotifier {
     _pendingRequests.clear();
     _pendingFileRequests.clear();
     _messageMap.clear();
+    _unreadCount.clear();
+    _noMoreHistory.clear();
     _currentChat = null;
     _noticeQueue.clear();
     _log('已断开连接');
@@ -183,6 +198,10 @@ class AppState extends ChangeNotifier {
 
   void selectChat(String? key) {
     _currentChat = key;
+    // 切换到某会话时清零该会话的未读计数（阶段 E）
+    if (key != null && _unreadCount.containsKey(key)) {
+      _unreadCount.remove(key);
+    }
     notifyListeners();
   }
 
@@ -198,7 +217,34 @@ class AppState extends ChangeNotifier {
     _messages.putIfAbsent(chatKey, () => []);
     _messages[chatKey]!.add(msg);
     _messageMap[msg.messageId] = msg;
+    // 未读计数：仅 status=sent（真正的未读消息），且非自己发送，且非当前会话（阶段 E）
+    // 已读历史（delivered）和上滑加载的历史不计未读
+    if (msg.status == 'sent' &&
+        chatKey != _currentChat &&
+        msg.sender != _username) {
+      _unreadCount[chatKey] = (_unreadCount[chatKey] ?? 0) + 1;
+    }
     notifyListeners();
+  }
+
+  /// 批量插入历史消息到会话列表（上滑加载更旧消息，阶段 E）
+  /// 历史消息不计未读，按 messageId 去重，按 timestamp 排序确保时间顺序正确
+  void prependHistoryMessages(String chatKey, List<ChatMessage> msgs) {
+    if (msgs.isEmpty) return;
+    _messages.putIfAbsent(chatKey, () => []);
+    final list = _messages[chatKey]!;
+    int inserted = 0;
+    for (final msg in msgs) {
+      if (_messageMap.containsKey(msg.messageId)) continue;
+      list.add(msg);
+      _messageMap[msg.messageId] = msg;
+      inserted++;
+    }
+    // 按 timestamp 升序排序（旧消息在前，新消息在后）
+    if (inserted > 0) {
+      list.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+      notifyListeners();
+    }
   }
 
   /// 更新消息状态（送达、撤回等）

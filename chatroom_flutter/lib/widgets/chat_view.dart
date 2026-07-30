@@ -1,7 +1,7 @@
 /// 聊天视图
 ///
 /// 显示消息列表 + 底部输入栏。
-/// 支持文本发送、文件发送、消息撤回。
+/// 支持文本发送、文件发送、消息撤回、上滑加载历史（阶段 E）。
 /// 输入框使用 RawTextField + IME 桥接，避免 Flutter + fcitx GTK IM Context 死锁。
 
 import 'package:flutter/material.dart';
@@ -9,7 +9,7 @@ import 'package:flutter/material.dart';
 import '../models/chat_models.dart';
 import 'raw_text_field.dart';
 
-class ChatView extends StatelessWidget {
+class ChatView extends StatefulWidget {
   final String chatKey;
   final String chatTitle;
   final List<ChatMessage> messages;
@@ -19,6 +19,8 @@ class ChatView extends StatelessWidget {
   final VoidCallback onSend;
   final VoidCallback onSendFile;
   final ValueChanged<String> onRecall;
+  final Future<void> Function(String? beforeMessageId) onLoadHistory;
+  final bool Function(String key) hasMoreHistory;
 
   const ChatView({
     super.key,
@@ -31,7 +33,56 @@ class ChatView extends StatelessWidget {
     required this.onSend,
     required this.onSendFile,
     required this.onRecall,
+    required this.onLoadHistory,
+    required this.hasMoreHistory,
   });
+
+  @override
+  State<ChatView> createState() => _ChatViewState();
+}
+
+class _ChatViewState extends State<ChatView> {
+  final ScrollController _scrollCtrl = ScrollController();
+  bool _isLoadingHistory = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollCtrl.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _scrollCtrl.removeListener(_onScroll);
+    _scrollCtrl.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scrollCtrl.hasClients || _isLoadingHistory) return;
+    if (!widget.hasMoreHistory(widget.chatKey)) return;
+    // reverse: true 的 ListView：
+    //   pixels = 0 → 底部（最新消息）
+    //   pixels = maxScrollExtent → 顶部（最旧消息，上滑看历史方向）
+    // 用户上滑接近顶部时预加载（距顶 200px 触发，避免滑到顶才加载）
+    final pos = _scrollCtrl.position;
+    if (pos.maxScrollExtent - pos.pixels < 200) {
+      _loadMoreHistory();
+    }
+  }
+
+  Future<void> _loadMoreHistory() async {
+    if (widget.messages.isEmpty) return;
+    _isLoadingHistory = true;
+    // 当前最旧消息的 messageId 作为游标
+    final beforeId = widget.messages.first.messageId;
+    await widget.onLoadHistory(beforeId);
+    // reverse: true 的 ListView：新消息插入到列表头部（视觉顶部/旧消息方向），
+    // Flutter 自动保持当前可见消息的滚动位置，无需手动调整
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _isLoadingHistory = false;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -54,9 +105,9 @@ class ChatView extends StatelessWidget {
                 radius: 18,
                 backgroundColor: Theme.of(context).colorScheme.primaryContainer,
                 child: Icon(
-                  chatKey.startsWith('group_')
+                  widget.chatKey.startsWith('group_')
                       ? Icons.groups_rounded
-                      : chatKey == '服务器'
+                      : widget.chatKey == '服务器'
                           ? Icons.notifications_rounded
                           : Icons.person_rounded,
                   size: 20,
@@ -66,9 +117,10 @@ class ChatView extends StatelessWidget {
               const SizedBox(width: 12),
               Expanded(
                 child: Text(
-                  chatKey.startsWith('group_') || chatKey == '服务器'
-                      ? chatTitle
-                      : '与 $chatTitle 的聊天',
+                  widget.chatKey.startsWith('group_') ||
+                          widget.chatKey == '服务器'
+                      ? widget.chatTitle
+                      : '与 ${widget.chatTitle} 的聊天',
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
                         fontWeight: FontWeight.bold,
@@ -81,7 +133,7 @@ class ChatView extends StatelessWidget {
 
         // 消息列表
         Expanded(
-          child: messages.isEmpty
+          child: widget.messages.isEmpty
               ? Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -101,33 +153,79 @@ class ChatView extends StatelessWidget {
                     ],
                   ),
                 )
-              : ListView.builder(
-                  reverse: true,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  itemCount: messages.length,
-                  itemBuilder: (context, index) {
-                    final msgIndex = messages.length - 1 - index;
-                    final msg = messages[msgIndex];
-                    return _MessageBubble(
-                      message: msg,
-                      isSelf: msg.sender == username,
-                      onRecall: msg.isRecalled || msg.sender != username
-                          ? null
-                          : () => onRecall(msg.messageId),
-                    );
-                  },
+              : Stack(
+                  children: [
+                    ListView.builder(
+                      controller: _scrollCtrl,
+                      reverse: true,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      itemCount: widget.messages.length,
+                      itemBuilder: (context, index) {
+                        final msgIndex = widget.messages.length - 1 - index;
+                        final msg = widget.messages[msgIndex];
+                        return _MessageBubble(
+                          message: msg,
+                          isSelf: msg.sender == widget.username,
+                          onRecall: msg.isRecalled ||
+                                  msg.sender != widget.username
+                              ? null
+                              : () => widget.onRecall(msg.messageId),
+                        );
+                      },
+                    ),
+                    // 加载指示器
+                    if (_isLoadingHistory)
+                      Positioned(
+                        top: 8,
+                        left: 0,
+                        right: 0,
+                        child: Center(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .surfaceContainerHighest,
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child:
+                                      CircularProgressIndicator(strokeWidth: 2),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  '加载中…',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
         ),
 
         // 输入栏
-        if (canSend)
+        if (widget.canSend)
           _InputBar(
-            inputCtrl: inputCtrl,
-            onSend: onSend,
-            onSendFile: onSendFile,
+            inputCtrl: widget.inputCtrl,
+            onSend: widget.onSend,
+            onSendFile: widget.onSendFile,
           )
         else
-          _ReadOnlyBar(chatTitle: chatTitle),
+          _ReadOnlyBar(chatTitle: widget.chatTitle),
       ],
     );
   }

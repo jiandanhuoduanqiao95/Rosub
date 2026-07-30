@@ -91,6 +91,35 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// 拉取历史消息（阶段 E 上滑加载）
+  Future<void> _loadHistory(String chatKey, String? beforeMessageId) async {
+    if (chatKey == '服务器') return;
+    if (chatKey.startsWith('group_')) {
+      final groupId = int.tryParse(chatKey.substring(6));
+      if (groupId != null) {
+        await widget.socketService.fetchHistory(
+          groupId: groupId,
+          beforeMessageId: beforeMessageId,
+        );
+      }
+    } else {
+      await widget.socketService.fetchHistory(
+        to: chatKey,
+        beforeMessageId: beforeMessageId,
+      );
+    }
+  }
+
+  /// 选中会话时，仅当会话无消息时触发首次历史加载（阶段 E6）
+  /// 已有消息（如离线消息）不重复加载，上滑加载由 ScrollController 负责
+  void _maybeLoadInitialHistory(String chatKey) {
+    if (chatKey == '服务器') return;
+    if (!_state.hasMoreHistory(chatKey)) return;
+    if (_state.getMessages(chatKey).isEmpty) {
+      _loadHistory(chatKey, null);
+    }
+  }
+
   void _showAddFriendDialog() {
     showAddFriendDialog(context, (username) {
       widget.socketService.addFriend(username);
@@ -240,10 +269,14 @@ class _ChatScreenState extends State<ChatScreen> {
                     Sidebar(
                       chatTargets: _state.chatTargets,
                       currentChat: _state.currentChat,
-                      onSelectChat: (key) => _state.selectChat(key),
+                      onSelectChat: (key) {
+                        _state.selectChat(key);
+                        _maybeLoadInitialHistory(key);
+                      },
                       onAddFriend: _showAddFriendDialog,
                       onCreateGroup: _showCreateGroupDialog,
                       onJoinGroup: _showJoinGroupDialog,
+                      unreadOf: _state.unreadOf,
                     ),
 
                     // 分隔线
@@ -265,6 +298,9 @@ class _ChatScreenState extends State<ChatScreen> {
                               onSend: _sendMessage,
                               onSendFile: _sendFile,
                               onRecall: _confirmRecall,
+                              onLoadHistory: (beforeId) => _loadHistory(
+                                  _state.currentChat!, beforeId),
+                              hasMoreHistory: _state.hasMoreHistory,
                             )
                           : const Center(
                               child: Column(

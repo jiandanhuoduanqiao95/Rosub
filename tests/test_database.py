@@ -211,7 +211,7 @@ class TestOfflineMessages:
         验证点：
         - 消息内容、发送者、类型正确
         - 取出后状态变为 'delivered'
-        - 持久化：再次查询仍返回（已送达消息作为历史保留）
+        - 再次查询仍返回（已读历史作为最近消息保留，更早的通过 fetch_history 拉取）
         """
         db.save_offline_message("alice", "bob", "chat", b"Hello Bob!",
                                 message_id="msg-001")
@@ -219,7 +219,7 @@ class TestOfflineMessages:
         messages = db.get_offline_messages("bob")
         assert len(messages) == 1
 
-        sender, msg_type, content, filename, msg_id, status, receiver = messages[0]
+        sender, msg_type, content, filename, msg_id, status, receiver, timestamp = messages[0]
         assert sender == "alice"
         assert receiver == "bob"
         assert msg_type == "chat"
@@ -227,7 +227,7 @@ class TestOfflineMessages:
         assert msg_id == "msg-001"
         assert status == "sent"  # 取出时返回的状态还是 'sent'
 
-        # 再次查询：已送达消息仍然返回（持久化历史）
+        # 再次查询：已读消息仍然返回（作为最近历史保留）
         messages2 = db.get_offline_messages("bob")
         assert len(messages2) == 1
         assert messages2[0][5] == "delivered"  # status 已变为 delivered
@@ -243,7 +243,7 @@ class TestOfflineMessages:
 
         messages = db.get_offline_messages("bob")
         assert len(messages) == 1
-        _, msg_type, content, filename, _, _, receiver = messages[0]
+        _, msg_type, content, filename, _, _, receiver, _ = messages[0]
         assert msg_type == "file"
         assert filename == "report.pdf"
         assert receiver == "bob"
