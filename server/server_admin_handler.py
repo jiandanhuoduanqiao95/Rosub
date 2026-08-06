@@ -17,7 +17,7 @@ class AdminHandler:
         if command == "list_users":
             users = self.server.db.get_all_users()
             with self.server.client_map_lock:
-                users_list = [[user, user in self.server.client_map, is_admin] for user, is_admin in users]
+                users_list = [[user, user in self.server.client_map, bool(is_admin)] for user, is_admin in users]
             send_message(ssock, "admin_response", json.dumps(users_list), extra_headers={"response_type": "list_users"})
             logging.info(f"列出所有用户: 用户={username}")
         elif command == "delete_user":
@@ -29,7 +29,7 @@ class AdminHandler:
             if self.server.db.delete_user(target_user):
                 users = self.server.db.get_all_users()
                 with self.server.client_map_lock:
-                    users_list = [[user, user in self.server.client_map, is_admin] for user, is_admin in users]
+                    users_list = [[user, user in self.server.client_map, bool(is_admin)] for user, is_admin in users]
                 send_message(ssock, "admin_response", json.dumps(users_list),
                              extra_headers={"response_type": "list_users", "action_result": f"删除用户 {target_user} 成功"})
                 logging.info(f"管理员 {username} 删除用户: {target_user}")
