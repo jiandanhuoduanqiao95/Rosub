@@ -14,6 +14,8 @@ class Sidebar extends StatelessWidget {
   final VoidCallback onCreateGroup;
   final VoidCallback onJoinGroup;
   final int Function(String key) unreadOf;
+  final void Function(String username)? onDeleteFriend;
+  final void Function(ChatTarget target)? onGroupLongPress;
 
   const Sidebar({
     super.key,
@@ -24,6 +26,8 @@ class Sidebar extends StatelessWidget {
     required this.onCreateGroup,
     required this.onJoinGroup,
     required this.unreadOf,
+    this.onDeleteFriend,
+    this.onGroupLongPress,
   });
 
   @override
@@ -104,6 +108,9 @@ class Sidebar extends StatelessWidget {
                         isSelected: currentChat == f.key,
                         unread: unreadOf(f.key),
                         onTap: () => onSelectChat(f.key),
+                        onLongPress: onDeleteFriend != null
+                            ? () => onDeleteFriend!(f.key)
+                            : null,
                       )),
                 ],
                 // 群组分组
@@ -114,6 +121,9 @@ class Sidebar extends StatelessWidget {
                         isSelected: currentChat == g.key,
                         unread: unreadOf(g.key),
                         onTap: () => onSelectChat(g.key),
+                        onLongPress: onGroupLongPress != null
+                            ? () => onGroupLongPress!(g)
+                            : null,
                       )),
                 ],
                 if (systemTargets.isEmpty && friends.isEmpty && groups.isEmpty)
@@ -172,12 +182,14 @@ class _ChatTile extends StatelessWidget {
   final bool isSelected;
   final int unread;
   final VoidCallback onTap;
+  final VoidCallback? onLongPress;
 
   const _ChatTile({
     required this.target,
     required this.isSelected,
     required this.unread,
     required this.onTap,
+    this.onLongPress,
   });
 
   @override
@@ -189,6 +201,7 @@ class _ChatTile extends StatelessWidget {
         borderRadius: BorderRadius.circular(14),
         child: ListTile(
           selected: isSelected,
+          onLongPress: onLongPress,
           shape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
           selectedTileColor: Theme.of(context).colorScheme.primaryContainer,

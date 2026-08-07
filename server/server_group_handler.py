@@ -63,6 +63,40 @@ class GroupHandler:
                 send_message(ssock, "error", f"加入群组失败: {str(e)}")
                 logging.error(f"用户 {username} 加入群组失败: {str(e)}")
 
+        if msg_type == "leave_group":
+            try:
+                group_id_str = header.get("group_id", "")
+                group_id = int(group_id_str)
+                with self.server.db._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('SELECT group_name FROM groups WHERE id = ?', (group_id,))
+                    group_row = cursor.fetchone()
+                    if not group_row:
+                        send_message(ssock, "error", f"群组 {group_id} 不存在")
+                        logging.error(f"用户 {username} 离开群组失败: 群组 {group_id} 不存在")
+                        return
+                if not self.server.db.is_group_member(group_id, username):
+                    send_message(ssock, "error", f"群组 {group_id} 不存在或您不在此群组中")
+                    logging.warning(f"用户 {username} 离开群组失败: 不在群组 {group_id} 中")
+                    return
+                self.server.db.leave_group(group_id, username)
+                send_message(ssock, "chat", f"已退出群组 {group_row[0]} (ID:{group_id})")
+                self.notify_group_members(group_id, "chat",
+                                          f"{username} 已退出群组 {group_id}",
+                                          from_user="系统",
+                                          extra_headers={"group_id": str(group_id)})
+                logging.info(f"用户 {username} 已离开群组 {group_id} ({group_row[0]})")
+                remaining = self.server.db.get_group_members(group_id)
+                if not remaining:
+                    self.server.db.delete_group(group_id)
+                    logging.info(f"群组 {group_id} ({group_row[0]}) 已无成员，已删除群组及历史")
+            except ValueError:
+                send_message(ssock, "error", "无效的群组 ID")
+                logging.error(f"用户 {username} 离开群组失败: 无效的 group_id")
+            except Exception as e:
+                send_message(ssock, "error", f"离开群组失败: {str(e)}")
+                logging.error(f"用户 {username} 离开群组失败: {str(e)}")
+
         if msg_type == "group_chat":
             try:
                 group_id = int(header.get("group_id"))
@@ -122,6 +156,31 @@ class GroupHandler:
             groups = self.server.db.get_user_groups(username)
             send_message(ssock, "list_groups", json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
             logging.info(f"发送群组列表给用户: {username}")
+
+        elif msg_type == "list_group_members":
+            group_id_str = header.get("group_id", "")
+            try:
+                group_id = int(group_id_str)
+            except (ValueError, TypeError):
+                send_message(ssock, "error", "无效的群组 ID")
+                logging.error(f"用户 {username} 查询群成员失败: 无效的 group_id {group_id_str}")
+                return
+            with self.server.db._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT 1 FROM groups WHERE id = ?', (group_id,))
+                if not cursor.fetchone():
+                    send_message(ssock, "error", f"群组 {group_id} 不存在")
+                    logging.error(f"用户 {username} 查询群成员失败: 群组 {group_id} 不存在")
+                    return
+            if not self.server.db.is_group_member(group_id, username):
+                send_message(ssock, "error", f"群组 {group_id} 不存在或您不在此群组中")
+                logging.warning(f"用户 {username} 查询群成员失败: 不在群组 {group_id} 中")
+                return
+            members = self.server.db.get_group_members(group_id)
+            send_message(ssock, "admin_response", json.dumps(members),
+                         extra_headers={"response_type": "list_group_members",
+                                        "group_id": str(group_id)})
+            logging.info(f"发送群成员列表: 用户={username}, 群组={group_id}, 成员={members}")
 
         elif msg_type == "group_file_response":
             message_id = header.get("message_id")

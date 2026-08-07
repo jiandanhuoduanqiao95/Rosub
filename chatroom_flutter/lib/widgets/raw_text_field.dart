@@ -128,8 +128,9 @@ class _RawTextFieldState extends State<RawTextField> {
 
     if (!widget.showChineseInput) return;
 
-    if (_hasFocus && !_bridgeActive) {
-      // 用户点击了文本字段 → 激活桥接
+    if (_hasFocus) {
+      // 获得焦点时始终调用 _activateBridge，确保桥接的 GTK 窗口
+      // 重新获取 X11 焦点（解决从侧边栏等其它区域切回后 IME 切换失效）
       _activateBridge();
     } else if (!_hasFocus && _bridgeActive && !_stealingFocus) {
       // 用户点击了其他地方 → 释放桥接

@@ -751,6 +751,15 @@ class SocketService {
         }
         break;
 
+      // ---- 删除好友通知（阶段 F）----
+      case 'delete_friend':
+        final deleter = header['from'] as String?;
+        if (deleter != null) {
+          state.removeFriend(deleter);
+          state.showNotice('$deleter 已与你解除好友关系');
+        }
+        break;
+
       // ---- 历史消息分页响应（阶段 E）----
       case 'history_response':
         final withUser = header['to'] as String?;
@@ -839,6 +848,20 @@ class SocketService {
             );
           } catch (_) {
             state.log('解析用户列表失败: $responseBody');
+          }
+        } else if (responseType == 'list_group_members') {
+          final groupId = header['group_id'] as String?;
+          if (groupId != null) {
+            try {
+              final List<dynamic> list = jsonDecode(responseBody);
+              final members = list.map((e) => e.toString()).toList();
+              final gid = int.tryParse(groupId);
+              if (gid != null) {
+                state.updateGroupMembers(gid, members);
+              }
+            } catch (_) {
+              state.log('解析群成员列表失败: $responseBody');
+            }
           }
         } else {
           // 其他管理响应仅管理员可见
@@ -1130,6 +1153,36 @@ class SocketService {
     }
     await sendMessage(_socket!, 'admin_command', content,
         extraHeaders: extraHeaders);
+  }
+
+  /// 删除好友（阶段 F）
+  Future<void> deleteFriend(String targetUser) async {
+    if (_socket == null) return;
+    await sendMessage(_socket!, 'delete_friend', '', extraHeaders: {
+      'to': targetUser,
+    });
+    state.removeFriend(targetUser);
+    state.showNotice('已删除好友 $targetUser');
+    await _requestFriendList();
+  }
+
+  /// 退出群组（阶段 F）
+  Future<void> leaveGroup(int groupId) async {
+    if (_socket == null) return;
+    await sendMessage(_socket!, 'leave_group', '', extraHeaders: {
+      'group_id': groupId.toString(),
+    });
+  }
+
+  /// 拉取群成员列表（阶段 F）
+  Future<void> fetchGroupMembers(int groupId) async {
+    if (_socket == null) return;
+    try {
+      await sendMessage(_socket!, 'list_group_members', '',
+          extraHeaders: {'group_id': groupId.toString()});
+    } catch (e) {
+      state.log('拉取群成员列表失败: $e');
+    }
   }
 
   /// 保存接收到的文件

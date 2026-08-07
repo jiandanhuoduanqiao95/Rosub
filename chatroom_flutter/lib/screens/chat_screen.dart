@@ -142,6 +142,27 @@ class _ChatScreenState extends State<ChatScreen> {
     showAdminPanel(context, widget.socketService, _state);
   }
 
+  void _showDeleteFriendDialog(String username) {
+    showDeleteFriendDialog(context, username, () {
+      widget.socketService.deleteFriend(username);
+    });
+  }
+
+  void _showGroupMenuDialog(ChatTarget target) {
+    final groupId = int.tryParse(target.key.substring(6));
+    if (groupId == null) return;
+    final group = _state.groups.where((g) => g.id == groupId).firstOrNull;
+    if (group == null) return;
+    // 打开菜单即预取成员列表，使菜单中的人数实时更新
+    widget.socketService.fetchGroupMembers(groupId);
+    showGroupMenuDialog(context, group, (g) {
+      showGroupInfoDialog(context, g);
+    }, (gid) {
+      widget.socketService.leaveGroup(gid);
+      _state.leaveGroup(gid);
+    });
+  }
+
   void _logout() {
     widget.socketService.disconnect();
     if (mounted) {
@@ -277,6 +298,8 @@ class _ChatScreenState extends State<ChatScreen> {
                       onCreateGroup: _showCreateGroupDialog,
                       onJoinGroup: _showJoinGroupDialog,
                       unreadOf: _state.unreadOf,
+                      onDeleteFriend: _showDeleteFriendDialog,
+                      onGroupLongPress: _showGroupMenuDialog,
                     ),
 
                     // 分隔线

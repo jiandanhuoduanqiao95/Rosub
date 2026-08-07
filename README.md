@@ -1,6 +1,6 @@
 # 聊天室 —— 基于 TCP+SSL 的 C/S 即时通讯系统
 
-> 版本 4.3.0 | 2026-07-16
+> 版本 4.2.0 | 2026-08-07
 
 ---
 
@@ -14,7 +14,7 @@
   - tkinter 图形界面 —— 保留作为功能参照（`client/gui/`）
 - **协议**: 自定义二进制协议（4 字节头长度 + JSON 头 + 消息体，v1.0.0 已冻结）
 - **认证**: bcrypt 密码哈希 + 管理员二次密钥
-- **测试**: pytest 164 个 + Flutter widget 测试
+- **测试**: pytest 283 个（pytest-xdist 并行）+ Flutter widget 测试 106 个 + Dart 协议 15 个
 
 ---
 
@@ -38,7 +38,7 @@ source .venv/bin/activate
 python client/gui/gui_main.py
 
 # === 3. 运行自动化测试 ===
-./run_tests.sh
+./run_tests.sh --all
 ```
 
 > **管理员密钥**: 不要把真实密钥写入任何被 git 跟踪的文件。仅通过 `export CHATROOM_ADMIN_SECRET` 环境变量传入。`config.yaml` 中 `security.admin_secret` 留空即可。
@@ -52,9 +52,9 @@ chatroom/
 ├── server/                            # 服务端（Python）
 │   ├── server_main.py                 #   入口：监听 127.0.0.1:8090
 │   ├── server_client_handler.py       #   连接 & 认证（含管理员密钥校验）
-│   ├── server_message_handler.py      #   消息路由：私聊/群聊/好友/文件/撤回
+│   ├── server_message_handler.py      #   消息路由：私聊/群聊/好友/文件/撤回/删除好友
 │   ├── server_admin_handler.py        #   管理员命令：列出用户/删除/发公告
-│   └── server_group_handler.py        #   群组管理：创建/加入/广播/群文件
+│   └── server_group_handler.py        #   群组管理：创建/加入/退出/广播/成员列表/群文件
 ├── client/gui/                        # tkinter 客户端（保留）
 │   ├── gui_main.py                    #   主窗口
 │   ├── gui_login_ui.py                #   登录/注册（含管理员密钥输入框）
@@ -96,14 +96,22 @@ chatroom/
 ├── SSL/                               # SSL 证书（自签名）
 │   ├── gen_cert.py
 │   └── tsetcn.crt / .key / .pem
-├── tests/                             # 自动化测试（157 个）
+├── tests/                             # 自动化测试（283 个 + conftest 共享设施）
+│   ├── conftest.py                    #   共享测试基础设施（ServerHarness/客户端封装）
 │   ├── test_protocol.py               #   协议层 (15)
-│   ├── test_database.py               #   数据层 (37)
+│   ├── test_database.py               #   数据层 (33)
+│   ├── test_database_ext.py           #   数据层扩展 (32)
+│   ├── test_stage_f_db.py             #   阶段 F 数据库 (17)
 │   ├── test_client_logic.py           #   客户端逻辑 (19)
-│   ├── test_server.py                 #   服务端集成 (22)
+│   ├── test_server.py                 #   服务端集成 (29)
+│   ├── test_server_ext.py             #   服务端扩展 (31)
+│   ├── test_stage_f_server.py         #   阶段 F 服务端 (16)
 │   ├── test_e2e.py                    #   端到端 (4)
+│   ├── test_async_e2e.py              #   异步端到端 (3)
 │   ├── test_message_history.py        #   消息历史 (20)
-│   ├── test_input_validation.py       #   输入验证 (33)
+│   ├── test_input_validation.py       #   输入验证 (19)
+│   ├── test_hypothesis.py             #   属性+状态机 (9)
+│   ├── test_socket_guard.py           #   socket 守护 (8)
 │   └── test_backend_integration.py    #   后端集成 (7)
 ├── run_tests.sh
 ├── pyproject.toml
@@ -129,7 +137,10 @@ chatroom/
 | 聊天 | 消息撤回（2 分钟内） | 私聊、群聊、文件请求均可撤回 |
 | 聊天 | 聊天记录持久化 | 登录时按时间戳顺序加载历史（含已送达消息），无"历史"标签 |
 | 好友 | 好友系统 | 添加/接受/拒绝/列表；拒绝后可重新请求；离线请求登录时推送 |
-| 群组 | 群组管理 | 创建/加入/成员列表 |
+| 好友 | 删除好友 | 长按好友 → 确认框 → 双向解除关系 + 双方通知 + 离线补发 |
+| 群组 | 群组管理 | 创建/加入/退出/成员列表 |
+| 群组 | 退出群组 | 长按群组 → 菜单 → 退出；成员通知；空群组自动删除（含历史） |
+| 群组 | 群成员列表 | 打开群组菜单即预取，群信息对话框实时显示成员与创建者 |
 | 群组 | 群聊广播 | 消息实时广播到全部在线成员 |
 | 群组 | 群文件共享 | 请求-响应模式，支持多成员确认 |
 | 文件 | 文件传输 | 先请求后确认，支持私聊和群聊 |
@@ -142,7 +153,7 @@ chatroom/
 | UI | Flutter Linux 桌面端 | Material 3 主题、深色模式、聊天气泡、侧边栏分组 |
 | UI | 中文输入法桥接 | Python GTK 透明窗口桥接 fcitx，避免 Flutter 死锁 |
 | UI | 光标同步 | 方向键移动光标时 Flutter 视觉光标与 GTK 输入框同步 |
-| 测试 | 自动化测试 | pytest 157 个 + Flutter widget 测试 |
+| 测试 | 自动化测试 | pytest 283 个 + Flutter 106 个 + Dart 15 个 |
 
 ### 下一步开发
 
@@ -170,27 +181,27 @@ chatroom/
 
 **重要级**（日常使用明显不便）：
 
-| 缺口 | 说明 |
-|------|------|
-| 消息历史分页 | 仅能看最近 500 条，DB 有 API 但协议/UI 未接入 |
-| 未读消息徽标 | 侧边栏会话无未读计数 |
-| 删除好友 | 无协议、无 UI，好友关系不可撤销 |
-| 退出群组 | 无协议、无 UI，加入后永久接收消息 |
-| 群成员列表 | 服务端不向客户端发送成员列表 |
-| 重复登录踢出 | 同账号登录不踢旧会话，旧客户端"冻结" |
-| 修改密码 | 无协议、无 UI |
-| 文件大小限制 | 无上限，大文件可 OOM |
-| 文件名安全过滤 | 未过滤路径穿越 |
-| 消息搜索 | DB 有 API 但协议/UI 未接入 |
-| 登录速率限制 | 无暴力破解防护 |
-| Session 持久化 | 重启需重新输入凭据 |
+| 缺口 | 说明 | 状态 |
+|------|------|------|
+| 消息历史分页 | 仅能看最近 500 条，DB 有 API 但协议/UI 未接入 | ✅ 已完成 |
+| 未读消息徽标 | 侧边栏会话无未读计数 | ✅ 已完成 |
+| 删除好友 | 无协议、无 UI，好友关系不可撤销 | ✅ 已完成 |
+| 退出群组 | 无协议、无 UI，加入后永久接收消息 | ✅ 已完成 |
+| 群成员列表 | 服务端不向客户端发送成员列表 | ✅ 已完成 |
+| 重复登录踢出 | 同账号登录不踢旧会话，旧客户端"冻结" | 待开发 |
+| 修改密码 | 无协议、无 UI | 待开发 |
+| 文件大小限制 | 无上限，大文件可 OOM | 待开发 |
+| 文件名安全过滤 | 未过滤路径穿越 | 待开发 |
+| 消息搜索 | DB 有 API 但协议/UI 未接入 | 待开发 |
+| 登录速率限制 | 无暴力破解防护 | 待开发 |
+| Session 持久化 | 重启需重新输入凭据 | 待开发 |
 
 #### 开发路线图
 
 ```
 阶段 D：断线重连              ← ✅ 已完成
 阶段 E：历史分页 + 未读徽标    ← ✅ 已完成
-阶段 F：社交管理              ← 删除好友/退出群组/群成员列表
+阶段 F：社交管理              ← ✅ 已完成（删除好友/退出群组/群成员列表）
 阶段 G：安全加固              ← 重复登录/密码修改/文件限制/速率限制
 阶段 H：桌面通知 + Session    ← 通知/自动登录/消息搜索
 ```
@@ -224,8 +235,8 @@ chatroom/
 | `chat` | 双向 | 私聊消息 |
 | `file` / `file_request` / `file_response` | 双向 | 文件传输 |
 | `group_chat` / `group_file_*` | 双向 | 群组消息和文件 |
-| `friend_request` / `accept_friend` / `reject_friend` | 双向 | 好友系统 |
-| `create_group` / `join_group` / `list_groups` | C→S | 群组管理 |
+| `friend_request` / `accept_friend` / `reject_friend` / `delete_friend` | 双向 | 好友系统 |
+| `create_group` / `join_group` / `leave_group` / `list_groups` / `list_group_members` | C→S | 群组管理 |
 | `recall` | 双向 | 撤回消息 |
 | `admin_command` / `admin_response` / `admin_auth` | 双向 | 管理员操作 |
 | `error` | S→C | 服务端错误 |
@@ -253,29 +264,35 @@ chatroom/
 ## 测试体系
 
 ```bash
-./run_tests.sh              # 全部 164 个测试 (~90s)
-./run_tests.sh --quick      # 跳过 E2E (~40s)
-./run_tests.sh --db         # 仅数据库
-./run_tests.sh --e2e        # 仅端到端
+./run_tests.sh --all          # 全部 283 个测试（pytest-xdist 并行 ~45s）
+./run_tests.sh --quick        # 快速测试（跳过 E2E/异步/状态机）
+./run_tests.sh --db           # 仅数据库（含阶段 F 扩展）
+./run_tests.sh --e2e          # 仅端到端（含异步 E2E）
+./run_tests.sh --no-parallel  # 串行执行
 ```
 
 | 层 | 文件 | 数量 | 覆盖内容 |
 |----|------|------|---------|
 | L0 协议 | `test_protocol.py` | 15 | 编解码、分块、粘包 |
-| L1 数据 | `test_database.py` | 37 | CRUD、好友、群组、文件、持久化 |
+| L1 数据 | `test_database.py` + `test_database_ext.py` | 65 | CRUD、好友、群组、文件、阶段 E 游标分页 |
+| L1 阶段 F | `test_stage_f_db.py` | 17 | 删除好友、退出群组、删除空群组 |
 | L2 客户端逻辑 | `test_client_logic.py` | 19 | 状态追踪、队列、解析 |
-| L3 服务端集成 | `test_server.py` | 22 | 认证、私聊、好友、群组、管理员、离线补发 |
-| L4 端到端 | `test_e2e.py` | 4 | 多客户端完整业务场景 |
+| L3 服务端集成 | `test_server.py` + `test_server_ext.py` | 60 | 认证、私聊、好友、群组、管理员、离线补发、文件、撤回 |
+| L3 阶段 F | `test_stage_f_server.py` | 16 | delete_friend / leave_group / list_group_members |
+| L4 端到端 | `test_e2e.py` + `test_async_e2e.py` | 7 | 多客户端完整业务场景（线程 + asyncio） |
 | 消息历史 | `test_message_history.py` | 20 | 持久化、分页、搜索 |
-| 输入验证 | `test_input_validation.py` | 33 | 合法/非法输入、SQL 注入 |
+| 输入验证 | `test_input_validation.py` | 19 | 合法/非法输入、SQL 注入 |
+| 属性/状态机 | `test_hypothesis.py` | 9 | Hypothesis 属性 + RuleBasedStateMachine |
+| 守护测试 | `test_socket_guard.py` | 8 | pytest-socket 纯逻辑不触网 |
 | 后端集成 | `test_backend_integration.py` | 7 | 运行时路径验证 |
 
-Flutter 测试：
+Flutter 测试（106 个）：
 
 ```bash
 cd chatroom_flutter
-dart analyze lib test    # 静态分析
-flutter test             # widget 测试
+dart analyze lib test integration_test   # 静态分析（零 error）
+flutter test                            # widget 测试
+flutter test integration_test/chatroom_app_test.dart -d linux   # 集成绑定
 ```
 
 ---
@@ -290,12 +307,22 @@ flutter test             # widget 测试
 | 数据库 | SQLite3（9 张表） |
 | 密码 | bcrypt |
 | 配置 | config.yaml + PyYAML |
-| 测试 | pytest 9.x / flutter_test |
+| 测试 | pytest 9.x / flutter_test / mocktail / integration_test |
 | 管理员安全 | 环境变量密钥 (CHATROOM_ADMIN_SECRET) |
 
 ---
 
 ## 变更日志
+
+### v4.2.0 (2026-08-07)
+
+- **阶段 F：社交管理功能完成**
+  - 删除好友：长按好友 → 确认框 → 双向解除关系 + 双方通知（在线推送/离线补发）
+  - 退出群组：长按群组 → 菜单 → 退出 + 群成员通知；最后一人离开自动删除空群组（含历史与离线消息）
+  - 群成员列表：打开群组菜单即预取成员，群信息对话框实时显示成员与创建者
+- **测试体系重构**: 引入 pytest-asyncio / pytest-socket / hypothesis / pytest-xdist / mocktail / integration_test；Python 测试 151 → 283，Flutter 测试 1 → 106
+- **修复**: 管理员列表 is_admin 序列化、Unicode 控制字符校验、IME 桥接 python 解释器探测、群成员 0 人、空群组残留
+- **文档**: 更新 README、软件开发文档、AGENTS.md、测试指南
 
 ### v4.1.0 (2026-07-12)
 

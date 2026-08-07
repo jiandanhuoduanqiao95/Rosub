@@ -14,6 +14,7 @@ validate_password(password) -> (bool, str)
 """
 
 import re
+import unicodedata
 
 # 用户名规则：字母、数字、下划线、连字符，长度 3–32
 _USERNAME_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{3,32}$')
@@ -81,9 +82,9 @@ def validate_password(password):
     if len(password) > _PASSWORD_MAX_LEN:
         return False, f"密码长度不能超过 {_PASSWORD_MAX_LEN} 个字符"
 
-    # 检查控制字符（ASCII 0x00–0x1f，不含 0x7f DEL）
+    # 检查控制字符（Unicode Cc 类别：0x00–0x1F、0x7F–0x9F 等）
     for ch in password:
-        if ord(ch) < 0x20:
+        if unicodedata.category(ch) == 'Cc':
             return False, "密码不能包含控制字符"
 
     return True, ""

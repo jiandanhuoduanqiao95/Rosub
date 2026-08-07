@@ -831,3 +831,66 @@ class Database:
         except sqlite3.Error as e:
             logging.error(f"清理过期文件请求失败: {e}")
             return 0
+
+    def remove_friend(self, user1, user2):
+        """删除好友关系（双向），清除双向 friends 记录。
+
+        幂等：即使当前不是好友也返回 True（用于残留清理）。
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    DELETE FROM friends
+                    WHERE (user1 = ? AND user2 = ?)
+                       OR (user1 = ? AND user2 = ?)
+                ''', (user1, user2, user2, user1))
+                conn.commit()
+                logging.info(f"好友关系已清除: {user1} <-> {user2} (rowcount={cursor.rowcount})")
+                return True
+        except sqlite3.Error as e:
+            logging.error(f"删除好友关系失败: {e}")
+            return False
+
+    def leave_group(self, group_id, username):
+        """用户离开群组，从 group_members 表中删除对应行。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    DELETE FROM group_members
+                    WHERE group_id = ? AND username = ?
+                ''', (group_id, username))
+                conn.commit()
+                if cursor.rowcount > 0:
+                    logging.info(f"用户 {username} 已离开群组 {group_id}")
+                    return True
+                else:
+                    logging.info(f"用户 {username} 不在群组 {group_id} 中")
+                    return False
+        except sqlite3.Error as e:
+            logging.error(f"离开群组失败: {e}")
+            return False
+
+    def delete_group(self, group_id):
+        """删除群组及其所有关联数据（成员、历史、离线消息、文件请求、响应）。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM group_file_responses WHERE group_id = ?", (group_id,))
+                cursor.execute("DELETE FROM group_file_requests WHERE group_id = ?", (group_id,))
+                cursor.execute("DELETE FROM message_history WHERE group_id = ?", (group_id,))
+                cursor.execute("DELETE FROM group_members WHERE group_id = ?", (group_id,))
+                # 清除离线群聊消息（内容为 {"text":...,"group_id": N} 的 JSON）
+                # 精确匹配结尾 "group_id": N}，避免误删 group_id=10/11 等
+                cursor.execute(
+                    "DELETE FROM offline_messages WHERE message_type = 'group_chat' "
+                    "AND CAST(content AS TEXT) LIKE ?",
+                    (f'%"group_id": {group_id}}}',))
+                cursor.execute("DELETE FROM groups WHERE id = ?", (group_id,))
+                conn.commit()
+                logging.info(f"群组 {group_id} 已删除（含历史、离线消息和文件请求）")
+                return True
+        except sqlite3.Error as e:
+            logging.error(f"删除群组 {group_id} 失败: {e}")
+            return False

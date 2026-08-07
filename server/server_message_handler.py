@@ -827,8 +827,39 @@ class MessageHandler:
 
                         logging.error(f"撤回群组文件请求失败: {message_id}")
 
+            elif msg_type == "delete_friend":
+                target = header.get("to")
+                if not self.server.db.user_exists(target):
+                    send_message(ssock, "error", f"用户 {target} 不存在")
+                    logging.warning(f"删除好友失败: 目标用户 {target} 不存在")
+                    continue
+                if self.server.db.remove_friend(username, target):
+                    send_message(ssock, "chat", f"已删除好友 {target}")
+                    with self.server.client_map_lock:
+                        target_socket = self.server.client_map.get(target)
+                    if target_socket:
+                        try:
+                            send_message(target_socket, "delete_friend", "",
+                                         extra_headers={"from": username})
+                            logging.info(f"通知被删方: {target} 被 {username} 删除好友")
+                        except Exception as e:
+                            logging.error(f"通知被删方失败: {target}, 错误={e}")
+                            with self.server.client_map_lock:
+                                self.server.client_map.pop(target, None)
+                    else:
+                        self.server.db.save_offline_message(
+                            username, target, "chat",
+                            f"{username} 已删除您为好友".encode("utf-8"),
+                            message_id=str(uuid.uuid4()))
+                        logging.info(f"被删方离线，保存离线删除通知: {target} <- {username}")
+                    logging.info(f"好友已删除: {username} <-> {target}")
+                else:
+                    send_message(ssock, "error", f"删除好友 {target} 失败")
+                    logging.error(f"删除好友失败: {username} <-> {target}")
+
             elif msg_type == "admin_command":
                 self.admin_handler.handle_admin_command(username, ssock, header, data)
 
-            elif msg_type in ("create_group", "join_group", "group_chat", "list_groups", "group_file_response"):
+            elif msg_type in ("create_group", "join_group", "group_chat", "list_groups",
+                             "group_file_response", "leave_group", "list_group_members"):
                 self.group_handler.handle_group_message(username, ssock, msg_type, header, data)

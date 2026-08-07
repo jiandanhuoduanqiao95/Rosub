@@ -398,3 +398,175 @@ Future<({String path, String name})?> showFilePicker(
     return null;
   }
 }
+
+// ============================================================
+// 删除好友确认对话框（阶段 F）
+// ============================================================
+
+void showDeleteFriendDialog(
+    BuildContext context, String username, VoidCallback onDelete) {
+  showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('删除好友'),
+      content: Text('确定删除好友 $username 吗？\n删除后双方的好友关系将解除。'),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+        FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: Colors.red),
+          onPressed: () {
+            onDelete();
+            Navigator.pop(ctx);
+          },
+          child: const Text('删除'),
+        ),
+      ],
+    ),
+  );
+}
+
+// ============================================================
+// 群组菜单对话框（阶段 F）
+// ============================================================
+
+void showGroupMenuDialog(
+  BuildContext context,
+  Group group,
+  void Function(Group group) onShowMembers,
+  void Function(int groupId) onLeaveGroup,
+) {
+  final state = AppState.instance;
+  showDialog(
+    context: context,
+    builder: (ctx) => ListenableBuilder(
+      listenable: state,
+      builder: (ctx, _) {
+        final current = state.groups.where((g) => g.id == group.id).firstOrNull;
+        final members = current?.members ?? group.members;
+        return AlertDialog(
+          title: Row(
+            children: [
+              const Icon(Icons.group_rounded),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  group.displayName,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: 300,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.people_rounded),
+                  title: const Text('群成员'),
+                  subtitle: Text(members.isEmpty
+                      ? '加载中…'
+                      : '${members.length} 人'),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    onShowMembers(group);
+                  },
+                ),
+                const Divider(),
+                ListTile(
+                  leading: Icon(Icons.exit_to_app_rounded,
+                      color: Colors.red.shade400),
+                  title: Text('退出群组',
+                      style: TextStyle(color: Colors.red.shade400)),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    onLeaveGroup(group.id);
+                  },
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
+
+// ============================================================
+// 群组信息对话框（阶段 F）
+// ============================================================
+
+void showGroupInfoDialog(BuildContext context, Group group) {
+  final state = AppState.instance;
+  showDialog(
+    context: context,
+    builder: (ctx) => ListenableBuilder(
+      listenable: state,
+      builder: (ctx, _) {
+        final current = state.groups.where((g) => g.id == group.id).firstOrNull;
+        final members = current?.members ?? group.members;
+        return AlertDialog(
+          title: Row(
+            children: [
+              const Icon(Icons.group_rounded),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '群信息 - ${group.displayName}',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: 320,
+            child: members.isEmpty
+                ? const Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(height: 12),
+                      CircularProgressIndicator(strokeWidth: 2),
+                      SizedBox(height: 12),
+                      Text('加载成员列表中…'),
+                    ],
+                  )
+                : ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: members.length,
+                    itemBuilder: (_, i) {
+                      final member = members[i];
+                      final isCreator = members.isNotEmpty && i == 0;
+                      return ListTile(
+                        leading: CircleAvatar(
+                          radius: 16,
+                          child: Text(member.isNotEmpty
+                              ? member[0].toUpperCase()
+                              : '?'),
+                        ),
+                        title: Text(member),
+                        subtitle: isCreator
+                            ? const Text('创建者',
+                                style: TextStyle(fontSize: 12))
+                            : null,
+                      );
+                    },
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('关闭'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}

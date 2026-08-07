@@ -173,6 +173,7 @@ class AppState extends ChangeNotifier {
   void removeFriend(String friend) {
     _friends.remove(friend);
     _messages.remove(friend);
+    _unreadCount.remove(friend);
     if (_currentChat == friend) _currentChat = null;
     notifyListeners();
   }
@@ -182,6 +183,27 @@ class AppState extends ChangeNotifier {
       _groups.add(group);
       notifyListeners();
     }
+  }
+
+  void leaveGroup(int groupId) {
+    final key = 'group_$groupId';
+    _groups.removeWhere((g) => g.id == groupId);
+    _messages.remove(key);
+    _unreadCount.remove(key);
+    _noMoreHistory.remove(key);
+    if (_currentChat == key) _currentChat = null;
+    notifyListeners();
+  }
+
+  void updateGroupMembers(int groupId, List<String> members) {
+    final index = _groups.indexWhere((g) => g.id == groupId);
+    if (index == -1) return;
+    _groups[index] = Group(
+      id: groupId,
+      name: _groups[index].name,
+      members: members,
+    );
+    notifyListeners();
   }
 
   void addPendingRequest(String username) {

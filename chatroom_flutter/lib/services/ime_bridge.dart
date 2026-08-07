@@ -54,7 +54,14 @@ class ImeBridgeManager {
       return;
     }
     try {
-      _process = await Process.start('python3', [script.path]);
+      final python = await _resolvePython();
+      if (python == null) {
+        debugPrint('[ime_bridge] 未找到可用 python（需包含 cairo + gi 模块）');
+        _started = false;
+        _starting = null;
+        return;
+      }
+      _process = await Process.start(python, [script.path]);
       _process!.stdout
           .transform(utf8.decoder)
           .transform(const LineSplitter())
@@ -108,6 +115,35 @@ class ImeBridgeManager {
     for (final path in candidates) {
       final file = File(path);
       if (file.existsSync()) return file;
+    }
+    return null;
+  }
+
+  /// 探测一个具备 cairo + gi(Gtk) 模块的 Python 解释器。
+  ///
+  /// persistent_ime.py 依赖 cairo 与 PyGObject(Gtk)，
+  /// 而 PATH 中的 python3 可能是 miniconda 等缺失这些模块的环境，
+  /// 直接启动会导致桥接进程崩溃（ModuleNotFoundError）。
+  /// 依次尝试：项目 .venv → 系统 /usr/bin/python3 → PATH python3，
+  /// 用 `-c` 探测实际可用性，避免仅凭路径猜测。
+  Future<String?> _resolvePython() async {
+    final candidates = <String>[
+      '${Directory.current.path}/.venv/bin/python',
+      '${File(Platform.resolvedExecutable).parent.path}/.venv/bin/python',
+      '/usr/bin/python3',
+      'python3',
+    ];
+    const probe = 'import cairo, gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk';
+    for (final python in candidates) {
+      try {
+        final result = await Process.run(python, ['-c', probe]);
+        if (result.exitCode == 0) {
+          debugPrint('[ime_bridge] 使用 python: $python');
+          return python;
+        }
+      } catch (_) {
+        // 该解释器不存在或不可执行，尝试下一个
+      }
     }
     return null;
   }
