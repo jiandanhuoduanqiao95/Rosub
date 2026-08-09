@@ -81,13 +81,19 @@ class Group {
   String get displayName => '$name (ID:$id)';
 
   factory Group.fromJson(Map<String, dynamic> json) {
+    // 防御性解析：服务端字段类型漂移（数字/字符串混用）时优雅降级，不抛异常
+    final rawId = json['id'];
+    final id = rawId is int ? rawId : (int.tryParse(rawId?.toString() ?? '') ?? 0);
+    final rawName = json['group_name'] ?? json['name'];
+    final name = rawName is String ? rawName : (rawName?.toString() ?? '');
+    final rawMembers = json['members'];
+    final members = rawMembers is List
+        ? rawMembers.map((e) => e.toString()).toList()
+        : <String>[];
     return Group(
-      id: json['id'] as int,
-      name: json['group_name'] as String? ?? json['name'] as String? ?? '',
-      members: (json['members'] as List<dynamic>?)
-              ?.map((e) => e.toString())
-              .toList() ??
-          [],
+      id: id,
+      name: name,
+      members: members,
     );
   }
 }

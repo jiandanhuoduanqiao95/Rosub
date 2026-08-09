@@ -262,15 +262,19 @@ class AppState extends ChangeNotifier {
   /// 添加一条消息到对应会话
   void addMessage(String chatKey, ChatMessage msg) {
     // 按 messageId 去重：自己发的群聊/私聊消息会被服务器回显，
-    // 已存在的消息仅更新状态（sent → delivered），不重复添加
-    if (_messageMap.containsKey(msg.messageId)) {
+    // 已存在的消息仅更新状态（sent → delivered），不重复添加。
+    // 空 messageId 不做去重：不同消息不得因空 id 被合并丢失
+    if (msg.messageId.isNotEmpty &&
+        _messageMap.containsKey(msg.messageId)) {
       _messageMap[msg.messageId]!.status = msg.status;
       notifyListeners();
       return;
     }
     _messages.putIfAbsent(chatKey, () => []);
     _messages[chatKey]!.add(msg);
-    _messageMap[msg.messageId] = msg;
+    if (msg.messageId.isNotEmpty) {
+      _messageMap[msg.messageId] = msg;
+    }
     // 未读计数：仅 status=sent（真正的未读消息），且非自己发送，且非当前会话（阶段 E）
     // 已读历史（delivered）和上滑加载的历史不计未读
     if (msg.status == 'sent' &&

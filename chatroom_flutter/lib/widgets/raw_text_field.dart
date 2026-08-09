@@ -343,15 +343,25 @@ class _RawTextFieldState extends State<RawTextField> {
     }
     if (key == LogicalKeyboardKey.home) {
       setState(() {
+        if (shift && !_hasSelection) _selStart = _cursorPos;
         _cursorPos = 0;
-        if (!shift) _clearSelection();
+        if (shift) {
+          _selEnd = _cursorPos;
+        } else {
+          _clearSelection();
+        }
       });
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.end) {
       setState(() {
+        if (shift && !_hasSelection) _selStart = _cursorPos;
         _cursorPos = widget.controller.text.length;
-        if (!shift) _clearSelection();
+        if (shift) {
+          _selEnd = _cursorPos;
+        } else {
+          _clearSelection();
+        }
       });
       return KeyEventResult.handled;
     }
@@ -374,15 +384,29 @@ class _RawTextFieldState extends State<RawTextField> {
 
   void _moveLeft(bool shift) {
     setState(() {
-      if (_cursorPos > 0) _cursorPos--;
-      if (!shift) _clearSelection();
+      if (shift) {
+        // 选区模型：_selStart 为固定锚点，_selEnd 为跟随光标的移动端
+        // 无选区时以当前光标位置建立锚点
+        if (!_hasSelection) _selStart = _cursorPos;
+        if (_cursorPos > 0) _cursorPos--;
+        _selEnd = _cursorPos;
+      } else {
+        if (_cursorPos > 0) _cursorPos--;
+        _clearSelection();
+      }
     });
   }
 
   void _moveRight(bool shift) {
     setState(() {
-      if (_cursorPos < widget.controller.text.length) _cursorPos++;
-      if (!shift) _clearSelection();
+      if (shift) {
+        if (!_hasSelection) _selStart = _cursorPos;
+        if (_cursorPos < widget.controller.text.length) _cursorPos++;
+        _selEnd = _cursorPos;
+      } else {
+        if (_cursorPos < widget.controller.text.length) _cursorPos++;
+        _clearSelection();
+      }
     });
   }
 

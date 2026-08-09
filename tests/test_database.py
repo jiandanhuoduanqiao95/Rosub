@@ -190,6 +190,108 @@ class TestUserManagement:
 
 
 # ============================================================
+# 第 2.1 组：修改密码测试（阶段 G2，TDD 红，待实现）
+# ============================================================
+
+class TestUpdatePassword:
+    """
+    【修改密码测试】阶段 G2
+
+    覆盖 Database.update_password(username, old_hash, new_hash)：
+      - old_hash 与数据库当前存储哈希按字节相等比较，匹配才允许替换
+      - 匹配 → 替换为新哈希并返回 True；不改变 is_admin 标志
+      - 用户不存在 / 哈希不匹配 → 返回 False，不抛异常
+      - 更新后旧密码失效，新密码可通过 bcrypt 校验
+
+    实现前：本类整体报 AttributeError（update_password 不存在），属 TDD 红。
+    """
+
+    def test_update_password_success(self, db):
+        """
+        【G2-1】正确旧哈希 → 哈希被替换为新哈希，返回 True
+        """
+        old_hash = bcrypt.hashpw("oldpass1".encode(), bcrypt.gensalt())
+        new_hash = bcrypt.hashpw("newpass1".encode(), bcrypt.gensalt())
+        db.add_user("alice", old_hash)
+
+        result = db.update_password("alice", old_hash, new_hash)
+
+        assert result is True
+        stored_hash, _ = db.get_user("alice")
+        assert bcrypt.checkpw("newpass1".encode(), stored_hash) is True
+
+    def test_update_password_wrong_old_hash_returns_false(self, db):
+        """
+        【G2-2】旧哈希不匹配 → 返回 False，原哈希保持不变
+        """
+        old_hash = bcrypt.hashpw("oldpass1".encode(), bcrypt.gensalt())
+        wrong_hash = bcrypt.hashpw("attacker1".encode(), bcrypt.gensalt())
+        db.add_user("alice", old_hash)
+
+        result = db.update_password(
+            "alice", wrong_hash, bcrypt.hashpw("newpass1".encode(), bcrypt.gensalt())
+        )
+
+        assert result is False
+        stored_hash, _ = db.get_user("alice")
+        assert stored_hash == old_hash, "原哈希不应被篡改"
+        assert bcrypt.checkpw("oldpass1".encode(), stored_hash) is True
+
+    def test_update_password_nonexistent_user_returns_false(self, db):
+        """
+        【G2-3】用户不存在 → 返回 False，不抛异常
+        """
+        result = db.update_password(
+            "ghost", bcrypt.hashpw(b"x", bcrypt.gensalt()), bcrypt.hashpw(b"y", bcrypt.gensalt())
+        )
+        assert result is False
+
+    def test_update_password_old_password_invalid_after_update(self, db):
+        """
+        【G2-4】更新后旧密码不再能通过校验，新密码可校验
+        """
+        old_hash = bcrypt.hashpw("oldpass1".encode(), bcrypt.gensalt())
+        new_hash = bcrypt.hashpw("newpass1".encode(), bcrypt.gensalt())
+        db.add_user("alice", old_hash)
+        assert db.update_password("alice", old_hash, new_hash) is True
+
+        stored_hash, _ = db.get_user("alice")
+        assert bcrypt.checkpw("oldpass1".encode(), stored_hash) is False
+        assert bcrypt.checkpw("newpass1".encode(), stored_hash) is True
+
+    def test_update_password_preserves_is_admin(self, db):
+        """
+        【G2-5】管理员改密后 is_admin 标志保持不变
+        """
+        old_hash = bcrypt.hashpw("adminold1".encode(), bcrypt.gensalt())
+        db.add_user("admin", old_hash)
+        with db._get_connection() as conn:
+            conn.execute("UPDATE users SET is_admin = 1 WHERE username = 'admin'")
+            conn.commit()
+        new_hash = bcrypt.hashpw("adminnew1".encode(), bcrypt.gensalt())
+
+        assert db.update_password("admin", old_hash, new_hash) is True
+
+        stored_hash, is_admin = db.get_user("admin")
+        assert bcrypt.checkpw("adminnew1".encode(), stored_hash) is True
+        assert is_admin == 1
+
+    def test_update_password_then_new_password_usable_for_login(self, db):
+        """
+        【G2-6】改密后新密码可用于登录流程的 bcrypt 校验
+        """
+        old_hash = bcrypt.hashpw("oldpass1".encode(), bcrypt.gensalt())
+        new_hash = bcrypt.hashpw("newpass1".encode(), bcrypt.gensalt())
+        db.add_user("alice", old_hash)
+        assert db.update_password("alice", old_hash, new_hash) is True
+
+        stored_hash, _ = db.get_user("alice")
+        # 模拟登录：checkpw(登录密码, 存储哈希)
+        assert bcrypt.checkpw("newpass1".encode(), stored_hash) is True
+        assert bcrypt.checkpw("oldpass1".encode(), stored_hash) is False
+
+
+# ============================================================
 # 第 3 组：离线消息测试
 # ============================================================
 
@@ -219,13 +321,14 @@ class TestOfflineMessages:
         messages = db.get_offline_messages("bob")
         assert len(messages) == 1
 
-        sender, msg_type, content, filename, msg_id, status, receiver, timestamp = messages[0]
+        sender, msg_type, content, filename, msg_id, status, receiver, timestamp, file_path = messages[0]
         assert sender == "alice"
         assert receiver == "bob"
         assert msg_type == "chat"
         assert content == b"Hello Bob!"
         assert msg_id == "msg-001"
         assert status == "sent"  # 取出时返回的状态还是 'sent'
+        assert file_path is None
 
         # 再次查询：已读消息仍然返回（作为最近历史保留）
         messages2 = db.get_offline_messages("bob")
@@ -243,7 +346,7 @@ class TestOfflineMessages:
 
         messages = db.get_offline_messages("bob")
         assert len(messages) == 1
-        _, msg_type, content, filename, _, _, receiver, _ = messages[0]
+        _, msg_type, content, filename, _, _, receiver, _, _ = messages[0]
         assert msg_type == "file"
         assert filename == "report.pdf"
         assert receiver == "bob"
@@ -601,11 +704,12 @@ class TestFileRequests:
 
         info = db.get_file_request("file-req-1")
         assert info is not None
-        sender, receiver, filename, filesize, content = info
+        sender, receiver, filename, filesize, content, file_path = info
         assert sender == "alice"
         assert receiver == "bob"
         assert filename == "doc.txt"
         assert content == file_content
+        assert file_path is None
 
     def test_get_pending_file_requests(self, db):
         """

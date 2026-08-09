@@ -75,14 +75,22 @@ class _ChatViewState extends State<ChatView> {
 
   Future<void> _loadMoreHistory() async {
     if (widget.messages.isEmpty) return;
-    _isLoadingHistory = true;
+    // 必须 setState：滚动事件本身不会触发 rebuild，
+    // 否则"加载中…"指示器分支永远不会出现在树上
+    setState(() {
+      _isLoadingHistory = true;
+    });
     // 当前最旧消息的 messageId 作为游标
     final beforeId = widget.messages.first.messageId;
     await widget.onLoadHistory(beforeId);
     // reverse: true 的 ListView：新消息插入到列表头部（视觉顶部/旧消息方向），
     // Flutter 自动保持当前可见消息的滚动位置，无需手动调整
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _isLoadingHistory = false;
+      if (mounted) {
+        setState(() {
+          _isLoadingHistory = false;
+        });
+      }
     });
   }
 

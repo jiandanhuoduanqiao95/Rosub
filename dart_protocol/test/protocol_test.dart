@@ -472,6 +472,107 @@ void main() {
   });
 
   // ============================================================
+  // 第 3.5 组：sendFileMessage 流式发送测试（阶段 G 回归）
+  // ============================================================
+
+  group('TestSendFileMessage', () {
+    // ---------------------------------------------------------
+    // 【测试16】sendFileMessage 发送 >64KB 文件，内容完整一致
+    //
+    // 回归背景（阶段 G4/G4b 实机缺陷）：
+    //   dart:io 的 File.openRead(显式 chunkSize) 在 Linux/Dart 3.12
+    //   会静默丢失第一个块（首块整块被吞），导致发送端只发出消息头、
+    //   服务端永远等不到消息体。修复后必须用默认分块 + addStream。
+    //   本测试用 200KB 文件验证消息体完整到达（>64KB 才能暴露该缺陷）。
+    // ---------------------------------------------------------
+    test('test_send_file_message_roundtrip_200kb', () async {
+      // === ARRANGE ===
+      final (s1, s2) = await makeSocketPair();
+      final reader = MessageReader(s2);
+      final tempDir = await Directory.systemTemp.createTemp('proto_test');
+      try {
+        final file = File('${tempDir.path}/send_200k.bin');
+        final payload = List<int>.generate(200 * 1024, (i) => i % 251);
+        await file.writeAsBytes(payload);
+
+        var progressCalls = 0;
+        var lastSent = 0;
+
+        // === ACT ===
+        await sendFileMessage(s1, 'file', file.path, extraHeaders: {
+          'filename': 'send_200k.bin',
+          'filesize': '204800',
+          'message_id': 'g4b-regression',
+        }, onProgress: (sent, total) {
+          progressCalls++;
+          lastSent = sent;
+          expect(total, equals(payload.length));
+        });
+
+        // === ASSERT ===
+        final (header, body) = await recvMessage(reader);
+        expect(header, isNotNull);
+        expect(header!['type'], equals('file'));
+        expect(header['filename'], equals('send_200k.bin'));
+        expect(header['length'], equals(payload.length));
+        expect(body, isNotNull);
+        expect(body!.length, equals(payload.length),
+            reason: '消息体不完整（openRead 首块丢失回归）');
+        expect(body, equals(payload), reason: '文件内容不一致');
+        expect(progressCalls, greaterThan(0), reason: '进度回调未触发');
+        expect(lastSent, equals(payload.length));
+      } finally {
+        reader.close();
+        s1.close();
+        s2.close();
+        try {
+          await tempDir.delete(recursive: true);
+        } catch (_) {}
+      }
+    });
+
+    // ---------------------------------------------------------
+    // 【测试17】sendFileMessage 连续发送两条消息不粘包
+    // ---------------------------------------------------------
+    test('test_send_file_message_then_text', () async {
+      // === ARRANGE ===
+      final (s1, s2) = await makeSocketPair();
+      final reader = MessageReader(s2);
+      final tempDir = await Directory.systemTemp.createTemp('proto_test');
+      try {
+        final file = File('${tempDir.path}/send_small.bin');
+        await file.writeAsBytes(List.generate(1000, (i) => i));
+
+        // === ACT ===
+        await sendFileMessage(s1, 'file', file.path, extraHeaders: {
+          'filename': 'send_small.bin',
+          'filesize': '1000',
+          'message_id': 'file-1',
+        });
+        await sendMessage(s1, 'chat', 'after file');
+
+        // === ASSERT ===
+        final (h1, b1) = await recvMessage(reader);
+        expect(h1, isNotNull);
+        expect(h1!['type'], equals('file'));
+        expect(b1!.length, equals(1000));
+
+        final (h2, b2) = await recvMessage(reader);
+        expect(h2, isNotNull);
+        expect(h2!['type'], equals('chat'));
+        expect(utf8.decode(b2!), equals('after file'));
+      } finally {
+        reader.close();
+        s1.close();
+        s2.close();
+        try {
+          await tempDir.delete(recursive: true);
+        } catch (_) {}
+      }
+    });
+  });
+
+  // ============================================================
   // 第 4 组：防御性/健壮性测试
   // ============================================================
 
