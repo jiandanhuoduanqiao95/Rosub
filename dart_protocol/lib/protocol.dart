@@ -102,6 +102,68 @@ Future<void> sendMessage(
 }
 
 // ============================================================
+// 大文件流式发送（不将整个文件读入内存）
+// ============================================================
+
+/// 分块发送文件消息（流式，帧格式与 [sendMessage] 完全一致）。
+///
+/// [sock] 已连接的 Socket
+/// [msgType] 消息类型（如 'file'）
+/// [filePath] 本地文件路径，发送其内容作为消息体
+/// [extraHeaders] 附加头部（key/value 强制转字符串）
+/// [onProgress] 每块发送完成后的进度回调（已发送字节数, 总字节数）
+///
+/// 消息头先 add + flush 一次（与 sendMessage 相同的单批次模式），
+/// 消息体经 [Socket.addStream] 流式写出。实现上有两个必须绕开的
+/// dart:io VM 缺陷（Linux/Dart 3.12）：
+///   1. SecureSocket 上第二次及以后的 add+flush 批次会静默丢失数据
+///      （IOSink 同步派发与 SSL 异步加密循环存在竞态），因此不能逐块 flush；
+///   2. File.openRead(显式 chunkSize) 会丢失第一个块（首块整块被吞），
+///      因此必须使用默认分块（65536 字节），不能传 chunkSize。
+Future<void> sendFileMessage(
+  Socket sock,
+  String msgType,
+  String filePath, {
+  Map<String, dynamic>? extraHeaders,
+  void Function(int sent, int total)? onProgress,
+}) async {
+  extraHeaders ??= {};
+
+  final File file = File(filePath);
+  final int size = await file.length();
+
+  final Map<String, dynamic> header = {'type': msgType, 'length': size};
+  for (final entry in extraHeaders.entries) {
+    header[entry.key.toString()] = entry.value.toString();
+  }
+
+  final List<int> headerJson = utf8.encode(jsonEncode(header));
+  final ByteData headerLenBuf = ByteData(4);
+  headerLenBuf.setUint32(0, headerJson.length, Endian.big);
+
+  sock.add(headerLenBuf.buffer.asUint8List());
+  sock.add(headerJson);
+  await sock.flush();
+
+  int sent = 0;
+  final Stream<List<int>> counted = file.openRead().map((chunk) {
+    sent += chunk.length;
+    _safeProgress(onProgress, sent, size);
+    return chunk;
+  });
+  await sock.addStream(counted);
+  _safeProgress(onProgress, size, size);
+}
+
+/// 进度回调防御：回调运行在 socket 数据管线内，UI 侧异常不得中断传输。
+void _safeProgress(void Function(int sent, int total)? cb, int sent, int total) {
+  if (cb == null) return;
+  try {
+    cb(sent, total);
+  } catch (_) {}
+}
+
+// ============================================================
 // 消息读取器（封装 socket 的缓冲式读取）
 // ============================================================
 
@@ -191,6 +253,73 @@ class MessageReader {
 // 接收消息
 // ============================================================
 
+/// 读取一条消息头（4 字节头长度 + JSON 头）。
+///
+/// 返回 null 表示连接关闭或解码失败。
+Future<Map<String, dynamic>?> readHeader(MessageReader reader) async {
+  final rawHeaderLen = await reader.recvall(4);
+  if (rawHeaderLen == null) return null;
+
+  final int headerLen =
+      ByteData.view(rawHeaderLen.buffer).getUint32(0, Endian.big);
+
+  final headerJson = await reader.recvall(headerLen);
+  if (headerJson == null) return null;
+
+  return jsonDecode(utf8.decode(headerJson)) as Map<String, dynamic>;
+}
+
+/// 读取消息体到内存（适用于非 file 类型消息）。
+///
+/// 返回 null 表示连接关闭且数据不足（EOF）。
+Future<Uint8List?> readBody(
+  MessageReader reader,
+  int length, {
+  int chunkSize = 4 * 1024 * 1024,
+}) async {
+  final BytesBuilder bodyBuffer = BytesBuilder(copy: false);
+  int remaining = length;
+
+  while (remaining > 0) {
+    final int toRead = remaining < chunkSize ? remaining : chunkSize;
+    final Uint8List? packet = await reader.recvall(toRead);
+    if (packet == null) return null;
+    bodyBuffer.add(packet);
+    remaining -= packet.length;
+  }
+
+  return bodyBuffer.toBytes();
+}
+
+/// 流式读取消息体并写入磁盘文件（适用于大文件消息，不占内存）。
+///
+/// 返回实际写入的字节数；小于 [length] 表示连接提前关闭。
+/// [onProgress] 每块写入完成后的进度回调（已写入字节数, 总字节数）。
+Future<int> readFileBody(
+  MessageReader reader,
+  int length,
+  String filePath, {
+  int chunkSize = 4 * 1024 * 1024,
+  void Function(int received, int total)? onProgress,
+}) async {
+  final IOSink file = File(filePath).openWrite();
+  int remaining = length;
+  try {
+    while (remaining > 0) {
+      final int toRead = remaining < chunkSize ? remaining : chunkSize;
+      final Uint8List? packet = await reader.recvall(toRead);
+      if (packet == null) break;
+      file.add(packet);
+      remaining -= packet.length;
+      _safeProgress(onProgress, length - remaining, length);
+    }
+  } finally {
+    await file.flush();
+    await file.close();
+  }
+  return length - remaining;
+}
+
 /// 从 [reader] 接收一条协议消息。
 ///
 /// [reader] 是对已连接 Socket 的 MessageReader 封装
@@ -209,34 +338,14 @@ Future<(Map<String, dynamic>?, Uint8List?)> recvMessage(
   MessageReader reader, {
   int chunkSize = 4 * 1024 * 1024,
 }) async {
-  // 1. 读取 4 字节消息头长度
-  final rawHeaderLen = await reader.recvall(4);
-  if (rawHeaderLen == null) return (null, null);
+  final Map<String, dynamic>? header = await readHeader(reader);
+  if (header == null) return (null, null);
 
-  final int headerLen =
-      ByteData.view(rawHeaderLen.buffer).getUint32(0, Endian.big);
-
-  // 2. 读取 JSON 消息头
-  final headerJson = await reader.recvall(headerLen);
-  if (headerJson == null) return (null, null);
-
-  final Map<String, dynamic> header =
-      jsonDecode(utf8.decode(headerJson)) as Map<String, dynamic>;
-
-  // 3. 读取消息体（分块接收，与 Python 版本循环逻辑一致）
   final int length = (header['length'] as num).toInt();
-  final BytesBuilder bodyBuffer = BytesBuilder(copy: false);
-  int remaining = length;
+  final Uint8List? body = await readBody(reader, length, chunkSize: chunkSize);
+  if (body == null) return (null, null);
 
-  while (remaining > 0) {
-    final int toRead = remaining < chunkSize ? remaining : chunkSize;
-    final Uint8List? packet = await reader.recvall(toRead);
-    if (packet == null) return (null, null);
-    bodyBuffer.add(packet);
-    remaining -= packet.length;
-  }
-
-  return (header, bodyBuffer.toBytes());
+  return (header, body);
 }
 
 // ============================================================

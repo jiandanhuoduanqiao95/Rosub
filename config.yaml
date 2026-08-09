@@ -24,6 +24,10 @@ protocol:
 message:
   recall_timeout_minutes: 2  # 消息撤回时限（分钟）
 
+file:
+  max_file_size: 5368709120       # 文件大小上限（字节），默认 5GB
+  large_file_threshold: 314572800  # 大文件直传阈值（字节），默认 300MB，超过则在线直传不落盘
+
 database:
   path: "users.db"       # SQLite 数据库文件路径
 

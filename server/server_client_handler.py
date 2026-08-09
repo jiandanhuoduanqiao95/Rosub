@@ -1,5 +1,6 @@
 import ssl
 import logging
+import time
 import bcrypt
 import hmac
 import os
@@ -9,8 +10,73 @@ from validation import validate_username, validate_password
 from config import config
 
 class ClientHandler:
+    # 登录速率限制（阶段 G6）：连续失败次数与锁定秒数
+    MAX_LOGIN_FAILURES = 5
+    LOGIN_LOCKOUT_SECONDS = 300
+
     def __init__(self, server):
         self.server = server
+        self._login_failures = {}
+
+    def _is_login_locked(self, username):
+        """判断用户名是否处于锁定状态（5 次失败锁定 5 分钟）。"""
+        failures = self._login_failures.get(username)
+        if not failures:
+            return False
+        count, first_time = failures
+        if count < self.MAX_LOGIN_FAILURES:
+            return False
+        if time.time() - first_time >= self.LOGIN_LOCKOUT_SECONDS:
+            self._login_failures.pop(username, None)
+            return False
+        return True
+
+    def _record_login_failure(self, username):
+        """记录一次登录失败，返回当前累计失败次数。"""
+        now = time.time()
+        count, first_time = self._login_failures.get(username, (0, now))
+        if count == 0:
+            self._login_failures[username] = (1, now)
+            return 1
+        # 锁定期已过 → 从本次失败重新计数
+        if count >= self.MAX_LOGIN_FAILURES and now - first_time >= self.LOGIN_LOCKOUT_SECONDS:
+            self._login_failures[username] = (1, now)
+            return 1
+        self._login_failures[username] = (count + 1, first_time)
+        return count + 1
+
+    def _clear_login_failures(self, username):
+        self._login_failures.pop(username, None)
+
+    def _kick_old_session(self, username, ssock):
+        """重复登录踢出（阶段 G1）：通知旧 socket 并关闭，替换为新会话。
+
+        返回 True 表示存在旧会话并被踢出。
+        旧会话正在接收大文件直传转发时：跳过通知与关闭（任何写入都会污染
+        文件字节流导致 SSL 记录错乱），仅替换 client_map 映射。
+        """
+        with self.server.client_map_lock:
+            old_sock = self.server.client_map.get(username)
+            if old_sock is None or old_sock is ssock:
+                self.server.client_map[username] = ssock
+                return False
+            forwarding = old_sock in self.server.active_forward_socks
+            if not forwarding:
+                try:
+                    # 锁内直接发送（guarded_send 会再次取同一把锁导致死锁；
+                    # 此处已判断非转发中，无需再守卫）
+                    send_message(old_sock, "error", "已在其他地方登录，您已被强制下线")
+                    logging.info(f"强制下线旧会话: 用户={username}")
+                except Exception as e:
+                    logging.warning(f"通知旧会话下线失败: 用户={username}, 错误={e}")
+                try:
+                    old_sock.close()
+                except Exception:
+                    pass
+            else:
+                logging.info(f"旧会话正在接收大文件转发，跳过踢出: 用户={username}")
+            self.server.client_map[username] = ssock
+            return True
 
     def _admin_secret(self):
         env_name = config.get("security.admin_secret_env", "CHATROOM_ADMIN_SECRET")
@@ -25,11 +91,14 @@ class ClientHandler:
     def handle_client(self, client_socket, client_address, context):
         logging.info(f"新客户端连接: {client_address}")
         username = None
+        wrapped = None
+        is_transfer_session = False
         try:
             with context.wrap_socket(client_socket, server_side=True) as ssock:
+                wrapped = ssock
                 header, data = recv_message(ssock)
                 if not header or header.get("type") not in ("register", "login"):
-                    send_message(ssock, "error", "错误，请先注册或登录")
+                    self.server.guarded_send(ssock, "error", "错误，请先注册或登录")
                     return
 
                 msg_type = header.get("type")
@@ -44,29 +113,29 @@ class ClientHandler:
                     # 服务端验证用户名和密码格式
                     valid, error = validate_username(username)
                     if not valid:
-                        send_message(ssock, "error", error)
+                        self.server.guarded_send(ssock, "error", error)
                         logging.warning(f"注册失败: 用户名 {username} 格式不合法: {error}")
                         return
                     valid, error = validate_password(password or "")
                     if not valid:
-                        send_message(ssock, "error", error)
+                        self.server.guarded_send(ssock, "error", error)
                         logging.warning(f"注册失败: 密码格式不合法: {error}")
                         return
                     is_admin_register = bool(admin_secret)
                     if is_admin_register and not self._admin_secret_valid(admin_secret):
-                        send_message(ssock, "error", "管理员注册密钥无效或服务器未配置管理员密钥")
+                        self.server.guarded_send(ssock, "error", "管理员注册密钥无效或服务器未配置管理员密钥")
                         logging.warning(f"管理员注册失败: 用户={username}, 密钥无效或未配置")
                         return
                     if self.server.db.user_exists(username):
-                        send_message(ssock, "error", "用户已存在")
+                        self.server.guarded_send(ssock, "error", "用户已存在")
                         logging.warning(f"注册失败: 用户 {username} 已存在")
                         return
                     password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
                     if self.server.db.add_user(username, password_hash, is_admin=is_admin_register):
                         if is_admin_register:
-                            send_message(ssock, "admin_auth", "管理员注册成功")
+                            self.server.guarded_send(ssock, "admin_auth", "管理员注册成功")
                         else:
-                            send_message(ssock, "chat", "注册成功")
+                            self.server.guarded_send(ssock, "chat", "注册成功")
                         with self.server.client_map_lock:
                             self.server.client_map[username] = ssock
                         logging.info(f"注册成功: 用户={username}, 管理员={is_admin_register}")
@@ -75,50 +144,81 @@ class ClientHandler:
                         message_handler.send_initial_data(username, ssock)
                         message_handler.process_messages(username, ssock)
                     else:
-                        send_message(ssock, "error", "注册失败")
+                        self.server.guarded_send(ssock, "error", "注册失败")
                         logging.error(f"注册失败: 用户={username}")
                         return
                 elif msg_type == "login":
                     valid, error = validate_username(username)
                     if not valid:
-                        send_message(ssock, "error", error)
+                        self.server.guarded_send(ssock, "error", error)
                         logging.warning(f"登录失败: 用户名 {username} 格式不合法: {error}")
                         return
                     valid, error = validate_password(password or "")
                     if not valid:
-                        send_message(ssock, "error", error)
+                        self.server.guarded_send(ssock, "error", error)
                         logging.warning(f"登录失败: 密码格式不合法: {error}")
+                        return
+                    if self._is_login_locked(username):
+                        self.server.guarded_send(ssock, "error", "尝试次数过多，请 5 分钟后再试")
+                        logging.warning(f"登录失败: 用户 {username} 处于锁定状态")
                         return
                     user_data = self.server.db.get_user(username)
                     if not user_data:
-                        send_message(ssock, "error", "错误，用户不存在")
+                        self._record_login_failure(username)
+                        self.server.guarded_send(ssock, "error", "错误，用户不存在")
                         logging.warning(f"登录失败: 用户 {username} 不存在")
                         return
                     stored_hash, is_admin = user_data
                     if bcrypt.checkpw(password.encode('utf-8'), stored_hash):
                         if is_admin:
                             if not self._admin_secret_valid(admin_secret):
-                                send_message(ssock, "error", "管理员登录需要有效管理员密钥")
+                                self.server.guarded_send(ssock, "error", "管理员登录需要有效管理员密钥")
                                 logging.warning(f"管理员登录失败: 用户={username}, 管理员密钥无效或未配置")
                                 return
-                            send_message(ssock, "admin_auth", "管理员登录成功")
+                            self.server.guarded_send(ssock, "admin_auth", "管理员登录成功")
                             logging.info(f"管理员登录成功: 用户={username}")
                         else:
                             if admin_secret:
-                                send_message(ssock, "error", "该账号不是管理员")
+                                self.server.guarded_send(ssock, "error", "该账号不是管理员")
                                 logging.warning(f"登录失败: 普通用户 {username} 尝试使用管理员密钥登录")
                                 return
-                            send_message(ssock, "chat", "登录成功")
+                            self.server.guarded_send(ssock, "chat", "登录成功")
                             logging.info(f"登录成功: 用户={username}")
+                        self._clear_login_failures(username)
+                        # 传输通道登录（transfer=1）：注册到 transfer_sockets，
+                        # 不踢主会话、不加载离线数据、不发送初始列表。
+                        # 文件数据经此通道收发，主连接上的聊天不受传输影响。
+                        is_transfer_session = header.get("transfer") == "1"
+                        if is_transfer_session:
+                            with self.server.client_map_lock:
+                                old = self.server.transfer_sockets.get(username)
+                                if old is not None and old is not ssock:
+                                    try:
+                                        old.close()
+                                    except Exception:
+                                        pass
+                                self.server.transfer_sockets[username] = ssock
+                            logging.info(f"传输通道已注册: 用户={username}")
+                            message_handler.process_messages(username, ssock)
+                            return
+                        # 正常主会话登录：踢出旧会话（如存在）
+                        self._kick_old_session(username, ssock)
+                        # 主会话登录成功：清理残留的传输通道（旧传输上下文作废）
                         with self.server.client_map_lock:
-                            self.server.client_map[username] = ssock
+                            stale = self.server.transfer_sockets.pop(username, None)
+                            if stale is not None and stale is not ssock:
+                                try:
+                                    stale.close()
+                                except Exception:
+                                    pass
                         # 加载离线消息、好友请求和文件请求，并发送初始好友/群组列表
                         message_handler.load_offline_data(username, ssock)
                         message_handler.send_initial_data(username, ssock)
                         # 处理后续消息
                         message_handler.process_messages(username, ssock)
                     else:
-                        send_message(ssock, "error", "错误：密码错误")
+                        self._record_login_failure(username)
+                        self.server.guarded_send(ssock, "error", "错误：密码错误")
                         logging.warning(f"登录失败: 用户 {username} 密码错误")
                         return
         except ssl.SSLError as e:
@@ -126,8 +226,22 @@ class ClientHandler:
         except Exception as e:
             logging.error(f"处理客户端 {client_address} 时出错: {e}")
         finally:
-            if username:
+            if username and wrapped is not None:
                 with self.server.client_map_lock:
-                    self.server.client_map.pop(username, None)
+                    if is_transfer_session:
+                        # 仅移除属于自己的传输通道映射
+                        if self.server.transfer_sockets.get(username) is wrapped:
+                            self.server.transfer_sockets.pop(username, None)
+                    else:
+                        # 仅移除属于自己的映射，避免误删重复登录后的新会话（阶段 G1）
+                        if self.server.client_map.get(username) is wrapped:
+                            self.server.client_map.pop(username, None)
+                        # 主会话结束：一并关闭自己的传输通道
+                        stale = self.server.transfer_sockets.pop(username, None)
+                        if stale is not None and stale is not wrapped:
+                            try:
+                                stale.close()
+                            except Exception:
+                                pass
             logging.info(f"客户端断开连接: {client_address}")
             client_socket.close()

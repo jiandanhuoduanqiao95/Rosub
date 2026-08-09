@@ -77,6 +77,37 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ---- 文件传输进度（阶段 G：传输可视化）----
+  final Map<String, TransferProgress> _transfers = {};
+
+  /// 更新传输进度（发送/接收中每块回调）
+  void updateTransfer(String messageId, int transferred, int total,
+      {bool isSend = false}) {
+    _transfers[messageId] = TransferProgress(
+      messageId: messageId,
+      total: total,
+      transferred: transferred,
+      isSend: isSend,
+    );
+    notifyListeners();
+  }
+
+  /// 移除传输进度（完成或失败后调用）
+  void removeTransfer(String messageId) {
+    if (_transfers.remove(messageId) != null) {
+      notifyListeners();
+    }
+  }
+
+  /// 查询传输进度比例；无传输返回 null
+  double? transferFraction(String messageId) => _transfers[messageId]?.fraction;
+
+  /// 该消息是否仍在传输中（存在且未完成）
+  bool isTransferring(String messageId) {
+    final p = _transfers[messageId];
+    return p != null && !p.done;
+  }
+
   // ---- 状态日志 ----
   final List<String> _statusLog = [];
   UnmodifiableListView<String> get statusLog =>
@@ -134,6 +165,7 @@ class AppState extends ChangeNotifier {
     _messageMap.clear();
     _unreadCount.clear();
     _noMoreHistory.clear();
+    _transfers.clear();
     _currentChat = null;
     _noticeQueue.clear();
     _log('已断开连接');

@@ -39,6 +39,10 @@ class Config:
         "message": {
             "recall_timeout_minutes": 2,
         },
+        "file": {
+            "max_file_size": 5368709120,
+            "large_file_threshold": 314572800,
+        },
         "database": {
             "path": "users.db",
         },

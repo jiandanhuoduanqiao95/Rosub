@@ -21,6 +21,11 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
+  # 测试重构新增：mocktail（无代码生成的 Mock 库，用于隔离网络服务的 widget 测试）
+  mocktail: ^1.0.4
+  # 测试重构新增：integration_test（Flutter 官方端到端测试绑定）
+  integration_test:
+    sdk: flutter
 
 flutter:
   uses-material-design: true

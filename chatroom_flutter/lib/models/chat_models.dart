@@ -124,6 +124,27 @@ class ChatTarget {
   });
 }
 
+/// 文件传输进度（阶段 G：传输可视化）
+class TransferProgress {
+  final String messageId;
+  final int total;
+  final int transferred;
+  final bool isSend; // true=发送中，false=接收中
+
+  const TransferProgress({
+    required this.messageId,
+    required this.total,
+    required this.transferred,
+    this.isSend = false,
+  });
+
+  /// 进度比例 0.0 ~ 1.0（total 为 0 时返回 0）
+  double get fraction => total <= 0 ? 0 : (transferred / total).clamp(0.0, 1.0);
+
+  /// 是否已完成
+  bool get done => total > 0 && transferred >= total;
+}
+
 /// 用户名/密码验证结果
 class ValidationResult {
   final bool valid;

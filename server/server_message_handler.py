@@ -1,14 +1,25 @@
 import logging
 import json
 import uuid
+import os
+import bcrypt
 from datetime import datetime, timedelta, UTC
-from protocol import send_message, recv_message
+from protocol import (send_message, recv_message, recv_header_only, recv_body,
+                      recv_body_to_file, recv_and_forward, send_file_message,
+                      send_message_header_only, _ForwardError)
 from server.server_group_handler import GroupHandler
 from server.server_admin_handler import AdminHandler
+from validation import validate_password
 from config import config
 
 # 撤回时限（分钟）
 RECALL_TIMEOUT = timedelta(minutes=config.get("message.recall_timeout_minutes", 2))
+
+# 文件大小上限（字节），默认 5GB（阶段 G4）
+DEFAULT_MAX_FILE_SIZE = 5368709120
+
+# 大文件直传阈值（字节），默认 300MB：超过则服务器不存储、双方在线时边收边转发
+DEFAULT_LARGE_FILE_THRESHOLD = 314572800
 
 class MessageHandler:
     def __init__(self, server):
@@ -21,12 +32,12 @@ class MessageHandler:
         # 发送好友列表
         users = self.server.db.get_friends(username)
         users_list = users
-        send_message(ssock, "admin_response", json.dumps(users_list), extra_headers={"response_type": "list_friends"})
+        self.server.guarded_send(ssock, "admin_response", json.dumps(users_list), extra_headers={"response_type": "list_friends"})
         logging.info(f"发送初始好友列表给用户: {username}, 好友数={len(users_list)}")
 
         # 发送群组列表
         groups = self.server.db.get_user_groups(username)
-        send_message(ssock, "list_groups", json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
+        self.server.guarded_send(ssock, "list_groups", json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
         logging.info(f"发送初始群组列表给用户: {username}, 群组数={len(groups)}")
 
     def load_offline_data(self, username, ssock):
@@ -35,7 +46,7 @@ class MessageHandler:
         logging.info(f"用户 {username} 的离线消息: {len(messages)} 条")
 
         for msg in messages:
-            sender, msg_type, content, filename, message_id, status, msg_receiver, msg_timestamp = msg
+            sender, msg_type, content, filename, message_id, status, msg_receiver, msg_timestamp, file_path = msg
             logging.info(f"发送离线消息: 发送者={sender}, 类型={msg_type}, 消息ID={message_id}")
 
             if msg_type == "chat":
@@ -43,7 +54,7 @@ class MessageHandler:
                                  "timestamp": str(msg_timestamp), "status": status}
                 if sender == username:
                     extra_headers["to"] = msg_receiver
-                send_message(ssock, "chat", content.decode('utf-8'),
+                self.server.guarded_send(ssock, "chat", content.decode('utf-8'),
                              extra_headers=extra_headers)
             elif msg_type == "file":
                 extra_headers = {"from": sender, "filename": filename, "history": "true",
@@ -51,8 +62,11 @@ class MessageHandler:
                                  "status": status}
                 if sender == username:
                     extra_headers["to"] = msg_receiver
-                send_message(ssock, "file", content,
-                             extra_headers=extra_headers)
+                if file_path and os.path.exists(file_path):
+                    # 大文件：流式分块发送，不读入内存
+                    send_file_message(ssock, "file", file_path, extra_headers=extra_headers)
+                else:
+                    self.server.guarded_send(ssock, "file", content, extra_headers=extra_headers)
             elif msg_type == "group_chat":
                 try:
                     message_data = json.loads(content.decode('utf-8'))
@@ -74,7 +88,7 @@ class MessageHandler:
                                 message_text = content.decode('utf-8')
 
                     if group_id and self.server.db.is_group_member(group_id, username):
-                        send_message(ssock, "group_chat", message_text,
+                        self.server.guarded_send(ssock, "group_chat", message_text,
                                      extra_headers={
                                          "from": sender,
                                          "group_id": str(group_id),
@@ -100,7 +114,7 @@ class MessageHandler:
         for request in file_requests:
             sender, filename, filesize, message_id = request
             logging.info(f"发送待处理文件请求: 发送者={sender}, 文件名={filename}, 消息ID={message_id}")
-            send_message(ssock, "file_request", "",
+            self.server.guarded_send(ssock, "file_request", "",
                          extra_headers={"from": sender, "filename": filename, "filesize": filesize,
                                         "message_id": message_id})
 
@@ -116,7 +130,7 @@ class MessageHandler:
                 if sender != username:  # 排除发送者本人
                     logging.info(
                         f"发送群组待处理文件请求: 发送者={sender}, 文件名={filename}, 群组ID={group_id}, 消息ID={message_id}")
-                    send_message(ssock, "group_file_request", "",
+                    self.server.guarded_send(ssock, "group_file_request", "",
                                  extra_headers={
                                      "from": sender,
                                      "filename": filename,
@@ -133,25 +147,228 @@ class MessageHandler:
         logging.info(f"用户 {username} 的待处理好友请求: {len(pending_requests)} 条")
         for requester in pending_requests:
             try:
-                send_message(ssock, "friend_request", f"来自 {requester} 的好友请求",
+                self.server.guarded_send(ssock, "friend_request", f"来自 {requester} 的好友请求",
                              extra_headers={"from": requester})
                 logging.info(f"发送待处理好友请求: 请求者={requester}, 接收者={username}")
             except Exception as e:
                 logging.error(f"发送待处理好友请求失败: 请求者={requester}, 接收者={username}, 错误={e}")
 
+    def _handle_file_message(self, username, ssock, header, length):
+        """处理 file 消息：大文件（> 阈值）在线直传不落盘；小文件落盘暂存。
+
+        返回 True 表示连接仍可用；返回 False 表示连接已断开，应结束消息循环。
+        """
+        target = header.get("to")
+        if not target:
+            self.server.guarded_send(ssock, "error", "错误，未指定接收者")
+            logging.error(f"文件消息失败: 未指定接收者")
+            return True
+        message_id = header.get("message_id", str(uuid.uuid4()))
+        filename = header.get("filename", "received_file")
+        # 文件大小限制（阶段 G4）：filesize 头缺失或非法时按消息体实际长度判定
+        try:
+            effective_size = int(header.get("filesize", ""))
+        except (TypeError, ValueError):
+            effective_size = length
+        max_file_size = config.get("file.max_file_size", DEFAULT_MAX_FILE_SIZE)
+        if effective_size > max_file_size:
+            # 超限：消费消息体避免连接错乱，再拒绝
+            if length > 0:
+                recv_body(ssock, length)
+            self.server.guarded_send(ssock, "error", f"文件过大，超出大小限制（最大 {max_file_size} 字节）")
+            logging.warning(f"文件发送失败: {username} -> {target}, "
+                            f"文件大小 {effective_size} 超过限制 {max_file_size}")
+            return True
+
+        # === 大文件直传（> 阈值）：服务器不存储，双方在线时边收边转发 ===
+        large_threshold = config.get("file.large_file_threshold", DEFAULT_LARGE_FILE_THRESHOLD)
+        if effective_size > large_threshold:
+            is_group = target.startswith("群组 ") or target.startswith("group_")
+            if is_group:
+                if length > 0:
+                    recv_body(ssock, length)
+                self.server.guarded_send(ssock, "error", "群组暂不支持大文件直传，请发送小于阈值的文件")
+                logging.warning(f"大文件直传失败: {username} -> 群组 {target}, 不支持群组大文件")
+                return True
+            if not self.server.db.user_exists(target):
+                if length > 0:
+                    recv_body(ssock, length)
+                self.server.guarded_send(ssock, "error", f"用户 {target} 不存在")
+                logging.warning(f"大文件直传失败: {username} -> {target}, 用户不存在")
+                return True
+            if not self.server.db.is_friend(username, target):
+                if length > 0:
+                    recv_body(ssock, length)
+                self.server.guarded_send(ssock, "error", f"错误：{target} 不是您的好友")
+                logging.warning(f"大文件直传失败: {username} -> {target}, 非好友")
+                return True
+            # 转发目标：优先接收方的传输通道（transfer socket，聊天主连接
+            # 不被占用）；旧客户端无传输通道时回退到主连接（需抑制写入）。
+            with self.server.client_map_lock:
+                transfer_recipient = self.server.transfer_sockets.get(target)
+                main_recipient = self.server.client_map.get(target)
+            recipient_socket = transfer_recipient or main_recipient
+            if not recipient_socket:
+                if length > 0:
+                    recv_body(ssock, length)
+                self.server.guarded_send(ssock, "error", f"用户 {target} 离线，无法传输大文件")
+                logging.warning(f"大文件直传失败: {username} -> {target}, 目标离线")
+                return True
+            use_main_fallback = transfer_recipient is None
+            consumed = 0
+            forward_failed = False
+            try:
+                if use_main_fallback:
+                    # 主连接回退：标记接收方为"转发中"，期间抑制一切写入
+                    # （pong/kick/推送会污染文件字节流）
+                    with self.server.client_map_lock:
+                        self.server.active_forward_socks.add(recipient_socket)
+                # 先向接收方发送 file 消息头（length = 实际消息体长度），再边收边转发 body
+                send_message_header_only(
+                    recipient_socket, "file", length,
+                    extra_headers={"from": username, "filename": filename,
+                                   "filesize": effective_size, "message_id": message_id})
+                consumed = recv_and_forward(ssock, recipient_socket, length)
+            except _ForwardError as fe:
+                # 目标转发失败（接收方掉线）：只消费尚未读取的剩余 body
+                # （length - fe.consumed，含 sendall 失败前 recvall 的预读量），
+                # 避免把发送方后续消息（如传输中排队的 chat）一并吞掉导致流错位
+                consumed = fe.consumed
+                forward_failed = True
+                logging.error(f"大文件直传中断: {username} -> {target}, "
+                              f"消息ID={message_id}, 错误={fe}")
+            except Exception as e:
+                consumed = 0
+                forward_failed = True
+                logging.error(f"大文件直传中断: {username} -> {target}, "
+                              f"消息ID={message_id}, 错误={e}")
+            finally:
+                if use_main_fallback:
+                    # 转发结束：解除抑制；若接收方仍是最新会话，补推转发期间积压的离线消息
+                    with self.server.client_map_lock:
+                        self.server.active_forward_socks.discard(recipient_socket)
+                        still_current = self.server.client_map.get(target) is recipient_socket
+                    if still_current:
+                        try:
+                            self.load_offline_data(target, recipient_socket)
+                        except Exception as e:
+                            logging.warning(f"转发后补推离线消息失败: {target}, {e}")
+            if forward_failed:
+                try:
+                    remaining = length - consumed
+                    if remaining > 0:
+                        recv_body(ssock, remaining)
+                except Exception:
+                    pass
+                try:
+                    self.server.guarded_send(ssock, "error", "文件传输中断")
+                except Exception:
+                    pass
+                return True
+            if consumed < length:
+                # 源连接提前关闭（EOF）
+                try:
+                    self.server.guarded_send(ssock, "error", "文件传输中断")
+                except Exception:
+                    pass
+                logging.error(f"大文件直传失败: {username} -> {target}, 消息ID={message_id}, "
+                              f"转发 {consumed}/{length}")
+                return False
+            logging.info(f"大文件直传完成: {username} -> {target}, 文件名={filename}, "
+                         f"大小={effective_size}, 消息ID={message_id}")
+            return True
+
+        # === 小文件（<= 阈值）：落盘暂存，接收方接受后转发 ===
+        file_path = None
+        file_data = b''
+        if length > 0:
+            file_path = os.path.join(self.server.db._pending_dir(), os.path.basename(message_id))
+            written = recv_body_to_file(ssock, file_path, length)
+            if written < length:
+                self.server.guarded_send(ssock, "error", "文件接收不完整")
+                logging.error(f"文件接收不完整: 消息ID={message_id}, {written}/{length}")
+                return False
+        # 支持两种群组前缀：中文「群组 」和 Flutter 客户端「group_」
+        is_group = target.startswith("群组 ") or target.startswith("group_")
+        if is_group:
+            try:
+                if target.startswith("group_"):
+                    group_id = int(target.split("_")[1])
+                else:
+                    group_id = int(target.split(" ")[1])
+                with self.server.db._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('SELECT 1 FROM groups WHERE id = ?', (group_id,))
+                    if not cursor.fetchone():
+                        self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                        logging.error(f"文件发送失败: 群组 {group_id} 不存在")
+                        return True
+                if not self.server.db.is_group_member(group_id, username):
+                    self.server.guarded_send(ssock, "error", "您不在此群组中")
+                    logging.warning(f"文件发送失败: 用户 {username} 不在群组 {group_id} 中")
+                    return True
+                self.server.db.save_group_file_request(group_id, username, filename, effective_size, file_data, message_id, file_path=file_path)
+                self.group_handler.notify_group_members(
+                    group_id, "group_file_request", "",
+                    from_user=username,
+                    extra_headers={"filename": filename, "filesize": effective_size, "message_id": message_id}
+                )
+                logging.info(f"群组文件请求已保存: 群组ID={group_id}, 文件名={filename}, 消息ID={message_id}")
+            except ValueError:
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                logging.error(f"文件发送失败: 无效的群组ID {target}")
+            return True
+        if not self.server.db.is_friend(username, target):
+            if file_path:
+                self.server.db._delete_disk_file(file_path)
+            self.server.guarded_send(ssock, "error", f"错误：{target} 不是您的好友")
+            logging.warning(f"文件发送失败: {username} -> {target}, 非好友")
+            return True
+        self.server.db.save_file_request(username, target, filename, effective_size, file_data, message_id, file_path=file_path)
+        with self.server.client_map_lock:
+            recipient_socket = self.server.client_map.get(target)
+        if recipient_socket:
+            try:
+                self.server.guarded_send(recipient_socket, "file_request", "",
+                             extra_headers={"from": username, "filename": filename, "filesize": effective_size, "message_id": message_id})
+                logging.info(f"文件请求已发送: {username} -> {target}, 文件名={filename}, 消息ID={message_id}")
+            except Exception as e:
+                logging.error(f"发送文件请求失败: {username} -> {target}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
+                with self.server.client_map_lock:
+                    self.server.client_map.pop(target, None)
+        else:
+            self.server.guarded_send(ssock, "chat", f"用户 {target} 离线，文件请求已保存")
+            logging.info(f"用户 {target} 离线，文件请求已保存: 文件名={filename}, 消息ID={message_id}")
+        return True
+
     def process_messages(self, username, ssock):
         """处理客户端发送的消息"""
         while True:
-            header, data = recv_message(ssock)
+            # 只读消息头，file 类型按大小分流（大文件在线直传不落盘 / 小文件落盘暂存）
+            header = recv_header_only(ssock)
             if not header:
                 logging.info(f"客户端 {username} 断开连接")
                 break
             msg_type = header.get("type")
+            length = header.get('length', 0)
             logging.info(f"收到消息: 用户={username}, 类型={msg_type}, 头信息={header}")
+
+            if msg_type == "file":
+                # file 消息体按大小分流处理（大文件直传不落盘 / 小文件落盘暂存）
+                alive = self._handle_file_message(username, ssock, header, length)
+                if not alive:
+                    break
+                continue
+
+            # 其余消息：读取消息体到内存后分发
+            data = recv_body(ssock, length)
+            if data is None:
+                logging.info(f"客户端 {username} 断开连接（消息体读取中断）")
+                break
 
             if msg_type == "ping":
                 try:
-                    send_message(ssock, "pong", b"")
+                    self.server.guarded_send(ssock, "pong", b"")
                 except Exception as e:
                     logging.warning(f"回复 pong 失败: {username}, {e}")
 
@@ -159,7 +376,7 @@ class MessageHandler:
                 target = header.get("to")
                 message_id = header.get("message_id", str(uuid.uuid4()))
                 if not self.server.db.is_friend(username, target):
-                    send_message(ssock, "error", f"错误：{target} 不是您的好友")
+                    self.server.guarded_send(ssock, "error", f"错误：{target} 不是您的好友")
                     logging.warning(f"消息发送失败: {username} -> {target}, 非好友")
                     continue
                 message = data.decode("utf-8")
@@ -171,7 +388,7 @@ class MessageHandler:
                     recipient_socket = self.server.client_map.get(target)
                 if recipient_socket:
                     try:
-                        send_message(recipient_socket, "chat", message,
+                        self.server.guarded_send(recipient_socket, "chat", message,
                                      extra_headers={"from": username, "message_id": message_id})
                         logging.info(f"消息已转发: {username} -> {target}, 消息ID={message_id}")
                     except Exception as e:
@@ -179,71 +396,46 @@ class MessageHandler:
                         with self.server.client_map_lock:
                             self.server.client_map.pop(target, None)
                 else:
-                    send_message(ssock, "chat", f"用户 {target} 离线，消息已保存")
+                    self.server.guarded_send(ssock, "chat", f"用户 {target} 离线，消息已保存")
                     logging.info(f"用户 {target} 离线，消息已保存: 消息ID={message_id}")
                 if message.lower() == "quit":
                     break
 
-            elif msg_type == "file":
+            elif msg_type == "file_transfer_check":
+                # 大文件直传探测（阶段 G4b）：发送方先确认目标在线再传输
                 target = header.get("to")
-                if not target:
-                    send_message(ssock, "error", "错误，未指定接收者")
-                    logging.error(f"文件消息失败: 未指定接收者")
+                message_id = header.get("message_id")
+                try:
+                    check_size = int(header.get("filesize", "") or "0")
+                except (TypeError, ValueError):
+                    check_size = 0
+                large_threshold = config.get("file.large_file_threshold", DEFAULT_LARGE_FILE_THRESHOLD)
+                if check_size <= large_threshold:
+                    self.server.guarded_send(ssock, "error", "文件未超过大文件阈值，请直接发送")
+                    logging.warning(f"大文件探测失败: {username} 检查非大文件 {check_size}")
                     continue
-                message_id = header.get("message_id", str(uuid.uuid4()))
-                filename = header.get("filename", "received_file")
-                filesize = header.get("filesize", len(data))
-                file_data = data
-                # 支持两种群组前缀：中文「群组 」和 Flutter 客户端「group_」
-                is_group = target.startswith("群组 ") or target.startswith("group_")
-                if is_group:
-                    try:
-                        if target.startswith("group_"):
-                            group_id = int(target.split("_")[1])
-                        else:
-                            group_id = int(target.split(" ")[1])
-                        with self.server.db._get_connection() as conn:
-                            cursor = conn.cursor()
-                            cursor.execute('SELECT 1 FROM groups WHERE id = ?', (group_id,))
-                            if not cursor.fetchone():
-                                send_message(ssock, "error", f"群组 {group_id} 不存在")
-                                logging.error(f"文件发送失败: 群组 {group_id} 不存在")
-                                continue
-                        if not self.server.db.is_group_member(group_id, username):
-                            send_message(ssock, "error", "您不在此群组中")
-                            logging.warning(f"文件发送失败: 用户 {username} 不在群组 {group_id} 中")
-                            continue
-                        self.server.db.save_group_file_request(group_id, username, filename, filesize, file_data, message_id)
-                        self.group_handler.notify_group_members(
-                            group_id, "group_file_request", "",
-                            from_user=username,
-                            extra_headers={"filename": filename, "filesize": filesize, "message_id": message_id}
-                        )
-                        logging.info(f"群组文件请求已保存: 群组ID={group_id}, 文件名={filename}, 消息ID={message_id}")
-                    except ValueError:
-                        send_message(ssock, "error", "无效的群组ID")
-                        logging.error(f"文件发送失败: 无效的群组ID {target}")
-                        continue
-                else:
-                    if not self.server.db.is_friend(username, target):
-                        send_message(ssock, "error", f"错误：{target} 不是您的好友")
-                        logging.warning(f"文件发送失败: {username} -> {target}, 非好友")
-                        continue
-                    self.server.db.save_file_request(username, target, filename, filesize, file_data, message_id)
-                    with self.server.client_map_lock:
-                        recipient_socket = self.server.client_map.get(target)
-                    if recipient_socket:
-                        try:
-                            send_message(recipient_socket, "file_request", "",
-                                         extra_headers={"from": username, "filename": filename, "filesize": filesize, "message_id": message_id})
-                            logging.info(f"文件请求已发送: {username} -> {target}, 文件名={filename}, 消息ID={message_id}")
-                        except Exception as e:
-                            logging.error(f"发送文件请求失败: {username} -> {target}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
-                            with self.server.client_map_lock:
-                                self.server.client_map.pop(target, None)
-                    else:
-                        send_message(ssock, "chat", f"用户 {target} 离线，文件请求已保存")
-                        logging.info(f"用户 {target} 离线，文件请求已保存: 文件名={filename}, 消息ID={message_id}")
+                if target.startswith("群组 ") or target.startswith("group_"):
+                    self.server.guarded_send(ssock, "error", "群组暂不支持大文件直传")
+                    logging.warning(f"大文件探测失败: {username} -> 群组 {target}")
+                    continue
+                if not self.server.db.user_exists(target):
+                    self.server.guarded_send(ssock, "error", f"用户 {target} 不存在")
+                    logging.warning(f"大文件探测失败: {username} -> {target}, 用户不存在")
+                    continue
+                if not self.server.db.is_friend(username, target):
+                    self.server.guarded_send(ssock, "error", f"错误：{target} 不是您的好友")
+                    logging.warning(f"大文件探测失败: {username} -> {target}, 非好友")
+                    continue
+                with self.server.client_map_lock:
+                    transfer_recipient = self.server.transfer_sockets.get(target)
+                    main_recipient = self.server.client_map.get(target)
+                if not transfer_recipient and not main_recipient:
+                    self.server.guarded_send(ssock, "error", f"用户 {target} 离线，无法传输大文件")
+                    logging.warning(f"大文件探测失败: {username} -> {target}, 目标离线")
+                    continue
+                self.server.guarded_send(ssock, "file_check_response", "",
+                             extra_headers={"ok": "1", "to": target, "message_id": message_id or ""})
+                logging.info(f"大文件探测通过: {username} -> {target}, 大小={check_size}")
 
             elif msg_type == "file_response":
                 message_id = header.get("message_id")
@@ -251,22 +443,31 @@ class MessageHandler:
                 target = header.get("to")
                 file_request = self.server.db.get_file_request(message_id)
                 if not file_request:
-                    send_message(ssock, "error", f"文件请求 {message_id} 不存在")
+                    self.server.guarded_send(ssock, "error", f"文件请求 {message_id} 不存在")
                     logging.warning(f"文件响应失败: 消息ID={message_id} 不存在")
                     continue
-                sender, receiver, filename, filesize, file_data = file_request
+                sender, receiver, filename, filesize, file_data, file_path = file_request
                 if receiver != username:
-                    send_message(ssock, "error", "无权限响应此文件请求")
+                    self.server.guarded_send(ssock, "error", "无权限响应此文件请求")
                     logging.warning(f"文件响应失败: 用户 {username} 无权限响应消息ID={message_id}")
                     continue
                 if response == "accept":
-                    self.server.db.save_offline_message(sender, receiver, "file", file_data, filename=filename, message_id=message_id)
+                    # 大文件：把待处理文件转入历史区（原子 rename），DB 存路径
+                    history_path = (self.server.db.promote_file_to_history(file_path, message_id)
+                                    if file_path else None)
+                    if history_path:
+                        file_data = b''
+                    self.server.db.save_offline_message(sender, receiver, "file", file_data, filename=filename, message_id=message_id, file_path=history_path)
                     # 同步写入永久消息历史
-                    self.server.db.save_message_history(sender, receiver, "file", file_data, filename=filename, message_id=message_id)
+                    self.server.db.save_message_history(sender, receiver, "file", file_data, filename=filename, message_id=message_id, file_path=history_path)
                     if self.server.client_map.get(receiver):
                         try:
-                            send_message(self.server.client_map[receiver], "file", file_data,
-                                         extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id})
+                            if history_path:
+                                send_file_message(self.server.client_map[receiver], "file", history_path,
+                                                  extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id})
+                            else:
+                                self.server.guarded_send(self.server.client_map[receiver], "file", file_data,
+                                             extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id})
                             logging.info(f"文件已传输: {sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}")
                         except Exception as e:
                             logging.error(f"传输文件失败: {sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
@@ -281,11 +482,11 @@ class MessageHandler:
             elif msg_type == "friend_request":
                 target = header.get("to")
                 if not self.server.db.user_exists(target):
-                    send_message(ssock, "error", f"用户 {target} 不存在")
+                    self.server.guarded_send(ssock, "error", f"用户 {target} 不存在")
                     logging.warning(f"好友请求失败: 目标用户 {target} 不存在")
                     continue
                 if self.server.db.is_friend(username, target):
-                    send_message(ssock, "error", f"用户 {target} 已是您的好友")
+                    self.server.guarded_send(ssock, "error", f"用户 {target} 已是您的好友")
                     logging.warning(f"好友请求失败: {username} 和 {target} 已为好友")
                     continue
                 if self.server.db.add_friend_request(username, target):
@@ -293,28 +494,28 @@ class MessageHandler:
                         recipient_socket = self.server.client_map.get(target)
                     if recipient_socket:
                         try:
-                            send_message(recipient_socket, "friend_request", f"来自 {username} 的好友请求",
+                            self.server.guarded_send(recipient_socket, "friend_request", f"来自 {username} 的好友请求",
                                          extra_headers={"from": username})
                             logging.info(f"好友请求已发送: {username} -> {target}")
                         except Exception as e:
                             logging.error(f"发送好友请求通知失败: {username} -> {target}, 错误={e}")
                             with self.server.client_map_lock:
                                 self.server.client_map.pop(target, None)
-                    send_message(ssock, "chat", f"好友请求已发送给 {target}")
+                    self.server.guarded_send(ssock, "chat", f"好友请求已发送给 {target}")
                     logging.info(f"好友请求发送：{username} -> {target}")
                 else:
-                    send_message(ssock, "error", "好友请求发送失败，可能已存在")
+                    self.server.guarded_send(ssock, "error", "好友请求发送失败，可能已存在")
                     logging.error(f"好友请求发送失败：{username} -> {target}")
 
             elif msg_type == "list_friend_requests":
                 pending_requests = self.server.db.get_pending_friend_requests(username)
-                send_message(ssock, "list_friend_requests", json.dumps(pending_requests))
+                self.server.guarded_send(ssock, "list_friend_requests", json.dumps(pending_requests))
                 logging.info(f"发送好友请求列表: 用户={username}, 请求数={len(pending_requests)}")
 
             elif msg_type == "list_friends":
                 users = self.server.db.get_friends(username)
                 users_list = users
-                send_message(ssock, "admin_response", json.dumps(users_list), extra_headers={"response_type": "list_friends"})
+                self.server.guarded_send(ssock, "admin_response", json.dumps(users_list), extra_headers={"response_type": "list_friends"})
                 logging.info(f"用户 {username} 请求好友列表")
 
             elif msg_type == "fetch_history":
@@ -355,23 +556,23 @@ class MessageHandler:
                         "message_id": mid, "filename": fname, "timestamp": ts,
                         "group_id": gid, "status": mstatus or "sent",
                     })
-                send_message(ssock, "history_response", json.dumps(batch),
+                self.server.guarded_send(ssock, "history_response", json.dumps(batch),
                              extra_headers={"to": with_user or "", "group_id": group_id or ""})
                 logging.info(f"历史消息拉取: 用户={username}, 会话={with_user or group_id}, 返回={len(batch)}条")
 
             elif msg_type == "accept_friend":
                 requester = header.get("from")
                 if not self.server.db.has_pending_request(requester, username):
-                    send_message(ssock, "error", f"没有来自 {requester} 的好友请求")
+                    self.server.guarded_send(ssock, "error", f"没有来自 {requester} 的好友请求")
                     logging.warning(f"接受好友请求失败: 没有来自 {requester} 的请求")
                     continue
                 self.server.db.accept_friend_request(requester, username)
-                send_message(ssock, "chat", f"已接受 {requester} 的好友请求")
+                self.server.guarded_send(ssock, "chat", f"已接受 {requester} 的好友请求")
                 with self.server.client_map_lock:
                     requester_socket = self.server.client_map.get(requester)
                 if requester_socket:
                     try:
-                        send_message(requester_socket, "chat", f"{username} 已接受您的好友请求")
+                        self.server.guarded_send(requester_socket, "chat", f"{username} 已接受您的好友请求")
                         logging.info(f"通知请求者: {username} 接受好友请求")
                     except Exception as e:
                         logging.error(f"通知请求者失败: {username} 接受好友请求, 错误={e}")
@@ -395,7 +596,7 @@ class MessageHandler:
                 requester = header.get("from")
                 # 直接删除好友请求记录（不论当前 status），避免残留记录阻止重新请求
                 self.server.db.reject_friend_request(requester, username)
-                send_message(ssock, "chat", f"已拒绝 {requester} 的好友请求")
+                self.server.guarded_send(ssock, "chat", f"已拒绝 {requester} 的好友请求")
                 logging.info(f"好友请求拒绝：{requester} -> {username}")
 
 
@@ -441,7 +642,7 @@ class MessageHandler:
                     sender, receiver, msg_type, content, filename, status, timestamp = message_info
 
                     if sender != username:
-                        send_message(ssock, "error", "只能撤回自己的消息")
+                        self.server.guarded_send(ssock, "error", "只能撤回自己的消息")
 
                         logging.warning(f"撤回消息失败: 用户 {username} 尝试撤回非自己的消息 {message_id}")
 
@@ -460,7 +661,7 @@ class MessageHandler:
                             f"撤回消息时间检查: 消息ID={message_id}, 时间戳={timestamp}, 解析时间={message_time}, 当前时间={current_time}, 时间差={time_diff.total_seconds()}秒")
 
                         if time_diff > RECALL_TIMEOUT:
-                            send_message(ssock, "error",
+                            self.server.guarded_send(ssock, "error",
                                          f"消息超过{RECALL_TIMEOUT.total_seconds() // 60:.0f}分钟，无法撤回 (时间差: {time_diff.total_seconds()}秒)")
 
                             logging.warning(f"撤回消息失败: 消息 {message_id} 超过2分钟")
@@ -469,14 +670,14 @@ class MessageHandler:
 
                     except ValueError as e:
 
-                        send_message(ssock, "error", f"消息时间格式错误: {e}")
+                        self.server.guarded_send(ssock, "error", f"消息时间格式错误: {e}")
 
                         logging.error(f"撤回消息失败: 消息 {message_id} 时间格式错误: {e}")
 
                         continue
 
                     if status == 'recalled':
-                        send_message(ssock, "error", "消息已被撤回")
+                        self.server.guarded_send(ssock, "error", "消息已被撤回")
 
                         logging.warning(f"撤回消息失败: 消息 {message_id} 已被撤回")
 
@@ -491,7 +692,7 @@ class MessageHandler:
                         group_id = message_data.get("group_id")
 
                         if not group_id:
-                            send_message(ssock, "error", "无法确定消息的群组")
+                            self.server.guarded_send(ssock, "error", "无法确定消息的群组")
 
                             logging.warning(f"撤回群组消息失败: 无法确定群组ID, 消息ID={message_id}")
 
@@ -500,7 +701,7 @@ class MessageHandler:
                         # 确认发送者在群组内
 
                         if not self.server.db.is_group_member(group_id, sender):
-                            send_message(ssock, "error", f"您不是群组 {group_id} 的成员")
+                            self.server.guarded_send(ssock, "error", f"您不是群组 {group_id} 的成员")
 
                             logging.warning(f"撤回消息失败: 用户 {username} 不在群组 {group_id} 中")
 
@@ -564,7 +765,7 @@ class MessageHandler:
                         logging.info(f"群组消息撤回成功: 用户={username}, 群组ID={group_id}, 消息ID={message_id}")
 
                         try:
-                            send_message(ssock, "recall", "",
+                            self.server.guarded_send(ssock, "recall", "",
                                          extra_headers={"message_id": message_id})
                         except Exception as e:
                             logging.warning(f"发送撤回确认失败: {username}, {e}")
@@ -572,7 +773,7 @@ class MessageHandler:
 
                     except json.JSONDecodeError:
 
-                        send_message(ssock, "error", "消息格式错误，无法撤回")
+                        self.server.guarded_send(ssock, "error", "消息格式错误，无法撤回")
 
                         logging.error(f"撤回群组消息失败: 解析消息内容失败, 消息ID={message_id}")
 
@@ -586,7 +787,7 @@ class MessageHandler:
                     sender, receiver, msg_type, content, filename, status, timestamp = message_info
 
                     if sender != username:
-                        send_message(ssock, "error", "只能撤回自己的消息")
+                        self.server.guarded_send(ssock, "error", "只能撤回自己的消息")
 
                         logging.warning(f"撤回消息失败: 用户 {username} 尝试撤回非自己的消息 {message_id}")
 
@@ -605,7 +806,7 @@ class MessageHandler:
                             f"撤回消息时间检查: 消息ID={message_id}, 时间戳={timestamp}, 解析时间={message_time}, 当前时间={current_time}, 时间差={time_diff.total_seconds()}秒")
 
                         if time_diff > RECALL_TIMEOUT:
-                            send_message(ssock, "error", f"消息超过{RECALL_TIMEOUT.total_seconds() // 60:.0f}分钟，无法撤回")
+                            self.server.guarded_send(ssock, "error", f"消息超过{RECALL_TIMEOUT.total_seconds() // 60:.0f}分钟，无法撤回")
 
                             logging.warning(f"撤回消息失败: 消息 {message_id} 超过2分钟")
 
@@ -613,14 +814,14 @@ class MessageHandler:
 
                     except ValueError as e:
 
-                        send_message(ssock, "error", f"消息时间格式错误: {e}")
+                        self.server.guarded_send(ssock, "error", f"消息时间格式错误: {e}")
 
                         logging.error(f"撤回消息失败: 消息 {message_id} 时间格式错误: {e}")
 
                         continue
 
                     if status == 'recalled':
-                        send_message(ssock, "error", "消息已被撤回")
+                        self.server.guarded_send(ssock, "error", "消息已被撤回")
 
                         logging.warning(f"撤回消息失败: 消息 {message_id} 已被撤回")
 
@@ -639,7 +840,7 @@ class MessageHandler:
 
                             try:
 
-                                send_message(recipient_socket, "recall", "",
+                                self.server.guarded_send(recipient_socket, "recall", "",
 
                                              extra_headers={"from": username, "message_id": message_id})
 
@@ -664,14 +865,14 @@ class MessageHandler:
                         logging.info(f"私聊消息撤回成功: {username} 撤回了 {message_id}")
 
                         try:
-                            send_message(ssock, "recall", "",
+                            self.server.guarded_send(ssock, "recall", "",
                                          extra_headers={"message_id": message_id})
                         except Exception as e:
                             logging.warning(f"发送撤回确认失败: {username}, {e}")
 
                     else:
 
-                        send_message(ssock, "error", f"撤回消息 {message_id} 失败")
+                        self.server.guarded_send(ssock, "error", f"撤回消息 {message_id} 失败")
 
                         logging.error(f"撤回私聊消息失败: {message_id}")
 
@@ -680,10 +881,10 @@ class MessageHandler:
 
                 elif file_request:
 
-                    sender, receiver, filename, filesize, content = file_request
+                    sender, receiver, filename, filesize, content, file_path = file_request
 
                     if sender != username:
-                        send_message(ssock, "error", "只能撤回自己的文件请求")
+                        self.server.guarded_send(ssock, "error", "只能撤回自己的文件请求")
 
                         logging.warning(f"撤回文件请求失败: 用户 {username} 尝试撤回非自己的文件请求 {message_id}")
 
@@ -706,7 +907,7 @@ class MessageHandler:
                         time_diff = current_time - request_time
 
                         if time_diff > RECALL_TIMEOUT:
-                            send_message(ssock, "error", f"文件请求超过{RECALL_TIMEOUT.total_seconds() // 60:.0f}分钟，无法撤回")
+                            self.server.guarded_send(ssock, "error", f"文件请求超过{RECALL_TIMEOUT.total_seconds() // 60:.0f}分钟，无法撤回")
 
                             logging.warning(f"撤回文件请求失败: {message_id} 超过2分钟")
 
@@ -714,7 +915,7 @@ class MessageHandler:
 
                     except ValueError as e:
 
-                        send_message(ssock, "error", f"文件请求时间格式错误: {e}")
+                        self.server.guarded_send(ssock, "error", f"文件请求时间格式错误: {e}")
 
                         logging.error(f"撤回文件请求失败: {message_id} 时间格式错误: {e}")
 
@@ -730,7 +931,7 @@ class MessageHandler:
 
                             try:
 
-                                send_message(recipient_socket, "chat",
+                                self.server.guarded_send(recipient_socket, "chat",
 
                                              f"用户 {username} 撤回了文件请求: {filename} ({message_id})")
 
@@ -747,14 +948,14 @@ class MessageHandler:
                         logging.info(f"私聊文件请求撤回成功: {username} 撤回了 {message_id}")
 
                         try:
-                            send_message(ssock, "recall", "",
+                            self.server.guarded_send(ssock, "recall", "",
                                          extra_headers={"message_id": message_id})
                         except Exception as e:
                             logging.warning(f"发送撤回确认失败: {username}, {e}")
 
                     else:
 
-                        send_message(ssock, "error", f"撤回文件请求 {message_id} 失败")
+                        self.server.guarded_send(ssock, "error", f"撤回文件请求 {message_id} 失败")
 
                         logging.error(f"撤回私聊文件请求失败: {message_id}")
 
@@ -763,10 +964,10 @@ class MessageHandler:
 
                 elif group_file_request:
 
-                    group_id, sender, filename, filesize, content = group_file_request
+                    group_id, sender, filename, filesize, content, file_path = group_file_request
 
                     if sender != username:
-                        send_message(ssock, "error", "只能撤回自己的文件请求")
+                        self.server.guarded_send(ssock, "error", "只能撤回自己的文件请求")
 
                         logging.warning(f"撤回群组文件请求失败: 用户 {username} 尝试撤回非自己的文件请求 {message_id}")
 
@@ -789,7 +990,7 @@ class MessageHandler:
                         time_diff = current_time - request_time
 
                         if time_diff > RECALL_TIMEOUT:
-                            send_message(ssock, "error", f"群组文件请求超过{RECALL_TIMEOUT.total_seconds() // 60:.0f}分钟，无法撤回")
+                            self.server.guarded_send(ssock, "error", f"群组文件请求超过{RECALL_TIMEOUT.total_seconds() // 60:.0f}分钟，无法撤回")
 
                             logging.warning(f"撤回群组文件请求失败: {message_id} 超过2分钟")
 
@@ -797,7 +998,7 @@ class MessageHandler:
 
                     except ValueError as e:
 
-                        send_message(ssock, "error", f"群组文件请求时间格式错误: {e}")
+                        self.server.guarded_send(ssock, "error", f"群组文件请求时间格式错误: {e}")
 
                         logging.error(f"撤回群组文件请求失败: {message_id} 时间格式错误: {e}")
 
@@ -816,30 +1017,56 @@ class MessageHandler:
                         logging.info(f"群组文件请求撤回成功: {username} 撤回了 {message_id} 在群组 {group_id}")
 
                         try:
-                            send_message(ssock, "recall", "",
+                            self.server.guarded_send(ssock, "recall", "",
                                          extra_headers={"message_id": message_id})
                         except Exception as e:
                             logging.warning(f"发送撤回确认失败: {username}, {e}")
 
                     else:
 
-                        send_message(ssock, "error", f"撤回群组文件请求 {message_id} 失败")
+                        self.server.guarded_send(ssock, "error", f"撤回群组文件请求 {message_id} 失败")
 
                         logging.error(f"撤回群组文件请求失败: {message_id}")
+
+            elif msg_type == "change_password":
+                old_password = header.get("old_password") or ""
+                new_password = header.get("new_password") or ""
+                valid, error = validate_password(new_password)
+                if not valid:
+                    self.server.guarded_send(ssock, "error", error)
+                    logging.warning(f"修改密码失败: 用户 {username} 新密码格式不合法: {error}")
+                    continue
+                user_data = self.server.db.get_user(username)
+                if not user_data:
+                    self.server.guarded_send(ssock, "error", "用户不存在")
+                    logging.warning(f"修改密码失败: 用户 {username} 不存在")
+                    continue
+                stored_hash, _ = user_data
+                if not bcrypt.checkpw(old_password.encode('utf-8'), stored_hash):
+                    self.server.guarded_send(ssock, "error", "原密码错误")
+                    logging.warning(f"修改密码失败: 用户 {username} 原密码错误")
+                    continue
+                new_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+                if self.server.db.update_password(username, stored_hash, new_hash):
+                    self.server.guarded_send(ssock, "chat", "密码修改成功")
+                    logging.info(f"修改密码成功: 用户 {username}")
+                else:
+                    self.server.guarded_send(ssock, "error", "修改密码失败")
+                    logging.error(f"修改密码失败: 用户 {username}")
 
             elif msg_type == "delete_friend":
                 target = header.get("to")
                 if not self.server.db.user_exists(target):
-                    send_message(ssock, "error", f"用户 {target} 不存在")
+                    self.server.guarded_send(ssock, "error", f"用户 {target} 不存在")
                     logging.warning(f"删除好友失败: 目标用户 {target} 不存在")
                     continue
                 if self.server.db.remove_friend(username, target):
-                    send_message(ssock, "chat", f"已删除好友 {target}")
+                    self.server.guarded_send(ssock, "chat", f"已删除好友 {target}")
                     with self.server.client_map_lock:
                         target_socket = self.server.client_map.get(target)
                     if target_socket:
                         try:
-                            send_message(target_socket, "delete_friend", "",
+                            self.server.guarded_send(target_socket, "delete_friend", "",
                                          extra_headers={"from": username})
                             logging.info(f"通知被删方: {target} 被 {username} 删除好友")
                         except Exception as e:
@@ -854,7 +1081,7 @@ class MessageHandler:
                         logging.info(f"被删方离线，保存离线删除通知: {target} <- {username}")
                     logging.info(f"好友已删除: {username} <-> {target}")
                 else:
-                    send_message(ssock, "error", f"删除好友 {target} 失败")
+                    self.server.guarded_send(ssock, "error", f"删除好友 {target} 失败")
                     logging.error(f"删除好友失败: {username} <-> {target}")
 
             elif msg_type == "admin_command":

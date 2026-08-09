@@ -1,6 +1,6 @@
 import json
 import logging
-from protocol import send_message
+from protocol import send_message, send_file_message
 import uuid
 
 class GroupHandler:
@@ -12,12 +12,12 @@ class GroupHandler:
             try:
                 group_name = data.decode("utf-8").strip()
                 if not group_name:
-                    send_message(ssock, "error", "群组名称不能为空")
+                    self.server.guarded_send(ssock, "error", "群组名称不能为空")
                     logging.error(f"用户 {username} 尝试创建空群组名")
                     return
                 group_id = self.server.db.create_group(group_name, username)
                 if group_id:
-                    send_message(ssock, "chat", f"群组 {group_name} 创建成功，ID: {group_id}")
+                    self.server.guarded_send(ssock, "chat", f"群组 {group_name} 创建成功，ID: {group_id}")
                     logging.info(f"用户 {username} 创建群组: {group_name}, ID={group_id}")
                     # 通知客户端刷新群组列表
                     self.notify_group_members(group_id, "chat", f"{username} 创建了群组 {group_name}", from_user="系统")
@@ -25,13 +25,15 @@ class GroupHandler:
                         if username in self.server.client_map:
                             # 发送全部群组列表，而非仅新创建的群组
                             groups = self.server.db.get_user_groups(username)
-                            send_message(self.server.client_map[username], "list_groups",
-                                         json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
+                            list_sock = self.server.client_map[username]
+                    if list_sock:
+                        self.server.guarded_send(list_sock, "list_groups",
+                                     json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
                 else:
-                    send_message(ssock, "error", "群组创建失败，可能已存在")
+                    self.server.guarded_send(ssock, "error", "群组创建失败，可能已存在")
                     logging.error(f"用户 {username} 创建群组失败: {group_name}")
             except Exception as e:
-                send_message(ssock, "error", f"创建群组失败: {str(e)}")
+                self.server.guarded_send(ssock, "error", f"创建群组失败: {str(e)}")
                 logging.error(f"用户 {username} 创建群组失败: {str(e)}")
 
         elif msg_type == "join_group":
@@ -41,26 +43,29 @@ class GroupHandler:
                     cursor = conn.cursor()
                     cursor.execute('SELECT 1 FROM groups WHERE id = ?', (group_id,))
                     if not cursor.fetchone():
-                        send_message(ssock, "error", f"群组 {group_id} 不存在")
+                        self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
                         logging.error(f"用户 {username} 尝试加入不存在的群组: {group_id}")
                         return
                 if not self.server.db.is_group_member(group_id, username):
                     self.server.db.join_group(group_id, username)
-                    send_message(ssock, "chat", f"已加入群组 {group_id}")
+                    self.server.guarded_send(ssock, "chat", f"已加入群组 {group_id}")
                     logging.info(f"用户 {username} 加入群组: {group_id}")
                     # 通知客户端刷新群组列表
+                    list_sock = None
                     with self.server.client_map_lock:
                         if username in self.server.client_map:
                             groups = self.server.db.get_user_groups(username)
-                            send_message(self.server.client_map[username], "list_groups", json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
+                            list_sock = self.server.client_map[username]
+                    if list_sock:
+                        self.server.guarded_send(list_sock, "list_groups", json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
                 else:
-                    send_message(ssock, "error", "您已在群组中")
+                    self.server.guarded_send(ssock, "error", "您已在群组中")
                     logging.warning(f"用户 {username} 尝试重复加入群组: {group_id}")
             except ValueError:
-                send_message(ssock, "error", "无效的群组ID")
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
                 logging.error(f"用户 {username} 提供无效的群组ID: {data.decode('utf-8')}")
             except Exception as e:
-                send_message(ssock, "error", f"加入群组失败: {str(e)}")
+                self.server.guarded_send(ssock, "error", f"加入群组失败: {str(e)}")
                 logging.error(f"用户 {username} 加入群组失败: {str(e)}")
 
         if msg_type == "leave_group":
@@ -72,15 +77,15 @@ class GroupHandler:
                     cursor.execute('SELECT group_name FROM groups WHERE id = ?', (group_id,))
                     group_row = cursor.fetchone()
                     if not group_row:
-                        send_message(ssock, "error", f"群组 {group_id} 不存在")
+                        self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
                         logging.error(f"用户 {username} 离开群组失败: 群组 {group_id} 不存在")
                         return
                 if not self.server.db.is_group_member(group_id, username):
-                    send_message(ssock, "error", f"群组 {group_id} 不存在或您不在此群组中")
+                    self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在或您不在此群组中")
                     logging.warning(f"用户 {username} 离开群组失败: 不在群组 {group_id} 中")
                     return
                 self.server.db.leave_group(group_id, username)
-                send_message(ssock, "chat", f"已退出群组 {group_row[0]} (ID:{group_id})")
+                self.server.guarded_send(ssock, "chat", f"已退出群组 {group_row[0]} (ID:{group_id})")
                 self.notify_group_members(group_id, "chat",
                                           f"{username} 已退出群组 {group_id}",
                                           from_user="系统",
@@ -91,10 +96,10 @@ class GroupHandler:
                     self.server.db.delete_group(group_id)
                     logging.info(f"群组 {group_id} ({group_row[0]}) 已无成员，已删除群组及历史")
             except ValueError:
-                send_message(ssock, "error", "无效的群组 ID")
+                self.server.guarded_send(ssock, "error", "无效的群组 ID")
                 logging.error(f"用户 {username} 离开群组失败: 无效的 group_id")
             except Exception as e:
-                send_message(ssock, "error", f"离开群组失败: {str(e)}")
+                self.server.guarded_send(ssock, "error", f"离开群组失败: {str(e)}")
                 logging.error(f"用户 {username} 离开群组失败: {str(e)}")
 
         if msg_type == "group_chat":
@@ -107,12 +112,12 @@ class GroupHandler:
                     cursor = conn.cursor()
                     cursor.execute('SELECT 1 FROM groups WHERE id = ?', (group_id,))
                     if not cursor.fetchone():
-                        send_message(ssock, "error", f"群组 {group_id} 不存在")
+                        self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
                         logging.error(f"用户 {username} 尝试发送消息到不存在的群组: {group_id}")
                         return
 
                 if not self.server.db.is_group_member(group_id, username):
-                    send_message(ssock, "error", "您不在此群组中")
+                    self.server.guarded_send(ssock, "error", "您不在此群组中")
                     logging.warning(f"用户 {username} 尝试发送消息到未加入的群组: {group_id}")
                     return
 
@@ -146,15 +151,15 @@ class GroupHandler:
                 logging.info(f"群组消息: 用户={username}, 群组ID={group_id}, 消息ID={original_message_id}")
 
             except ValueError:
-                send_message(ssock, "error", "无效的群组ID")
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
                 logging.error(f"用户 {username} 提供无效的群组ID: {header.get('group_id')}")
             except Exception as e:
-                send_message(ssock, "error", f"发送群组消息失败: {str(e)}")
+                self.server.guarded_send(ssock, "error", f"发送群组消息失败: {str(e)}")
                 logging.error(f"用户 {username} 发送群组消息失败: {str(e)}")
 
         elif msg_type == "list_groups":
             groups = self.server.db.get_user_groups(username)
-            send_message(ssock, "list_groups", json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
+            self.server.guarded_send(ssock, "list_groups", json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
             logging.info(f"发送群组列表给用户: {username}")
 
         elif msg_type == "list_group_members":
@@ -162,22 +167,22 @@ class GroupHandler:
             try:
                 group_id = int(group_id_str)
             except (ValueError, TypeError):
-                send_message(ssock, "error", "无效的群组 ID")
+                self.server.guarded_send(ssock, "error", "无效的群组 ID")
                 logging.error(f"用户 {username} 查询群成员失败: 无效的 group_id {group_id_str}")
                 return
             with self.server.db._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('SELECT 1 FROM groups WHERE id = ?', (group_id,))
                 if not cursor.fetchone():
-                    send_message(ssock, "error", f"群组 {group_id} 不存在")
+                    self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
                     logging.error(f"用户 {username} 查询群成员失败: 群组 {group_id} 不存在")
                     return
             if not self.server.db.is_group_member(group_id, username):
-                send_message(ssock, "error", f"群组 {group_id} 不存在或您不在此群组中")
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在或您不在此群组中")
                 logging.warning(f"用户 {username} 查询群成员失败: 不在群组 {group_id} 中")
                 return
             members = self.server.db.get_group_members(group_id)
-            send_message(ssock, "admin_response", json.dumps(members),
+            self.server.guarded_send(ssock, "admin_response", json.dumps(members),
                          extra_headers={"response_type": "list_group_members",
                                         "group_id": str(group_id)})
             logging.info(f"发送群成员列表: 用户={username}, 群组={group_id}, 成员={members}")
@@ -188,26 +193,35 @@ class GroupHandler:
             group_id = header.get("group_id")
             file_request = self.server.db.get_group_file_request(message_id)
             if not file_request:
-                send_message(ssock, "error", f"群组文件请求 {message_id} 不存在")
+                self.server.guarded_send(ssock, "error", f"群组文件请求 {message_id} 不存在")
                 logging.warning(f"群组文件响应失败: 消息ID={message_id} 不存在")
                 return
-            group_id_db, sender, filename, filesize, file_data = file_request
+            group_id_db, sender, filename, filesize, file_data, file_path = file_request
             if int(group_id) != group_id_db:
-                send_message(ssock, "error", "无效的群组ID")
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
                 logging.warning(f"群组文件响应失败: 用户 {username} 提供无效的群组ID {group_id}")
                 return
             if not self.server.db.is_group_member(group_id, username):
-                send_message(ssock, "error", "您不在此群组中")
+                self.server.guarded_send(ssock, "error", "您不在此群组中")
                 logging.warning(f"群组文件响应失败: 用户 {username} 不在群组 {group_id} 中")
                 return
             self.server.db.save_group_file_response(message_id, group_id, username, response)
             if response == "accept":
-                self.server.db.save_offline_message(sender, username, "file", file_data, filename=filename, message_id=message_id)
-                self.server.db.save_message_history(sender, username, "file", file_data, filename=filename, message_id=message_id)
+                # 大文件：把待处理文件转入历史区（原子 rename），DB 存路径
+                history_path = (self.server.db.promote_file_to_history(file_path, message_id)
+                                if file_path else None)
+                if history_path:
+                    file_data = b''
+                self.server.db.save_offline_message(sender, username, "file", file_data, filename=filename, message_id=message_id, file_path=history_path)
+                self.server.db.save_message_history(sender, username, "file", file_data, filename=filename, message_id=message_id, file_path=history_path)
                 if self.server.client_map.get(username):
                     try:
-                        send_message(self.server.client_map[username], "file", file_data,
-                                     extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id})
+                        if history_path:
+                            send_file_message(self.server.client_map[username], "file", history_path,
+                                              extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id})
+                        else:
+                            self.server.guarded_send(self.server.client_map[username], "file", file_data,
+                                         extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id})
                         logging.info(f"群组文件已传输: {sender} -> {username}, 文件名={filename}, 消息ID={message_id}")
                     except Exception as e:
                         logging.error(f"传输群组文件失败: {sender} -> {username}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
@@ -239,7 +253,7 @@ class GroupHandler:
                     member_socket = self.server.client_map.get(member)
                 if member_socket:
                     try:
-                        send_message(member_socket, msg_type, message,
+                        self.server.guarded_send(member_socket, msg_type, message,
                                      extra_headers={"from": from_user, "group_id": str(group_id), **extra_headers})
                         logging.info(f"向 {member} 发送群组消息: 类型={msg_type}, 群组ID={group_id}")
                         # 在线成员已实时收到，标记 offline_messages 为 delivered 避免下次登录误计未读

@@ -427,6 +427,77 @@ void showDeleteFriendDialog(
 }
 
 // ============================================================
+// 修改密码对话框（阶段 G3）
+// ============================================================
+
+void showChangePasswordDialog(BuildContext context, SocketService service) {
+  final oldCtrl = TextEditingController();
+  final newCtrl = TextEditingController();
+  final confirmCtrl = TextEditingController();
+  showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('修改密码'),
+      content: SizedBox(
+        width: 320,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            RawTextField(
+              controller: oldCtrl,
+              hintText: '当前密码',
+              obscureText: true,
+              showVisibilityToggle: true,
+            ),
+            const SizedBox(height: 8),
+            RawTextField(
+              controller: newCtrl,
+              hintText: '新密码',
+              obscureText: true,
+              showVisibilityToggle: true,
+            ),
+            const SizedBox(height: 8),
+            RawTextField(
+              controller: confirmCtrl,
+              hintText: '确认新密码',
+              obscureText: true,
+              showVisibilityToggle: true,
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+        FilledButton(
+          onPressed: () {
+            final old = oldCtrl.text;
+            final newPw = newCtrl.text;
+            final confirm = confirmCtrl.text;
+            final valid = InputValidator.validatePassword(newPw);
+            if (!valid.valid) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(valid.error ?? '新密码不合法')),
+              );
+              return;
+            }
+            if (newPw != confirm) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('两次输入的新密码不一致')),
+              );
+              return;
+            }
+            service.changePassword(old, newPw);
+            Navigator.pop(ctx);
+          },
+          child: const Text('确认'),
+        ),
+      ],
+    ),
+  );
+}
+
+// ============================================================
 // 群组菜单对话框（阶段 F）
 // ============================================================
 

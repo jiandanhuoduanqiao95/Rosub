@@ -1,4 +1,14 @@
 [tool.pytest.ini_options]
+# pytest-asyncio：自动识别 async def 测试函数，无需逐个加 @pytest.mark.asyncio
+asyncio_mode = "auto"
+# 每个异步测试使用独立的 event loop 作用域，避免跨测试串扰
+asyncio_default_test_loop_scope = "function"
 markers = [
-    "e2e: end-to-end tests that require a real TCP server (slower)",
+    "e2e: 端到端测试，需要真实 TCP 服务器（较慢）",
+    "asyncio: pytest-asyncio 异步测试",
+    "guard: pytest-socket 守护测试，验证纯逻辑不触网",
+]
+# 过滤已知无害的告警，保持输出清爽
+filterwarnings = [
+    "ignore::pytest.PytestUnraisableExceptionWarning",
 ]

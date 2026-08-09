@@ -29,6 +29,13 @@ class AppConfig {
   /// 密码最小长度
   static const int passwordMinLen = 6;
 
+  /// 文件大小上限（字节），与服务端 file.max_file_size 对齐（默认 5GB，阶段 G4）
+  static const int maxFileSize = 5 * 1024 * 1024 * 1024;
+
+  /// 大文件直传阈值（字节），与服务端 file.large_file_threshold 对齐（默认 300MB）
+  /// 超过阈值：先探测对方在线，在线则直接流式传输（服务器不存储）
+  static const int largeFileThreshold = 300 * 1024 * 1024;
+
   /// 接收文件保存目录
   static const String receivedFilesDir = 'received_files';
 

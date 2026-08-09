@@ -42,12 +42,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _onStateChanged() {
-    if (mounted && !_state.isLoggedIn) {
-      // 被踢出或断开连接 → 返回登录
-      Navigator.of(context).pushReplacementNamed('/login');
-      return;
-    }
-    // 展示临时通知（操作确认、错误等），不进入系统消息会话
+    // 展示临时通知（操作确认、错误、强制下线提示等），先于登出跳转
     while (_state.noticeQueue.isNotEmpty) {
       final notice = _state.noticeQueue.first;
       _state.consumeNotice();
@@ -59,6 +54,11 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         );
       }
+    }
+    if (mounted && !_state.isLoggedIn) {
+      // 被踢出或断开连接 → 返回登录
+      Navigator.of(context).pushReplacementNamed('/login');
+      return;
     }
   }
 
@@ -140,6 +140,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _showAdminPanel() {
     showAdminPanel(context, widget.socketService, _state);
+  }
+
+  void _showChangePasswordDialog() {
+    showChangePasswordDialog(context, widget.socketService);
   }
 
   void _showDeleteFriendDialog(String username) {
@@ -240,6 +244,13 @@ class _ChatScreenState extends State<ChatScreen> {
                   onPressed: _showAdminPanel,
                 ),
 
+              // 修改密码（阶段 G3）
+              IconButton(
+                icon: const Icon(Icons.lock_outline_rounded),
+                tooltip: '修改密码',
+                onPressed: _showChangePasswordDialog,
+              ),
+
               // 退出
               IconButton(
                 icon: const Icon(Icons.logout),
@@ -324,6 +335,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               onLoadHistory: (beforeId) => _loadHistory(
                                   _state.currentChat!, beforeId),
                               hasMoreHistory: _state.hasMoreHistory,
+                              transferFraction: _state.transferFraction,
                             )
                           : const Center(
                               child: Column(

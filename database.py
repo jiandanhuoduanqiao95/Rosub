@@ -21,6 +21,53 @@ class Database:
         finally:
             conn.close()
 
+    # ---- 大文件磁盘存储（阶段 G）：文件内容不落 SQLite（BLOB 上限 ~1GB），存磁盘路径 ----
+
+    def _file_store_dir(self):
+        """文件存储根目录（位于数据库文件同级的 file_store 下，测试隔离）。"""
+        base = os.path.dirname(os.path.abspath(self.db_name))
+        d = os.path.join(base, "file_store")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _pending_dir(self):
+        d = os.path.join(self._file_store_dir(), "pending")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _history_dir(self):
+        d = os.path.join(self._file_store_dir(), "history")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _delete_disk_file(self, file_path):
+        if not file_path:
+            return
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except OSError as e:
+            logging.warning(f"删除磁盘文件失败: {file_path}, {e}")
+
+    def promote_file_to_history(self, file_path, message_id):
+        """把待处理（pending）文件转入历史区，返回历史路径。
+
+        使用原子 rename（同文件系统 O(1)），5GB 大文件无需复制；
+        目标已存在（如群文件多个成员接受）时直接删除来源并复用。
+        """
+        if not file_path or not os.path.exists(file_path):
+            return file_path
+        dest = os.path.join(self._history_dir(), os.path.basename(file_path))
+        try:
+            if os.path.exists(dest):
+                self._delete_disk_file(file_path)
+                return dest
+            os.rename(file_path, dest)
+            return dest
+        except OSError as e:
+            logging.warning(f"文件转入历史区失败: {file_path}, {e}")
+            return file_path
+
     def _init_db(self):
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -42,6 +89,7 @@ class Database:
                     message_type TEXT NOT NULL,
                     content BLOB NOT NULL,
                     filename TEXT,
+                    file_path TEXT,
                     status TEXT DEFAULT 'sent',
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -66,6 +114,7 @@ class Database:
                     filename TEXT NOT NULL,
                     filesize INTEGER NOT NULL,
                     content BLOB NOT NULL,
+                    file_path TEXT,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (sender) REFERENCES users(username),
                     FOREIGN KEY (receiver) REFERENCES users(username)
@@ -99,6 +148,7 @@ class Database:
                     filename TEXT NOT NULL,
                     filesize INTEGER NOT NULL,
                     content BLOB NOT NULL,
+                    file_path TEXT,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (group_id) REFERENCES groups(id),
                     FOREIGN KEY (sender) REFERENCES users(username)
@@ -126,6 +176,7 @@ class Database:
                     message_type TEXT NOT NULL,
                     content BLOB NOT NULL,
                     filename TEXT,
+                    file_path TEXT,
                     group_id INTEGER,
                     status TEXT DEFAULT 'sent',
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -138,6 +189,15 @@ class Database:
             except sqlite3.OperationalError:
                 cursor.execute("ALTER TABLE message_history ADD COLUMN status TEXT DEFAULT 'sent'")
                 logging.info("message_history 表已迁移：新增 status 列")
+
+            # 迁移：为各表添加 file_path 列（阶段 G 大文件磁盘存储）
+            for table in ("file_requests", "group_file_requests",
+                          "offline_messages", "message_history"):
+                try:
+                    cursor.execute(f"SELECT file_path FROM {table} LIMIT 1")
+                except sqlite3.OperationalError:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN file_path TEXT")
+                    logging.info(f"{table} 表已迁移：新增 file_path 列")
 
             conn.commit()
 
@@ -164,6 +224,24 @@ class Database:
             conn.commit()
             return cursor.rowcount > 0
 
+    def update_password(self, username, old_hash, new_hash):
+        """修改用户密码（阶段 G2）。
+
+        old_hash 必须与数据库当前存储哈希按字节相等，匹配才允许替换。
+        返回 True 表示替换成功；用户不存在或哈希不匹配返回 False。
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT password_hash FROM users WHERE username = ?', (username,))
+            row = cursor.fetchone()
+            if not row or row[0] != old_hash:
+                return False
+            cursor.execute('''
+                UPDATE users SET password_hash = ? WHERE username = ?
+            ''', (new_hash, username))
+            conn.commit()
+            return cursor.rowcount > 0
+
     def get_user(self, username):
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -175,14 +253,14 @@ class Database:
     def user_exists(self, username):
         return self.get_user(username) is not None
 
-    def save_offline_message(self, sender, receiver, message_type, content, filename=None, message_id=None):
+    def save_offline_message(self, sender, receiver, message_type, content, filename=None, message_id=None, file_path=None):
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO offline_messages (message_id, sender, receiver, message_type, content, filename, status)
-                    VALUES (?, ?, ?, ?, ?, ?, 'sent')
-                ''', (message_id, sender, receiver, message_type, content, filename))
+                    INSERT INTO offline_messages (message_id, sender, receiver, message_type, content, filename, file_path, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'sent')
+                ''', (message_id, sender, receiver, message_type, content, filename, file_path))
                 conn.commit()
                 logging.info(f"已保存离线消息：{sender} -> {receiver}, 类型={message_type}, 消息ID={message_id}")
         except Exception as e:
@@ -191,17 +269,19 @@ class Database:
     def get_offline_messages(self, receiver):
         """获取用户的聊天消息（未读 + 最近已读历史）。
 
-        返回 status='sent'（未读）和 status='delivered'（已读历史）的消息，
-        按时间戳升序返回，限制 500 条。已读历史通过 fetch_history 上滑加载更早的。
+        返回 status='sent'（未读）的消息；status='delivered'（已读历史）的
+        chat 消息也返回（作为最近消息保留，更早的通过 fetch_history 拉取）。
+        已读的 file 消息不重复下发：否则每次登录/重连都会重发并覆写
+        received_files 中的文件。
         返回元组包含 timestamp 字段（最后一列）。
         """
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT sender, message_type, content, filename, message_id, status, receiver, timestamp
+                SELECT sender, message_type, content, filename, message_id, status, receiver, timestamp, file_path
                 FROM offline_messages
                 WHERE (receiver = ? OR (sender = ? AND receiver != ?))
-                  AND status IN ('sent', 'delivered')
+                  AND (status = 'sent' OR (status = 'delivered' AND message_type != 'file'))
                 ORDER BY timestamp ASC
                 LIMIT 500
             ''', (receiver, receiver, receiver))
@@ -243,6 +323,11 @@ class Database:
     def delete_user(self, username):
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute('SELECT file_path FROM file_requests WHERE sender = ? OR receiver = ?',
+                           (username, username))
+            private_paths = [r[0] for r in cursor.fetchall() if r[0]]
+            cursor.execute('SELECT file_path FROM group_file_requests WHERE sender = ?', (username,))
+            group_paths = [r[0] for r in cursor.fetchall() if r[0]]
             cursor.execute('DELETE FROM friends WHERE user1 = ? OR user2 = ?', (username, username))
             cursor.execute('DELETE FROM file_requests WHERE sender = ? OR receiver = ?', (username, username))
             cursor.execute('DELETE FROM group_members WHERE username = ?', (username,))
@@ -252,16 +337,18 @@ class Database:
             cursor.execute('DELETE FROM users WHERE username = ?', (username,))
             users_deleted = cursor.rowcount
             conn.commit()
+            for p in private_paths + group_paths:
+                self._delete_disk_file(p)
             return users_deleted > 0 or friends_deleted > 0
 
-    def save_file_request(self, sender, receiver, filename, filesize, content, message_id):
+    def save_file_request(self, sender, receiver, filename, filesize, content, message_id, file_path=None):
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO file_requests (message_id, sender, receiver, filename, filesize, content)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (message_id, sender, receiver, filename, filesize, content))
+                    INSERT INTO file_requests (message_id, sender, receiver, filename, filesize, content, file_path)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (message_id, sender, receiver, filename, filesize, content, file_path))
                 conn.commit()
                 logging.info(f"已保存文件请求：{sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}")
         except Exception as e:
@@ -271,7 +358,7 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT sender, receiver, filename, filesize, content
+                SELECT sender, receiver, filename, filesize, content, file_path
                 FROM file_requests
                 WHERE message_id = ?
             ''', (message_id,))
@@ -292,11 +379,16 @@ class Database:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
+                    SELECT file_path FROM file_requests WHERE message_id = ?
+                ''', (message_id,))
+                row = cursor.fetchone()
+                cursor.execute('''
                     DELETE FROM file_requests
                     WHERE message_id = ?
                 ''', (message_id,))
                 conn.commit()
                 if cursor.rowcount > 0:
+                    self._delete_disk_file(row[0] if row else None)
                     logging.info(f"文件请求已删除：消息ID={message_id}")
                     return True
                 else:
@@ -306,14 +398,14 @@ class Database:
             logging.error(f"文件请求删除失败: {e}")
             return False
 
-    def save_group_file_request(self, group_id, sender, filename, filesize, content, message_id):
+    def save_group_file_request(self, group_id, sender, filename, filesize, content, message_id, file_path=None):
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO group_file_requests (message_id, group_id, sender, filename, filesize, content)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (message_id, group_id, sender, filename, filesize, content))
+                    INSERT INTO group_file_requests (message_id, group_id, sender, filename, filesize, content, file_path)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (message_id, group_id, sender, filename, filesize, content, file_path))
                 conn.commit()
                 logging.info(f"已保存群组文件请求：群组ID={group_id}, 发送者={sender}, 文件名={filename}, 消息ID={message_id}")
                 return True
@@ -325,7 +417,7 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT group_id, sender, filename, filesize, content
+                SELECT group_id, sender, filename, filesize, content, file_path
                 FROM group_file_requests
                 WHERE message_id = ?
             ''', (message_id,))
@@ -348,6 +440,10 @@ class Database:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
+                    SELECT file_path FROM group_file_requests WHERE message_id = ?
+                ''', (message_id,))
+                row = cursor.fetchone()
+                cursor.execute('''
                     DELETE FROM group_file_requests
                     WHERE message_id = ?
                 ''', (message_id,))
@@ -357,6 +453,7 @@ class Database:
                 ''', (message_id,))
                 conn.commit()
                 if cursor.rowcount > 0:
+                    self._delete_disk_file(row[0] if row else None)
                     logging.info(f"群组文件请求已删除：消息ID={message_id}")
                     return True
                 else:
@@ -649,16 +746,16 @@ class Database:
             return cursor.rowcount > 0
 
     def save_message_history(self, sender, receiver, message_type, content,
-                             filename=None, group_id=None, message_id=None):
+                             filename=None, group_id=None, message_id=None, file_path=None):
         """保存一条消息到 message_history 表（永久存储）"""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT OR IGNORE INTO message_history
-                        (message_id, sender, receiver, message_type, content, filename, group_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (message_id, sender, receiver, message_type, content, filename, group_id))
+                        (message_id, sender, receiver, message_type, content, filename, group_id, file_path)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (message_id, sender, receiver, message_type, content, filename, group_id, file_path))
                 conn.commit()
                 if cursor.rowcount > 0:
                     logging.info(f"消息已保存到历史: 类型={message_type}, 消息ID={message_id}")
@@ -799,11 +896,16 @@ class Database:
     # ============================================================
 
     def cleanup_expired_file_requests(self, expire_days=7):
-        """清理过期的文件请求（私聊和群组），默认清理 7 天前的记录。"""
+        """清理过期的文件请求（私聊和群组），默认清理 7 天前的记录，连带删除磁盘文件。"""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 # 清理过期私聊文件请求
+                cursor.execute('''
+                    SELECT file_path FROM file_requests
+                    WHERE timestamp <= datetime('now', '-' || ? || ' days')
+                ''', (expire_days,))
+                private_paths = [r[0] for r in cursor.fetchall() if r[0]]
                 cursor.execute('''
                     DELETE FROM file_requests
                     WHERE timestamp <= datetime('now', '-' || ? || ' days')
@@ -811,6 +913,11 @@ class Database:
                 private_deleted = cursor.rowcount
 
                 # 清理过期群组文件请求及其响应
+                cursor.execute('''
+                    SELECT file_path FROM group_file_requests
+                    WHERE timestamp <= datetime('now', '-' || ? || ' days')
+                ''', (expire_days,))
+                group_paths = [r[0] for r in cursor.fetchall() if r[0]]
                 cursor.execute('''
                     DELETE FROM group_file_responses
                     WHERE message_id IN (
@@ -825,6 +932,8 @@ class Database:
                 group_deleted = cursor.rowcount
 
                 conn.commit()
+                for p in private_paths + group_paths:
+                    self._delete_disk_file(p)
                 total = private_deleted + group_deleted
                 logging.info(f"清理过期文件请求: 私聊={private_deleted}, 群组={group_deleted}, 合计={total}")
                 return total
@@ -873,10 +982,12 @@ class Database:
             return False
 
     def delete_group(self, group_id):
-        """删除群组及其所有关联数据（成员、历史、离线消息、文件请求、响应）。"""
+        """删除群组及其所有关联数据（成员、历史、离线消息、文件请求、响应），连带磁盘文件。"""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
+                cursor.execute("SELECT file_path FROM group_file_requests WHERE group_id = ?", (group_id,))
+                paths = [r[0] for r in cursor.fetchall() if r[0]]
                 cursor.execute("DELETE FROM group_file_responses WHERE group_id = ?", (group_id,))
                 cursor.execute("DELETE FROM group_file_requests WHERE group_id = ?", (group_id,))
                 cursor.execute("DELETE FROM message_history WHERE group_id = ?", (group_id,))
@@ -889,6 +1000,8 @@ class Database:
                     (f'%"group_id": {group_id}}}',))
                 cursor.execute("DELETE FROM groups WHERE id = ?", (group_id,))
                 conn.commit()
+                for p in paths:
+                    self._delete_disk_file(p)
                 logging.info(f"群组 {group_id} 已删除（含历史、离线消息和文件请求）")
                 return True
         except sqlite3.Error as e:

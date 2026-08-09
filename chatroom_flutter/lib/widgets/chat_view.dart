@@ -21,6 +21,7 @@ class ChatView extends StatefulWidget {
   final ValueChanged<String> onRecall;
   final Future<void> Function(String? beforeMessageId) onLoadHistory;
   final bool Function(String key) hasMoreHistory;
+  final double? Function(String messageId)? transferFraction;
 
   const ChatView({
     super.key,
@@ -35,6 +36,7 @@ class ChatView extends StatefulWidget {
     required this.onRecall,
     required this.onLoadHistory,
     required this.hasMoreHistory,
+    this.transferFraction,
   });
 
   @override
@@ -170,6 +172,9 @@ class _ChatViewState extends State<ChatView> {
                                   msg.sender != widget.username
                               ? null
                               : () => widget.onRecall(msg.messageId),
+                          transferFraction: msg.type == 'file'
+                              ? widget.transferFraction?.call(msg.messageId)
+                              : null,
                         );
                       },
                     ),
@@ -309,11 +314,13 @@ class _MessageBubble extends StatelessWidget {
   final ChatMessage message;
   final bool isSelf;
   final VoidCallback? onRecall; // null 表示不可撤回
+  final double? transferFraction; // 传输进度 0~1；null 表示无传输（阶段 G 可视化）
 
   const _MessageBubble({
     required this.message,
     required this.isSelf,
     this.onRecall,
+    this.transferFraction,
   });
 
   @override
@@ -380,15 +387,20 @@ class _MessageBubble extends StatelessWidget {
                         : const Radius.circular(18),
                   ),
                 ),
-                child: isRecalled
-                    ? Text(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (isRecalled)
+                      Text(
                         '${message.sender}: [消息已撤回]',
                         style: TextStyle(
                           color: Colors.grey[500],
                           fontStyle: FontStyle.italic,
                         ),
                       )
-                    : Text(
+                    else
+                      Text(
                         message.type == 'system'
                             ? message.content
                             : message.content,
@@ -398,6 +410,54 @@ class _MessageBubble extends StatelessWidget {
                               : Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                       ),
+                    // 文件传输进度条（阶段 G：传输可视化，非模态局部刷新）
+                    // 进度条颜色与气泡底色刻意区分：
+                    //   自己的气泡（primary 底）→ 白色进度条
+                    //   对方的气泡（浅色底）→ primary 色进度条
+                    if (transferFraction != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: SizedBox(
+                          width: 160,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(3),
+                                child: LinearProgressIndicator(
+                                  value: transferFraction,
+                                  minHeight: 5,
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    isSelf
+                                        ? Colors.white
+                                        : Theme.of(context)
+                                            .colorScheme
+                                            .primary,
+                                  ),
+                                  backgroundColor: isSelf
+                                      ? Colors.white.withValues(alpha: 0.35)
+                                      : Theme.of(context)
+                                          .colorScheme
+                                          .outlineVariant,
+                                ),
+                              ),
+                              const SizedBox(height: 3),
+                              Text(
+                                '${(transferFraction! * 100).round()}%',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: isSelf
+                                      ? Colors.white.withValues(alpha: 0.9)
+                                      : Colors.grey[600],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ],
           ),
