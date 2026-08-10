@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import '../config.dart';
 import '../widgets/raw_text_field.dart';
 import '../models/chat_models.dart';
+import '../services/session_store.dart';
 import '../services/socket_service.dart';
 import 'chat_screen.dart';
 
@@ -36,6 +37,25 @@ class _LoginScreenState extends State<LoginScreen> {
       if (mounted && _usernameFocus.context != null) {
         _usernameFocus.requestFocus();
       }
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _initSession();
+  }
+
+  /// 读取已保存的 session（H3，记住我）：启动时自动回填用户名/密码，不自动登录。
+  /// 安全：管理员密钥不持久化，启动时**不**自动开启管理员模式、不回填密钥，
+  /// 需管理员每次手动输入（密钥仅内存中用于重连，退出/重启后即消失）。
+  Future<void> _initSession() async {
+    final session = await SessionStore.load();
+    if (session == null || !mounted) return;
+    setState(() {
+      _usernameCtrl.text = session.username;
+      _passwordCtrl.text = session.password;
+      _error = null;
     });
   }
 
@@ -110,6 +130,13 @@ class _LoginScreenState extends State<LoginScreen> {
       _refocusUsername();
       _socketService.disconnect();
     } else {
+      // 登录成功：持久化 session（H3，记住我），下次启动回填用户名/密码。
+      // 安全：管理员密钥不写入 session（不落盘），仅保留在内存中用于断线重连。
+      await SessionStore.save(StoredSession(
+        username: username,
+        password: password,
+      ));
+      if (!mounted) return;
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(
           builder: (_) => ChatScreen(socketService: _socketService),

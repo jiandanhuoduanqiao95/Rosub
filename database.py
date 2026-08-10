@@ -842,12 +842,29 @@ class Database:
                     ''', (user, user, limit, offset))
             return cursor.fetchall()
 
-    def search_message_history(self, user, keyword, with_user=None, limit=50):
-        """按关键字搜索历史消息（在 content 中做 LIKE 匹配）"""
+    def search_message_history(self, user, keyword, with_user=None, group_id=None,
+                               limit=50):
+        """按关键字搜索历史消息（在 content 中做 LIKE 匹配）。
+
+        范围（互斥，group_id 优先）：
+        - group_id：群聊消息（群组内全部历史，与 fetch_history 的 group 分支一致）
+        - with_user：与指定用户的私聊（双向）
+        - 缺省：该用户参与的全部消息（全局）
+        """
         with self._get_connection() as conn:
             cursor = conn.cursor()
             like_pattern = f"%{keyword}%"
-            if with_user is not None:
+            if group_id is not None:
+                cursor.execute('''
+                    SELECT sender, receiver, message_type, content, message_id,
+                           filename, timestamp, group_id, status
+                    FROM message_history
+                    WHERE group_id = ?
+                      AND CAST(content AS TEXT) LIKE ?
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT ?
+                ''', (group_id, like_pattern, limit))
+            elif with_user is not None:
                 cursor.execute('''
                     SELECT sender, receiver, message_type, content, message_id,
                            filename, timestamp, group_id, status

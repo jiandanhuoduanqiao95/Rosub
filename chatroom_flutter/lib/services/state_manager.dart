@@ -77,6 +77,39 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ---- 消息搜索状态（阶段 H5）----
+  // 按会话隔离（key = 用户名 / group_N），与 _messages / _messageMap 相互独立，
+  // 不计未读。搜索模式由 SocketService 收到 search_response 后写入。
+  final Map<String, List<ChatMessage>> _searchResults = {};
+  final Map<String, String> _searchQueries = {};
+
+  /// 某会话的搜索结果；未设置返回空列表
+  List<ChatMessage> searchResults(String chatKey) =>
+      _searchResults[chatKey] ?? const [];
+
+  /// 是否处于搜索模式（存在搜索结果）
+  bool isSearchMode(String chatKey) => _searchResults.containsKey(chatKey);
+
+  /// 搜索关键字；未设置返回空串
+  String searchQueryOf(String chatKey) => _searchQueries[chatKey] ?? '';
+
+  /// 设置/替换搜索结果（可携带关键字）
+  void setSearchResults(String chatKey, List<ChatMessage> msgs,
+      {String query = ''}) {
+    _searchResults[chatKey] = List.of(msgs);
+    _searchQueries[chatKey] = query;
+    notifyListeners();
+  }
+
+  /// 退出搜索模式（清除结果与关键字）
+  void clearSearchResults(String chatKey) {
+    final removedResults = _searchResults.remove(chatKey) != null;
+    final removedQuery = _searchQueries.remove(chatKey) != null;
+    if (removedResults || removedQuery) {
+      notifyListeners();
+    }
+  }
+
   // ---- 文件传输进度（阶段 G：传输可视化）----
   final Map<String, TransferProgress> _transfers = {};
 
@@ -166,6 +199,8 @@ class AppState extends ChangeNotifier {
     _unreadCount.clear();
     _noMoreHistory.clear();
     _transfers.clear();
+    _searchResults.clear();
+    _searchQueries.clear();
     _currentChat = null;
     _noticeQueue.clear();
     _log('已断开连接');
@@ -206,6 +241,8 @@ class AppState extends ChangeNotifier {
     _friends.remove(friend);
     _messages.remove(friend);
     _unreadCount.remove(friend);
+    _searchResults.remove(friend);
+    _searchQueries.remove(friend);
     if (_currentChat == friend) _currentChat = null;
     notifyListeners();
   }
@@ -223,6 +260,8 @@ class AppState extends ChangeNotifier {
     _messages.remove(key);
     _unreadCount.remove(key);
     _noMoreHistory.remove(key);
+    _searchResults.remove(key);
+    _searchQueries.remove(key);
     if (_currentChat == key) _currentChat = null;
     notifyListeners();
   }

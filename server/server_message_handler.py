@@ -560,6 +560,46 @@ class MessageHandler:
                              extra_headers={"to": with_user or "", "group_id": group_id or ""})
                 logging.info(f"历史消息拉取: 用户={username}, 会话={with_user or group_id}, 返回={len(batch)}条")
 
+            elif msg_type == "search_history":
+                # 消息搜索（阶段 H5）
+                # header: keyword（必填）/ to（可选私聊限定）/ group_id（可选群聊限定）
+                #         / limit（可选，默认 50）
+                # 服务端返回最新在前（timestamp DESC, id DESC），客户端负责翻转展示顺序
+                keyword = (header.get("keyword") or "").strip()
+                if not keyword:
+                    self.server.guarded_send(ssock, "error", "搜索关键字不能为空")
+                    logging.warning(f"搜索失败: 用户={username}, 缺少搜索关键字")
+                    continue
+                with_user = header.get("to")
+                group_id = header.get("group_id")
+                limit = header.get("limit", "50")
+                try:
+                    limit_int = int(limit)
+                except (ValueError, TypeError):
+                    limit_int = 50
+                rows = self.server.db.search_message_history(
+                    username, keyword, with_user=with_user, group_id=group_id,
+                    limit=limit_int)
+                batch = []
+                for r in rows:
+                    sender, receiver, mtype, content, mid, fname, ts, gid, mstatus = r
+                    try:
+                        text = content.decode('utf-8') if isinstance(content, bytes) else str(content)
+                    except Exception:
+                        text = ""
+                    batch.append({
+                        "sender": sender, "type": mtype, "content": text,
+                        "message_id": mid, "filename": fname, "timestamp": ts,
+                        "group_id": gid, "status": mstatus or "sent",
+                    })
+                self.server.guarded_send(ssock, "search_response", json.dumps(batch),
+                             extra_headers={"to": with_user or "",
+                                            "group_id": group_id or "",
+                                            "keyword": keyword})
+                logging.info(f"消息搜索: 用户={username}, 关键字={keyword}, "
+                             f"会话={with_user or group_id or '全局'}, "
+                             f"返回={len(batch)}条")
+
             elif msg_type == "accept_friend":
                 requester = header.get("from")
                 if not self.server.db.has_pending_request(requester, username):

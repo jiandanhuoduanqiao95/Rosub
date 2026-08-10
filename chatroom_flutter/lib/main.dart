@@ -6,7 +6,9 @@
 import 'package:flutter/material.dart';
 
 import 'screens/login_screen.dart';
+import 'services/focus_tracker.dart';
 import 'services/ime_bridge.dart';
+import 'services/taskbar_notifier.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -25,12 +27,21 @@ class _ChatroomAppState extends State<ChatroomApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // 窗口重新聚焦时清除任务栏闪烁（类微信：点击窗口后停止闪烁）
+    FocusTracker.instance.addListener(_onFocusChanged);
   }
 
   @override
   void dispose() {
+    FocusTracker.instance.removeListener(_onFocusChanged);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  void _onFocusChanged() {
+    if (FocusTracker.instance.focused) {
+      TaskbarNotifier.clearUrgency();
+    }
   }
 
   @override
@@ -39,6 +50,9 @@ class _ChatroomAppState extends State<ChatroomApp> with WidgetsBindingObserver {
       // 应用即将退出，清理 IME 桥接进程，避免窗口残留
       ImeBridgeManager.instance.shutdown();
     }
+    // 窗口焦点检测（阶段 H1）：resumed = 聚焦，inactive/paused = 失焦。
+    // 任务栏闪烁（H2）仅在未聚焦时触发。
+    FocusTracker.instance.updateFocus(state == AppLifecycleState.resumed);
   }
 
   @override

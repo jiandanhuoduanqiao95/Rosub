@@ -22,6 +22,10 @@ class ChatView extends StatefulWidget {
   final Future<void> Function(String? beforeMessageId) onLoadHistory;
   final bool Function(String key) hasMoreHistory;
   final double? Function(String messageId)? transferFraction;
+  final bool isSearchMode; // 是否处于搜索模式（阶段 H5）
+  final String searchQuery; // 搜索关键字
+  final ValueChanged<String> onSearch; // 提交搜索
+  final VoidCallback onSearchExit; // 退出搜索模式
 
   const ChatView({
     super.key,
@@ -37,7 +41,14 @@ class ChatView extends StatefulWidget {
     required this.onLoadHistory,
     required this.hasMoreHistory,
     this.transferFraction,
+    this.isSearchMode = false,
+    this.searchQuery = '',
+    this.onSearch = _noopSearch,
+    this.onSearchExit = _noopExit,
   });
+
+  static void _noopSearch(String _) {}
+  static void _noopExit() {}
 
   @override
   State<ChatView> createState() => _ChatViewState();
@@ -45,7 +56,21 @@ class ChatView extends StatefulWidget {
 
 class _ChatViewState extends State<ChatView> {
   final ScrollController _scrollCtrl = ScrollController();
+  final TextEditingController _searchCtrl = TextEditingController();
   bool _isLoadingHistory = false;
+  bool _searchInputVisible = false;
+
+  /// 搜索入口私聊/群聊会话提供（服务端 search_history 支持 to / group_id 范围）；
+  /// 系统消息会话（'服务器'，只读）不提供搜索入口
+  bool get _canSearch => widget.chatKey != '服务器';
+
+  /// 提交搜索（空关键字不触发回调）
+  void _submitSearch(String keyword) {
+    final kw = keyword.trim();
+    if (kw.isEmpty) return;
+    widget.onSearch(kw);
+    setState(() => _searchInputVisible = false);
+  }
 
   @override
   void initState() {
@@ -57,6 +82,7 @@ class _ChatViewState extends State<ChatView> {
   void dispose() {
     _scrollCtrl.removeListener(_onScroll);
     _scrollCtrl.dispose();
+    _searchCtrl.dispose();
     super.dispose();
   }
 
@@ -127,19 +153,73 @@ class _ChatViewState extends State<ChatView> {
               const SizedBox(width: 12),
               Expanded(
                 child: Text(
-                  widget.chatKey.startsWith('group_') ||
-                          widget.chatKey == '服务器'
-                      ? widget.chatTitle
-                      : '与 ${widget.chatTitle} 的聊天',
+                  widget.isSearchMode
+                      ? '搜索：${widget.searchQuery}'
+                      : (widget.chatKey.startsWith('group_') ||
+                              widget.chatKey == '服务器'
+                          ? widget.chatTitle
+                          : '与 ${widget.chatTitle} 的聊天'),
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
                         fontWeight: FontWeight.bold,
                       ),
                 ),
               ),
+              // 搜索模式：返回按钮；非搜索模式：搜索入口（仅私聊会话）
+              if (widget.isSearchMode)
+                IconButton(
+                  icon: const Icon(Icons.arrow_back_rounded),
+                  tooltip: '退出搜索',
+                  onPressed: widget.onSearchExit,
+                )
+              else if (_canSearch)
+                IconButton(
+                  icon: const Icon(Icons.search_rounded),
+                  tooltip: '搜索消息',
+                  onPressed: () =>
+                      setState(() => _searchInputVisible = true),
+                ),
             ],
           ),
         ),
+
+        // 搜索输入栏（点击搜索按钮后展开，阶段 H5）
+        if (_searchInputVisible)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerLow,
+              border: Border(
+                bottom: BorderSide(
+                    color: Theme.of(context).colorScheme.outlineVariant),
+              ),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: RawTextField(
+                    key: const ValueKey('search_field'),
+                    controller: _searchCtrl,
+                    hintText: '搜索历史消息...',
+                    showChineseInput: true,
+                    onSubmitted: _submitSearch,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.search_rounded),
+                  tooltip: '搜索',
+                  onPressed: () => _submitSearch(_searchCtrl.text),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close_rounded),
+                  tooltip: '关闭搜索',
+                  onPressed: () =>
+                      setState(() => _searchInputVisible = false),
+                ),
+              ],
+            ),
+          ),
 
         // 消息列表
         Expanded(
@@ -155,7 +235,7 @@ class _ChatViewState extends State<ChatView> {
                       ),
                       const SizedBox(height: 12),
                       Text(
-                        '暂无消息',
+                        widget.isSearchMode ? '无搜索结果' : '暂无消息',
                         style: TextStyle(
                           color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
@@ -230,8 +310,10 @@ class _ChatViewState extends State<ChatView> {
                 ),
         ),
 
-        // 输入栏
-        if (widget.canSend)
+        // 输入栏（搜索模式下隐藏，阶段 H5）
+        if (widget.isSearchMode)
+          const SizedBox.shrink()
+        else if (widget.canSend)
           _InputBar(
             inputCtrl: widget.inputCtrl,
             onSend: widget.onSend,

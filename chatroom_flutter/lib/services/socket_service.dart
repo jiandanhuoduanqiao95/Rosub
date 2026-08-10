@@ -16,6 +16,7 @@ import 'package:dart_protocol/protocol.dart';
 
 import '../config.dart';
 import '../models/chat_models.dart';
+import 'taskbar_notifier.dart';
 import 'state_manager.dart';
 
 class SocketService {
@@ -939,9 +940,25 @@ class SocketService {
     );
   }
 
+  /// 任务栏闪烁（阶段 H2，类微信）：新消息到达时交给 TaskbarNotifier
+  /// 判定是否闪烁。文件/公告气泡使用 delivered 状态，但提醒语义为"新到达"，
+  /// 统一以 sent 判定。
+  void _notifyIncoming(ChatMessage msg, String chatKey) {
+    TaskbarNotifier.maybeFlashForMessage(
+      ChatMessage(
+        sender: msg.sender,
+        content: msg.content,
+        type: msg.type,
+        messageId: msg.messageId,
+        status: 'sent',
+        filename: msg.filename,
+      ),
+      chatKey,
+    );
+  }
+
   /// 处理收到的消息
-  void _handleMessage(Map<String, dynamic> header, Uint8List body) {
-    final type = header['type'] as String?;
+  void _handleMessage(Map<String, dynamic> header, Uint8List body) {    final type = header['type'] as String?;
     final from = header['from'] as String?;
     final messageId = header['message_id'] as String? ?? _generateMessageId();
     final isHistory = header['history'] == 'true';
@@ -958,16 +975,16 @@ class SocketService {
         if (isSystemSender) {
           if (sender == '[系统公告]') {
             // 管理员公告 → 进入系统消息会话
-            state.addMessage(
-              '服务器',
-              ChatMessage(
-                sender: sender,
-                content: text,
-                type: 'system',
-                messageId: messageId,
-                status: 'delivered',
-              ),
+            final msg = ChatMessage(
+              sender: sender,
+              content: text,
+              type: 'system',
+              messageId: messageId,
+              status: 'delivered',
             );
+            state.addMessage('服务器', msg);
+            // 桌面通知（阶段 H2）：未聚焦窗口时通知系统公告
+            _notifyIncoming(msg, '服务器');
           } else {
             // 其他系统消息（操作确认、离线提示等）→ SnackBar 通知
             state.showNotice(text);
@@ -984,16 +1001,16 @@ class SocketService {
           }
         } else {
           // 好友私聊
-          state.addMessage(
-            sender,
-            ChatMessage(
-              sender: sender,
-              content: text,
-              type: 'chat',
-              messageId: messageId,
-              status: 'sent',
-            ),
+          final msg = ChatMessage(
+            sender: sender,
+            content: text,
+            type: 'chat',
+            messageId: messageId,
+            status: 'sent',
           );
+          state.addMessage(sender, msg);
+          // 桌面通知（阶段 H2）：未聚焦窗口时通知新私聊消息
+          _notifyIncoming(msg, sender);
           // 自动发送回执
           if (from != null && !isHistory) {
             _sendReceipt(messageId, from);
@@ -1010,6 +1027,18 @@ class SocketService {
             filename: header['filename'] as String? ?? 'file',
             filesize: int.tryParse(header['filesize'] as String? ?? '0') ?? 0,
           ));
+          // 桌面通知（阶段 H2）：未聚焦窗口时通知收到文件请求
+          _notifyIncoming(
+            ChatMessage(
+              sender: from,
+              content: '[文件请求] ${header['filename'] as String? ?? 'file'}',
+              type: 'file_request',
+              messageId: messageId,
+              status: 'sent',
+              filename: header['filename'] as String?,
+            ),
+            from,
+          );
         }
         break;
 
@@ -1017,18 +1046,18 @@ class SocketService {
       case 'file':
         final filename = header['filename'] as String? ?? 'received_file';
         final sender = from ?? '未知';
-        state.addMessage(
-          sender,
-          ChatMessage(
-            sender: sender,
-            content: '[收到文件] $filename',
-            type: 'file',
-            messageId: messageId,
-            filename: filename,
-            fileData: body,
-            status: 'delivered',
-          ),
+        final msg = ChatMessage(
+          sender: sender,
+          content: '[收到文件] $filename',
+          type: 'file',
+          messageId: messageId,
+          filename: filename,
+          fileData: body,
+          status: 'delivered',
         );
+        state.addMessage(sender, msg);
+        // 桌面通知（阶段 H2）：未聚焦窗口时通知收到文件
+        _notifyIncoming(msg, sender);
         // 保存文件到本地
         _saveReceivedFile(filename, body);
         break;
@@ -1060,17 +1089,17 @@ class SocketService {
         final chatKey = groupId != null ? 'group_$groupId' : (from ?? '群组');
         final text = utf8.decode(body);
         final sender = from ?? '未知';
-        state.addMessage(
-          chatKey,
-          ChatMessage(
-            sender: sender,
-            content: text,
-            type: 'group_chat',
-            messageId: messageId,
-            status: 'sent',
-            groupId: groupId != null ? int.tryParse(groupId) : null,
-          ),
+        final msg = ChatMessage(
+          sender: sender,
+          content: text,
+          type: 'group_chat',
+          messageId: messageId,
+          status: 'sent',
+          groupId: groupId != null ? int.tryParse(groupId) : null,
         );
+        state.addMessage(chatKey, msg);
+        // 桌面通知（阶段 H2）：未聚焦窗口时通知群聊消息
+        _notifyIncoming(msg, chatKey);
         break;
 
       // ---- 群文件请求 ----
@@ -1082,9 +1111,23 @@ class SocketService {
               messageId: messageId,
               sender: from,
               filename: header['filename'] as String? ?? 'file',
-              filesize: int.tryParse(header['filesize'] as String? ?? '0') ?? 0,
+              filesize:
+                  int.tryParse(header['filesize'] as String? ?? '0') ?? 0,
               groupId: groupId != null ? int.tryParse(groupId) : null,
             ));
+            // 桌面通知（阶段 H2）：未聚焦窗口时通知收到群文件请求
+            _notifyIncoming(
+              ChatMessage(
+                sender: from,
+                content:
+                    '[群文件请求] ${header['filename'] as String? ?? 'file'}',
+                type: 'group_file_request',
+                messageId: messageId,
+                status: 'sent',
+                filename: header['filename'] as String?,
+              ),
+              groupId != null ? 'group_$groupId' : from,
+            );
           }
         }
         break;
@@ -1174,6 +1217,51 @@ class SocketService {
           }
         } catch (e) {
           state.log('解析历史消息失败: $e');
+        }
+        break;
+
+      // ---- 消息搜索响应（阶段 H5）----
+      case 'search_response':
+        final withUser = header['to'] as String?;
+        final groupId = header['group_id'] as String?;
+        final keyword = header['keyword'] as String? ?? '';
+        final chatKey = (groupId != null && groupId.isNotEmpty)
+            ? 'group_$groupId'
+            : ((withUser != null && withUser.isNotEmpty) ? withUser : null);
+        if (chatKey == null) break;
+        try {
+          final List<dynamic> batch = jsonDecode(utf8.decode(body));
+          final msgs = <ChatMessage>[];
+          for (final item in batch) {
+            final m = item as Map<String, dynamic>;
+            final tsStr = m['timestamp'] as String?;
+            DateTime? ts;
+            if (tsStr != null) {
+              try {
+                // DB 存储的是 UTC 时间（YYYY-MM-DD HH:MM:SS），
+                // 加 Z 后缀解析为 UTC，再转本地时间
+                ts = DateTime.parse('${tsStr.trim()}Z').toLocal();
+              } catch (_) {}
+            }
+            msgs.add(ChatMessage(
+              sender: m['sender'] as String? ?? '',
+              content: m['content'] as String? ?? '',
+              type: m['type'] as String? ?? 'chat',
+              messageId: m['message_id'] as String? ?? _generateMessageId(),
+              filename: m['filename'] as String?,
+              groupId: m['group_id'] != null
+                  ? (m['group_id'] as num).toInt()
+                  : null,
+              timestamp: ts,
+              isHistory: true,
+              status: m['status'] as String? ?? 'delivered',
+            ));
+          }
+          // 服务端按时间倒序返回（最新在前），聊天展示需旧→新，翻转后写入
+          state.setSearchResults(chatKey, msgs.reversed.toList(),
+              query: keyword);
+        } catch (e) {
+          state.log('解析搜索结果失败: $e');
         }
         break;
 
@@ -1614,6 +1702,26 @@ class SocketService {
       await _sendMessage('fetch_history', '', extraHeaders: extra);
     } catch (e) {
       state.log('拉取历史消息失败: $e');
+    }
+  }
+
+  /// 搜索历史消息（阶段 H5）
+  /// [to] 私聊对方用户名（可选，缺省全局搜索）
+  /// [groupId] 群组 ID（可选，群聊范围搜索）
+  /// [limit] 返回数量上限，默认 50
+  Future<void> searchHistory(String keyword,
+      {String? to, int? groupId, int limit = 50}) async {
+    if (_socket == null) return;
+    final extra = <String, String>{
+      'keyword': keyword,
+      'limit': limit.toString(),
+    };
+    if (to != null) extra['to'] = to;
+    if (groupId != null) extra['group_id'] = groupId.toString();
+    try {
+      await _sendMessage('search_history', '', extraHeaders: extra);
+    } catch (e) {
+      state.log('搜索消息失败: $e');
     }
   }
 

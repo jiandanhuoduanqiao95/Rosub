@@ -23,4 +23,10 @@ add_definitions(-DAPPLICATION_ID="${APPLICATION_ID}")
 target_link_libraries(${BINARY_NAME} PRIVATE flutter)
 target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::GTK)
 
+# 导出运行时可查找符号（阶段 H1/H2 任务栏闪烁）：
+# Dart 经 DynamicLibrary.process()（dlopen(NULL) + dlsym）查找 chatroom_set_urgency，
+# 可执行文件默认不把自身符号加入 .dynsym 动态符号表，导致查找失败、闪烁静默失效。
+# --export-dynamic 将全局符号导出，Dart 侧才能经 FFI 调用 GTK urgency 桥接。
+target_link_libraries(${BINARY_NAME} PRIVATE "-Wl,--export-dynamic")
+
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")

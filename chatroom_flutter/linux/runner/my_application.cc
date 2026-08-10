@@ -14,6 +14,38 @@ struct _MyApplication {
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 
+// 主窗口句柄（供任务栏闪烁等窗口级操作使用）
+static GtkWindow* g_app_window = nullptr;
+
+// 任务栏紧急提示（图标闪烁，类微信未读提醒）：由 Dart 经
+// DynamicLibrary.process() 调用，urgent=1 闪烁 / 0 清除。
+// - extern "C"：保持 C 符号名，Dart lookupFunction 按名查找
+// - used：release 构建 -ffunction-sections --gc-sections 下防止被裁剪
+// - visibility("default")：配合 CMake 的 --export-dynamic 确保进入 .dynsym
+// - g_idle_add 转发：Dart UI isolate 线程 ≠ GTK 主线程，GTK 调用必须
+//   在主循环线程执行（g_idle_add 线程安全），避免跨线程 GDK 访问竞态。
+struct _UrgencyData {
+  GtkWindow* win;
+  gboolean urgent;
+};
+
+static gboolean apply_urgency_cb(gpointer user_data) {
+  auto* d = static_cast<_UrgencyData*>(user_data);
+  if (d->win != nullptr) {
+    gtk_window_set_urgency_hint(d->win, d->urgent);
+  }
+  g_free(d);
+  return G_SOURCE_REMOVE;
+}
+
+extern "C" __attribute__((used, visibility("default")))
+void chatroom_set_urgency(int urgent) {
+  auto* d = g_new(_UrgencyData, 1);
+  d->win = g_app_window;
+  d->urgent = urgent != 0;
+  g_idle_add(apply_urgency_cb, d);
+}
+
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
@@ -24,6 +56,7 @@ static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
+  g_app_window = window;
 
   // Use a header bar when running in GNOME as this is the common style used
   // by applications and is the setup most users will be using (e.g. Ubuntu

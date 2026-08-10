@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../models/chat_models.dart';
 import '../services/ime_bridge.dart';
+import '../services/session_store.dart';
 import '../services/socket_service.dart';
 import '../services/state_manager.dart';
 import '../widgets/chat_view.dart';
@@ -110,6 +111,28 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// 发起消息搜索（阶段 H5）：私聊限定会话，群聊按 group_id；系统会话无搜索入口
+  void _runSearch(String keyword) {
+    final current = _state.currentChat;
+    if (current == null || current == '服务器') return;
+    if (current.startsWith('group_')) {
+      final groupId = int.tryParse(current.substring(6));
+      if (groupId != null) {
+        widget.socketService.searchHistory(keyword, groupId: groupId);
+      }
+    } else {
+      widget.socketService.searchHistory(keyword, to: current);
+    }
+  }
+
+  /// 退出搜索模式（阶段 H5）
+  void _exitSearch() {
+    final current = _state.currentChat;
+    if (current != null) {
+      _state.clearSearchResults(current);
+    }
+  }
+
   /// 选中会话时，仅当会话无消息时触发首次历史加载（阶段 E6）
   /// 已有消息（如离线消息）不重复加载，上滑加载由 ScrollController 负责
   void _maybeLoadInitialHistory(String chatKey) {
@@ -169,6 +192,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _logout() {
     widget.socketService.disconnect();
+    // 退出登录：清除 session（H3/H4 修复），否则登录页 _initSession
+    // 会读取残留 session 立即自动登录，把用户拉回聊天页导致无法退出
+    SessionStore.clear();
     if (mounted) {
       Navigator.of(context).pushReplacementNamed('/login');
     }
@@ -321,9 +347,11 @@ class _ChatScreenState extends State<ChatScreen> {
                       child: _state.currentChat != null
                           ? ChatView(
                               chatKey: _state.currentChat!,
-                              chatTitle:
-                                  _state.displayNameForChat(_state.currentChat!),
-                              messages: _state.getMessages(_state.currentChat!),
+                              chatTitle: _state
+                                  .displayNameForChat(_state.currentChat!),
+                              messages: _state.isSearchMode(_state.currentChat!)
+                                  ? _state.searchResults(_state.currentChat!)
+                                  : _state.getMessages(_state.currentChat!),
                               username: _state.username!,
                               inputCtrl: _inputCtrl,
                               canSend: _state.currentChat != '服务器' &&
@@ -336,6 +364,12 @@ class _ChatScreenState extends State<ChatScreen> {
                                   _state.currentChat!, beforeId),
                               hasMoreHistory: _state.hasMoreHistory,
                               transferFraction: _state.transferFraction,
+                              isSearchMode:
+                                  _state.isSearchMode(_state.currentChat!),
+                              searchQuery:
+                                  _state.searchQueryOf(_state.currentChat!),
+                              onSearch: _runSearch,
+                              onSearchExit: _exitSearch,
                             )
                           : const Center(
                               child: Column(

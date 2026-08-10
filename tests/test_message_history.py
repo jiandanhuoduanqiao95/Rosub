@@ -392,6 +392,48 @@ class TestMessageHistorySearch:
         )
         assert len(results) == 3
 
+    def test_search_within_group(self, db):
+        """
+        【MH-20】按群组范围搜索
+
+        场景：群组 1 有 2 条 Python 相关消息、群组 2 有 1 条，
+        限定 group_id=1 时只返回群组 1 的 2 条，且不混入私聊匹配。
+        """
+        _create_users(db, "alice", "bob")
+        _save_group_msg(db, "bob", 1, "Python in group 1")
+        _save_group_msg(db, "alice", 1, "group 1 Python again")
+        _save_group_msg(db, "bob", 2, "Python in group 2")
+        _save_chat_msg(db, "alice", "bob", "Python private chat")
+
+        results = db.search_message_history(
+            user="alice", keyword="Python", group_id=1
+        )
+        assert len(results) == 2, f"实际: {[r[3] for r in results]}"
+        contents = {r[3] for r in results}
+        assert contents == {b"Python in group 1", b"group 1 Python again"}
+
+    def test_search_system_announcement_scope(self, db):
+        """
+        【MH-22】系统公告在全局搜索可命中，但私聊限定搜索不命中
+
+        公告以 sender='[系统公告]', receiver=用户 入库：
+        - 全局搜索（sender=用户 OR receiver=用户）→ 命中（接收者匹配）
+        - 私聊限定 to=bob → 不命中（公告非与 bob 的往来消息）
+        注：客户端全局搜索结果无 to/group_id 回显时会被丢弃，系统会话无搜索入口。
+        """
+        _create_users(db, "alice", "bob")
+        db.save_message_history(
+            "[系统公告]", "alice", "chat",
+            "维护公告：今晚升级".encode("utf-8"), message_id=str(uuid.uuid4()))
+
+        global_results = db.search_message_history(user="alice", keyword="升级")
+        assert len(global_results) == 1
+        assert global_results[0][0] == "[系统公告]"
+
+        private_results = db.search_message_history(
+            user="alice", keyword="升级", with_user="bob")
+        assert private_results == []
+
 
 # ============================================================
 # 第 5 组：边界与防御测试
