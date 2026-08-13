@@ -182,6 +182,17 @@ class Database:
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS conversations (
+                    username TEXT NOT NULL,
+                    peer_key TEXT NOT NULL,
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    muted INTEGER NOT NULL DEFAULT 0,
+                    draft TEXT NOT NULL DEFAULT '',
+                    cleared_at TEXT,
+                    PRIMARY KEY (username, peer_key)
+                )
+            ''')
 
             # 迁移：为旧版 message_history 表添加 status 列
             try:
@@ -660,6 +671,26 @@ class Database:
             ''', (message_id,))
             return cursor.fetchone()
 
+    def message_id_exists(self, message_id, sender=None):
+        """判断消息是否已写入永久历史（阶段 I：重发幂等去重）。
+
+        客户端断线补发/手动重试会复用原 message_id，若消息此前已被服务端
+        接收并入库（即便客户端认为发送失败），此处判定为重复 → 服务端跳过，
+        避免"已送达消息被二次下发"。message_history 为永久表，不受
+        offline_messages 清理影响。可选限定 sender，防止不同用户 message_id 撞车。
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if sender is None:
+                cursor.execute(
+                    "SELECT 1 FROM message_history WHERE message_id = ?",
+                    (message_id,))
+            else:
+                cursor.execute(
+                    "SELECT 1 FROM message_history WHERE message_id = ? AND sender = ?",
+                    (message_id, sender))
+            return cursor.fetchone() is not None
+
     def create_group(self, group_name, creator):
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -1023,4 +1054,108 @@ class Database:
                 return True
         except sqlite3.Error as e:
             logging.error(f"删除群组 {group_id} 失败: {e}")
+            return False
+
+    # ============================================================
+    # conversations 会话元数据表（阶段 I：P0-8）
+    # 支撑会话置顶/静音/草稿/清空标记；主键 (username, peer_key)，
+    # peer_key 为好友用户名或 'group_N'。
+    # ============================================================
+
+    def upsert_conversation(self, username, peer_key, pinned=None, muted=None,
+                            draft=None, cleared_at=None):
+        """插入或更新会话元数据（仅更新传入的非 None 字段，部分更新语义）。
+
+        pinned/muted 传 True/False 均可（0/1 归一）；
+        cleared_at 传 None 表示不清空（保持原值），传 '' 表示清除（回 NULL）。
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT 1 FROM conversations WHERE username=? AND peer_key=?",
+                    (username, peer_key))
+                exists = cursor.fetchone() is not None
+                if not exists:
+                    cursor.execute(
+                        "INSERT INTO conversations "
+                        "(username, peer_key, pinned, muted, draft, cleared_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (username, peer_key,
+                         1 if pinned else 0,
+                         1 if muted else 0,
+                         draft if draft is not None else "",
+                         cleared_at or None))
+                else:
+                    sets = []
+                    params = []
+                    if pinned is not None:
+                        sets.append("pinned = ?")
+                        params.append(1 if pinned else 0)
+                    if muted is not None:
+                        sets.append("muted = ?")
+                        params.append(1 if muted else 0)
+                    if draft is not None:
+                        sets.append("draft = ?")
+                        params.append(draft)
+                    if cleared_at is not None:
+                        sets.append("cleared_at = ?")
+                        params.append(cleared_at or None)
+                    if sets:
+                        params.extend([username, peer_key])
+                        cursor.execute(
+                            f"UPDATE conversations SET {', '.join(sets)} "
+                            "WHERE username=? AND peer_key=?",
+                            params)
+                conn.commit()
+                return True
+        except sqlite3.Error as e:
+            logging.error(f"upsert 会话元数据失败: {username}/{peer_key}, {e}")
+            return False
+
+    @staticmethod
+    def _conversation_row(row):
+        return {
+            "username": row[0],
+            "peer_key": row[1],
+            "pinned": bool(row[2]),
+            "muted": bool(row[3]),
+            "draft": row[4] or "",
+            "cleared_at": row[5],
+        }
+
+    def get_conversation(self, username, peer_key):
+        """查询单个会话元数据；不存在返回 None。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT username, peer_key, pinned, muted, draft, cleared_at "
+                "FROM conversations WHERE username=? AND peer_key=?",
+                (username, peer_key))
+            row = cursor.fetchone()
+        return self._conversation_row(row) if row else None
+
+    def get_conversations(self, username):
+        """查询该用户全部会话元数据（无会话返回空列表）。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT username, peer_key, pinned, muted, draft, cleared_at "
+                "FROM conversations WHERE username=?",
+                (username,))
+            rows = cursor.fetchall()
+        return [self._conversation_row(r) for r in rows]
+
+    def reset_conversation(self, username, peer_key):
+        """删除会话元数据行（CRUD 的 D）；不存在返回 False。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "DELETE FROM conversations WHERE username=? AND peer_key=?",
+                    (username, peer_key))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"删除会话元数据失败: {username}/{peer_key}, {e}")
             return False

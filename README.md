@@ -1,6 +1,6 @@
 # 聊天室 —— 基于 TCP+SSL 的 C/S 即时通讯系统
 
-> 版本 5.0.0 | 2026-08-11
+> 版本 6.0.0 | 2026-08-13
 
 ---
 
@@ -14,7 +14,7 @@
   - tkinter 图形界面 —— 保留作为功能参照（`client/gui/`）
 - **协议**: 自定义二进制协议（4 字节头长度 + JSON 头 + 消息体，v1.0.0 已冻结）
 - **认证**: bcrypt 密码哈希 + 管理员二次密钥
-- **测试**: pytest 344 个（pytest-xdist 并行）+ Flutter widget 测试 408 个 + Dart 协议 42 个
+- **测试**: pytest 410 个（pytest-xdist 并行）+ Flutter widget 测试 480 个 + Dart 协议 42 个
 
 ---
 
@@ -205,7 +205,7 @@ chatroom/
 阶段 G：安全加固 + 文件改进    ← ✅ 已完成
 阶段 H：提醒 + Session + 搜索 ← ✅ 已完成（任务栏闪烁/记住我/消息搜索）
     ↓
-阶段 I：消息可靠性 + 数据地基  ← ⏳ 规划中（发送队列/conversations 表/备份恢复）
+阶段 I：消息可靠性 + 数据地基  ← ✅ 已完成（发送队列/conversations 表/备份恢复）
 阶段 J：身份与社交            ← ⏳ 规划中（资料/在线状态/密码重置/黑名单）
 阶段 K：会话体验              ← ⏳ 规划中（置顶/草稿/静音/提示音/编辑/引用/转发/反应）
 阶段 L：多端前置              ← ⏳ 规划中（多会话并存/钥匙串/本地缓存）
@@ -277,14 +277,14 @@ chatroom/
 ## 测试体系
 
 ```bash
-./run_tests.sh --all          # 全部 344 个测试（pytest-xdist 并行 ~40s）
+./run_tests.sh --all          # 全部 410 个测试（pytest-xdist 并行 ~40s）
 ./run_tests.sh --quick        # 快速测试（跳过 E2E/异步/状态机）
 ./run_tests.sh --db           # 仅数据库（含阶段 F 扩展）
 ./run_tests.sh --e2e          # 仅端到端（含异步 E2E）
 ./run_tests.sh --no-parallel  # 串行执行
 ```
 
-> 注：下表为阶段 F 快照（283 个）；最新计数 344 个（Python）+ 42 个（Dart）+ 408 个（Flutter）= 794 项，
+> 注：下表为阶段 F 快照（283 个）；最新计数 410 个（Python）+ 42 个（Dart）+ 480 个（Flutter）= 932 项，
 > 逐文件明细见 `TESTING_GUIDE_FLUTTER.md` §3。
 
 | 层 | 文件 | 数量 | 覆盖内容 |
@@ -302,7 +302,7 @@ chatroom/
 | 守护测试 | `test_socket_guard.py` | 8 | pytest-socket 纯逻辑不触网 |
 | 后端集成 | `test_backend_integration.py` | 7 | 运行时路径验证 |
 
-Flutter 测试（408 个）：
+Flutter 测试（480 个）：
 
 ```bash
 cd chatroom_flutter
@@ -320,7 +320,7 @@ flutter test integration_test/chatroom_app_test.dart -d linux   # 集成绑定
 | 服务端 | Python 3.12 |
 | 客户端 | Flutter (Dart) / tkinter (保留) |
 | 网络 | TCP socket + SSL/TLS |
-| 数据库 | SQLite3（9 张表） |
+| 数据库 | SQLite3（10 张表，含阶段 I conversations） |
 | 密码 | bcrypt |
 | 配置 | config.yaml + PyYAML |
 | 测试 | pytest 9.x / flutter_test / mocktail / integration_test |
@@ -329,6 +329,15 @@ flutter test integration_test/chatroom_app_test.dart -d linux   # 集成绑定
 ---
 
 ## 变更日志
+
+### v6.0.0 (2026-08-13)
+
+- **阶段 I：消息可靠性 + 数据地基完成**
+  - 发送队列：断线可输入、消息入队暂存（"发送中…"气泡）、重连自动补发、失败气泡手动重试
+  - `conversations` 会话元数据表（pinned/muted/draft/cleared_at，旧库自动迁移）
+  - 一键备份/恢复（`backup/` 包：SQLite `.backup` 在线快照 + 目录打包）
+  - 可靠性：重发幂等去重（服务端按 message_id）、瞬时异常不杀连接、群聊回显 id 无损还原
+  - 测试：Python 410 + Dart 42 + Flutter 480 = 932 项全绿；手动测试见 `TESTING_GUIDE.md` §23
 
 ### v5.0.0 (2026-08-11)
 

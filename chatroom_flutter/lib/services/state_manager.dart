@@ -141,6 +141,111 @@ class AppState extends ChangeNotifier {
     return p != null && !p.done;
   }
 
+  // ---- 本地发送队列（阶段 I1：pending 队列 + 失败重试）----
+  // 断线/发送失败的消息进入此队列（status='sending'），重连后自动补发；
+  // 发送成功出队（sent），失败保留并标记 failed，重试复位 sending。
+  final List<PendingMessage> _pendingMessages = [];
+  UnmodifiableListView<PendingMessage> get pendingMessages =>
+      UnmodifiableListView(_pendingMessages);
+  int get pendingCount => _pendingMessages.length;
+
+  /// 入队（同 messageId 去重：更新条目内容，保留原顺序）
+  void enqueuePendingMessage(String chatKey, ChatMessage message) {
+    final idx = _pendingMessages
+        .indexWhere((e) => e.message.messageId == message.messageId);
+    if (idx != -1) {
+      _pendingMessages[idx] =
+          PendingMessage(chatKey: chatKey, message: message);
+    } else {
+      _pendingMessages.add(PendingMessage(chatKey: chatKey, message: message));
+    }
+    notifyListeners();
+  }
+
+  /// 发送成功：出队并将会话内消息状态置为 sent；不存在返回 false
+  bool markPendingSent(String messageId) {
+    final before = _pendingMessages.length;
+    _pendingMessages.removeWhere((e) => e.message.messageId == messageId);
+    final msg = _messageMap[messageId];
+    if (msg != null) msg.status = 'sent';
+    if (_pendingMessages.length != before || msg != null) {
+      notifyListeners();
+    }
+    return _pendingMessages.length != before;
+  }
+
+  /// 发送失败：保留在队列并标记 failed（待重试）；不在队列返回 false
+  bool markPendingFailed(String messageId) {
+    final entry = _pendingEntry(messageId);
+    if (entry == null) return false;
+    entry.message.status = 'failed';
+    _messageMap[messageId]?.status = 'failed';
+    notifyListeners();
+    return true;
+  }
+
+  /// 重试在途：保留在队列并复位为 sending；不在队列返回 false
+  bool markPendingSending(String messageId) {
+    final entry = _pendingEntry(messageId);
+    if (entry == null) return false;
+    entry.message.status = 'sending';
+    _messageMap[messageId]?.status = 'sending';
+    notifyListeners();
+    return true;
+  }
+
+  PendingMessage? _pendingEntry(String messageId) {
+    for (final e in _pendingMessages) {
+      if (e.message.messageId == messageId) return e;
+    }
+    return null;
+  }
+
+  /// 从补发队列移除条目（消息已确认送达/已入库时调用）；存在则返回 true
+  bool removePendingMessage(String messageId) {
+    final before = _pendingMessages.length;
+    _pendingMessages.removeWhere((e) => e.message.messageId == messageId);
+    if (_pendingMessages.length != before) notifyListeners();
+    return _pendingMessages.length != before;
+  }
+
+  // ---- 会话元数据（阶段 I2：pinned/muted/draft/clearedAt）----
+  // 客户端状态镜像；服务端 conversations 表同步在后续阶段接入。
+  final Map<String, ConversationMeta> _conversationMeta = {};
+
+  /// 某会话的元数据；未设置返回 null
+  ConversationMeta? conversationMetaOf(String chatKey) =>
+      _conversationMeta[chatKey];
+
+  bool isPinned(String chatKey) => _conversationMeta[chatKey]?.pinned ?? false;
+  bool isMuted(String chatKey) => _conversationMeta[chatKey]?.muted ?? false;
+  String draftOf(String chatKey) => _conversationMeta[chatKey]?.draft ?? '';
+  DateTime? clearedAtOf(String chatKey) =>
+      _conversationMeta[chatKey]?.clearedAt;
+
+  void setConversationPinned(String chatKey, bool pinned) {
+    _setConversationMeta(chatKey, (m) => m.copyWith(pinned: pinned));
+  }
+
+  void setConversationMuted(String chatKey, bool muted) {
+    _setConversationMeta(chatKey, (m) => m.copyWith(muted: muted));
+  }
+
+  void setConversationDraft(String chatKey, String draft) {
+    _setConversationMeta(chatKey, (m) => m.copyWith(draft: draft));
+  }
+
+  void setConversationClearedAt(String chatKey, DateTime? clearedAt) {
+    _setConversationMeta(chatKey, (m) => m.copyWith(clearedAt: clearedAt));
+  }
+
+  void _setConversationMeta(
+      String chatKey, ConversationMeta Function(ConversationMeta) update) {
+    final current = _conversationMeta[chatKey] ?? const ConversationMeta();
+    _conversationMeta[chatKey] = update(current);
+    notifyListeners();
+  }
+
   // ---- 状态日志 ----
   final List<String> _statusLog = [];
   UnmodifiableListView<String> get statusLog =>
@@ -201,6 +306,8 @@ class AppState extends ChangeNotifier {
     _transfers.clear();
     _searchResults.clear();
     _searchQueries.clear();
+    _pendingMessages.clear();
+    _conversationMeta.clear();
     _currentChat = null;
     _noticeQueue.clear();
     _log('已断开连接');
@@ -300,11 +407,16 @@ class AppState extends ChangeNotifier {
 
   /// 添加一条消息到对应会话
   void addMessage(String chatKey, ChatMessage msg) {
+    // 阶段 I1 修复：同 messageId 的服务端回显（登录/重连的离线历史推送）
+    // 证明该消息已入库——若此前因"发送异常"误入补发队列，这里直接出队，
+    // 重连 flush 不再重发已送达的消息
+    if (msg.messageId.isNotEmpty) {
+      removePendingMessage(msg.messageId);
+    }
     // 按 messageId 去重：自己发的群聊/私聊消息会被服务器回显，
     // 已存在的消息仅更新状态（sent → delivered），不重复添加。
     // 空 messageId 不做去重：不同消息不得因空 id 被合并丢失
-    if (msg.messageId.isNotEmpty &&
-        _messageMap.containsKey(msg.messageId)) {
+    if (msg.messageId.isNotEmpty && _messageMap.containsKey(msg.messageId)) {
       _messageMap[msg.messageId]!.status = msg.status;
       notifyListeners();
       return;
@@ -350,6 +462,13 @@ class AppState extends ChangeNotifier {
     if (msg != null) {
       msg.status = newStatus;
       notifyListeners();
+    }
+    // 阶段 I1：收到 delivered/recalled 说明消息已生效（回执/撤回路径），
+    // 无需再补发 → 自动出队
+    if (newStatus == 'delivered' || newStatus == 'recalled') {
+      final before = _pendingMessages.length;
+      _pendingMessages.removeWhere((e) => e.message.messageId == messageId);
+      if (_pendingMessages.length != before) notifyListeners();
     }
   }
 

@@ -26,6 +26,7 @@ class ChatView extends StatefulWidget {
   final String searchQuery; // 搜索关键字
   final ValueChanged<String> onSearch; // 提交搜索
   final VoidCallback onSearchExit; // 退出搜索模式
+  final ValueChanged<String>? onRetrySend; // 发送失败重试回调（阶段 I1）
 
   const ChatView({
     super.key,
@@ -45,6 +46,7 @@ class ChatView extends StatefulWidget {
     this.searchQuery = '',
     this.onSearch = _noopSearch,
     this.onSearchExit = _noopExit,
+    this.onRetrySend,
   });
 
   static void _noopSearch(String _) {}
@@ -263,6 +265,9 @@ class _ChatViewState extends State<ChatView> {
                           transferFraction: msg.type == 'file'
                               ? widget.transferFraction?.call(msg.messageId)
                               : null,
+                          onRetrySend: msg.sender == widget.username
+                              ? widget.onRetrySend
+                              : null,
                         );
                       },
                     ),
@@ -405,12 +410,14 @@ class _MessageBubble extends StatelessWidget {
   final bool isSelf;
   final VoidCallback? onRecall; // null 表示不可撤回
   final double? transferFraction; // 传输进度 0~1；null 表示无传输（阶段 G 可视化）
+  final ValueChanged<String>? onRetrySend; // 发送失败重试（阶段 I1）
 
   const _MessageBubble({
     required this.message,
     required this.isSelf,
     this.onRecall,
     this.transferFraction,
+    this.onRetrySend,
   });
 
   @override
@@ -425,11 +432,17 @@ class _MessageBubble extends StatelessWidget {
         ? Theme.of(context).colorScheme.primary
         : Theme.of(context).colorScheme.surfaceContainerHighest;
 
+    // 阶段 I1：自己发送失败的消息可点击重试（与长按撤回共存）。
+    // 文件消息不走文字发送队列（传输进度条承载状态），不提供重试交互。
+    final retryable = isSelf && message.isFailed && message.type != 'file';
     return MouseRegion(
       cursor: onRecall == null ? MouseCursor.defer : SystemMouseCursors.click,
       child: GestureDetector(
         onLongPress: onRecall,
         onSecondaryTap: onRecall,
+        onTap: retryable
+            ? () => onRetrySend?.call(message.messageId)
+            : null,
         child: Container(
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
@@ -498,6 +511,56 @@ class _MessageBubble extends StatelessWidget {
                           color: isSelf
                               ? Theme.of(context).colorScheme.onPrimary
                               : Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    // 阶段 I1：发送中/发送失败状态标记（仅自己的文字消息；
+                    // 文件消息由传输进度条承载，不显示）
+                    if (isSelf && message.isSending && message.type != 'file')
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const SizedBox(
+                              width: 10,
+                              height: 10,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              '发送中…',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.white.withValues(alpha: 0.85),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    if (isSelf &&
+                        message.isFailed &&
+                        message.type != 'file' &&
+                        onRetrySend == null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.error_outline_rounded,
+                              size: 13,
+                              color: Colors.white.withValues(alpha: 0.9),
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              '发送失败，点击重试',
+                              style: TextStyle(
+                                fontSize: 11,
+                                decoration: TextDecoration.underline,
+                                color: Colors.white.withValues(alpha: 0.9),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     // 文件传输进度条（阶段 G：传输可视化，非模态局部刷新）

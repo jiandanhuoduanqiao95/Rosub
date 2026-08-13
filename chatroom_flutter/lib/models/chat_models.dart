@@ -41,6 +41,12 @@ class ChatMessage {
   /// 是否已撤回
   bool get isRecalled => status == 'recalled';
 
+  /// 是否发送中（阶段 I1：本地 pending 队列在途状态）
+  bool get isSending => status == 'sending';
+
+  /// 是否发送失败（阶段 I1：待重试状态）
+  bool get isFailed => status == 'failed';
+
   /// 显示用的消息文本
   String get displayText {
     if (isRecalled) return '$sender: [消息已撤回]';
@@ -53,12 +59,58 @@ class ChatMessage {
   String get header {
     if (type == 'system') return '';
     final statusStr = switch (status) {
-      'sent' => '',
-      'delivered' => '',
-      'recalled' => '',
+      'sending' => '（发送中）',
+      'failed' => '（发送失败）',
       _ => '',
     };
     return '$sender $statusStr';
+  }
+}
+
+/// 待发送消息（阶段 I1：本地 pending 队列条目）
+///
+/// 断线/发送失败时消息先进入队列，重连成功后自动补发；
+/// [chatKey] 为会话 key（好友用户名 或 'group_N'），补发时据此定位目标。
+class PendingMessage {
+  final String chatKey;
+  final ChatMessage message;
+
+  const PendingMessage({required this.chatKey, required this.message});
+}
+
+/// 会话元数据（阶段 I2：conversations 表的客户端状态镜像）
+///
+/// 支撑会话置顶（K1）/ 逐会话草稿（K2）/ 静音（K3）/ 清空标记（K4）。
+class ConversationMeta {
+  final bool pinned;
+  final bool muted;
+  final String draft;
+  final DateTime? clearedAt;
+
+  const ConversationMeta({
+    this.pinned = false,
+    this.muted = false,
+    this.draft = '',
+    this.clearedAt,
+  });
+
+  static const Object _unset = Object();
+
+  /// 部分复制：未传入字段保持原值；clearedAt 传 null 可显式清除
+  ConversationMeta copyWith({
+    bool? pinned,
+    bool? muted,
+    String? draft,
+    Object? clearedAt = _unset,
+  }) {
+    return ConversationMeta(
+      pinned: pinned ?? this.pinned,
+      muted: muted ?? this.muted,
+      draft: draft ?? this.draft,
+      clearedAt: identical(clearedAt, _unset)
+          ? this.clearedAt
+          : clearedAt as DateTime?,
+    );
   }
 }
 

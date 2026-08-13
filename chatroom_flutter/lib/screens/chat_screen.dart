@@ -354,9 +354,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                   : _state.getMessages(_state.currentChat!),
                               username: _state.username!,
                               inputCtrl: _inputCtrl,
-                              canSend: _state.currentChat != '服务器' &&
-                                  _state.connectionStatus !=
-                                      ConnectionStatus.reconnecting,
+                              canSend: _state.currentChat != '服务器',
                               onSend: _sendMessage,
                               onSendFile: _sendFile,
                               onRecall: _confirmRecall,
@@ -370,6 +368,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                   _state.searchQueryOf(_state.currentChat!),
                               onSearch: _runSearch,
                               onSearchExit: _exitSearch,
+                              onRetrySend: (messageId) => widget
+                                  .socketService
+                                  .retryPendingMessage(messageId),
                             )
                           : const Center(
                               child: Column(

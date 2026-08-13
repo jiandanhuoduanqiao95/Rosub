@@ -46,6 +46,14 @@ class ImeBridgeManager {
   }
 
   Future<void> _startProcess() async {
+    // 测试环境（flutter test 设置 FLUTTER_TEST=true）：不启动真实子进程，
+    // 避免 Process.run 的异步定时器在 FakeAsync 下遗留（teardown 报 pending timer），
+    // 且测试中无需真实 GTK 输入法桥接。
+    if (Platform.environment['FLUTTER_TEST'] == 'true') {
+      _started = false;
+      _starting = null;
+      return;
+    }
     final script = _resolveBridgeScript();
     if (script == null) {
       debugPrint('[ime_bridge] 未找到 bridge/persistent_ime.py');

@@ -46,11 +46,11 @@ void main() {
       expect(err, '未连接到服务器');
     });
 
-    test('sendChat 未连接返回 false', () async {
+    test('sendChat 未连接且未登录返回 false（I1：已登录未连接时改为入队，见 stage_i 契约）', () async {
       expect(await service.sendChat('bob', 'hi'), isFalse);
     });
 
-    test('sendGroupChat 未连接返回 false', () async {
+    test('sendGroupChat 未连接且未登录返回 false（I1 同上）', () async {
       expect(await service.sendGroupChat(1, 'hi'), isFalse);
     });
 
@@ -63,11 +63,13 @@ void main() {
       expect(await service.changePassword('old', 'newpass123'), isFalse);
     });
 
-    test('无副作用：未连接时上述调用不改变任何状态', () async {
+    test('无副作用：未连接时其余调用不改变任何状态', () async {
+      // 注：sendChat/sendGroupChat 已不在本清单 —— 阶段 I1 起，
+      // 已登录未连接时二者会将消息入队 pending 并显示气泡
+      // （新契约见 socket_service_stage_i_test.dart）
       state.setLoggedIn('alice', false);
       final beforeFriends = state.friends.length;
       final beforeMsgs = state.messages.length;
-      await service.sendChat('bob', 'hi');
       await service.addFriend('bob');
       await service.acceptFriend('bob');
       await service.rejectFriend('bob');
@@ -88,8 +90,8 @@ void main() {
     });
 
     test('respondFileRequest 未连接时不清除本地待处理请求', () async {
-      state.addFileRequest(
-          FileRequest(messageId: 'f1', sender: 'bob', filename: 'a', filesize: 1));
+      state.addFileRequest(FileRequest(
+          messageId: 'f1', sender: 'bob', filename: 'a', filesize: 1));
       await service.respondFileRequest('f1', 'bob', true);
       expect(state.pendingFileRequests.length, 1,
           reason: '_socket 为 null 直接 return，不产生副作用');
@@ -122,7 +124,14 @@ void main() {
     });
 
     test('路径穿越攻击：.. 组合全部失效', () {
-      for (final f in ['../x', '..\\x', 'a/../x', 'a/../../x', '.../x', '.. /x']) {
+      for (final f in [
+        '../x',
+        '..\\x',
+        'a/../x',
+        'a/../../x',
+        '.../x',
+        '.. /x'
+      ]) {
         final r = SocketService.sanitizeFilename(f);
         expect(r.contains('/'), isFalse, reason: '$f -> $r');
         expect(r.contains(r'\'), isFalse, reason: '$f -> $r');

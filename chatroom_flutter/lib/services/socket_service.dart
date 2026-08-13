@@ -96,8 +96,7 @@ class SocketService {
       {bool isSend = false}) {
     final now = DateTime.now();
     final done = transferred >= total;
-    if (done ||
-        now.difference(_lastTransferNotify).inMilliseconds >= 100) {
+    if (done || now.difference(_lastTransferNotify).inMilliseconds >= 100) {
       _lastTransferNotify = now;
       try {
         state.updateTransfer(messageId, transferred, total, isSend: isSend);
@@ -331,6 +330,8 @@ class SocketService {
         _startListening();
         _startKeepalive();
         state.log('重连成功，已恢复连接');
+        // 阶段 I1：重连成功后自动补发本地 pending 队列（断线期间的消息）
+        unawaited(flushPendingQueue());
         return;
       } catch (e) {
         // 重连过程中异常（连接被拒、读写失败等）→ 继续退避重试
@@ -403,7 +404,8 @@ class SocketService {
         'password': _savedPassword!,
         'transfer': '1',
       };
-      await sendMessage(s, 'login', _savedUsername!, extraHeaders: extraHeaders);
+      await sendMessage(s, 'login', _savedUsername!,
+          extraHeaders: extraHeaders);
       final (header, _) = await recvMessage(_transferReader!, chunkSize: 65536);
       if (header == null || header['type'] == 'error') {
         _closeTransferSocket();
@@ -438,7 +440,8 @@ class SocketService {
           // 接收大文件：流式落盘（气泡 + 进度条宿主）
           final filename = header['filename'] as String? ?? 'received_file';
           final target = _prepareReceiveTarget(filename);
-          final fileId = header['message_id'] as String? ?? _generateMessageId();
+          final fileId =
+              header['message_id'] as String? ?? _generateMessageId();
           _handleFileMessage(header, target);
           state.updateTransfer(fileId, 0, bodyLen);
           final written = await readFileBody(
@@ -850,7 +853,8 @@ class SocketService {
         if (type == 'file' && bodyLen > 0) {
           final filename = header['filename'] as String? ?? 'received_file';
           final target = _prepareReceiveTarget(filename);
-          final fileId = header['message_id'] as String? ?? _generateMessageId();
+          final fileId =
+              header['message_id'] as String? ?? _generateMessageId();
           // 先添加消息气泡（进度条宿主），再流式接收
           _handleFileMessage(header, target);
           _receivingFile = true;
@@ -958,7 +962,8 @@ class SocketService {
   }
 
   /// 处理收到的消息
-  void _handleMessage(Map<String, dynamic> header, Uint8List body) {    final type = header['type'] as String?;
+  void _handleMessage(Map<String, dynamic> header, Uint8List body) {
+    final type = header['type'] as String?;
     final from = header['from'] as String?;
     final messageId = header['message_id'] as String? ?? _generateMessageId();
     final isHistory = header['history'] == 'true';
@@ -1111,16 +1116,14 @@ class SocketService {
               messageId: messageId,
               sender: from,
               filename: header['filename'] as String? ?? 'file',
-              filesize:
-                  int.tryParse(header['filesize'] as String? ?? '0') ?? 0,
+              filesize: int.tryParse(header['filesize'] as String? ?? '0') ?? 0,
               groupId: groupId != null ? int.tryParse(groupId) : null,
             ));
             // 桌面通知（阶段 H2）：未聚焦窗口时通知收到群文件请求
             _notifyIncoming(
               ChatMessage(
                 sender: from,
-                content:
-                    '[群文件请求] ${header['filename'] as String? ?? 'file'}',
+                content: '[群文件请求] ${header['filename'] as String? ?? 'file'}',
                 type: 'group_file_request',
                 messageId: messageId,
                 status: 'sent',
@@ -1201,9 +1204,8 @@ class SocketService {
               type: m['type'] as String? ?? 'chat',
               messageId: m['message_id'] as String? ?? _generateMessageId(),
               filename: m['filename'] as String?,
-              groupId: m['group_id'] != null
-                  ? (m['group_id'] as num).toInt()
-                  : null,
+              groupId:
+                  m['group_id'] != null ? (m['group_id'] as num).toInt() : null,
               timestamp: ts,
               isHistory: true,
               status: m['status'] as String? ?? 'delivered',
@@ -1249,9 +1251,8 @@ class SocketService {
               type: m['type'] as String? ?? 'chat',
               messageId: m['message_id'] as String? ?? _generateMessageId(),
               filename: m['filename'] as String?,
-              groupId: m['group_id'] != null
-                  ? (m['group_id'] as num).toInt()
-                  : null,
+              groupId:
+                  m['group_id'] != null ? (m['group_id'] as num).toInt() : null,
               timestamp: ts,
               isHistory: true,
               status: m['status'] as String? ?? 'delivered',
@@ -1378,11 +1379,27 @@ class SocketService {
   // ============================================================
 
   /// 发送私聊消息
+  /// 阶段 I1：断线（未连接）时消息进入本地 pending 队列（'sending' 气泡），
+  /// 重连成功后自动补发；已连接时直接发送，异常转为 failed 入队（不静默丢失）。
   Future<bool> sendChat(String to, String content) async {
-    if (_socket == null) return false;
+    if (!state.isLoggedIn) return false;
+    final text = content.trim();
+    if (text.isEmpty) return false;
     final messageId = _generateMessageId();
+    if (_socket == null) {
+      final msg = ChatMessage(
+        sender: state.username!,
+        content: text,
+        type: 'chat',
+        messageId: messageId,
+        status: 'sending',
+      );
+      state.addMessage(to, msg);
+      state.enqueuePendingMessage(to, msg);
+      return true;
+    }
     try {
-      await _sendMessage('chat', content, extraHeaders: {
+      await _sendMessage('chat', text, extraHeaders: {
         'to': to,
         'message_id': messageId,
       });
@@ -1390,7 +1407,7 @@ class SocketService {
         to,
         ChatMessage(
           sender: state.username!,
-          content: content,
+          content: text,
           type: 'chat',
           messageId: messageId,
           status: 'sent',
@@ -1398,18 +1415,44 @@ class SocketService {
       );
       return true;
     } catch (e) {
-      state.log('发送失败: $e');
+      final msg = ChatMessage(
+        sender: state.username!,
+        content: text,
+        type: 'chat',
+        messageId: messageId,
+        status: 'sending',
+      );
+      state.addMessage(to, msg);
+      state.enqueuePendingMessage(to, msg);
+      state.markPendingFailed(messageId);
+      state.log('发送失败，已加入待重试队列: $e');
       return false;
     }
   }
 
   /// 发送群聊消息
+  /// 阶段 I1：断线时入队（chatKey='group_N'），失败标记 failed 可重试。
   Future<bool> sendGroupChat(int groupId, String content) async {
-    if (_socket == null) return false;
+    if (!state.isLoggedIn) return false;
+    final text = content.trim();
+    if (text.isEmpty) return false;
     final messageId = _generateMessageId();
     final chatKey = 'group_$groupId';
+    if (_socket == null) {
+      final msg = ChatMessage(
+        sender: state.username!,
+        content: text,
+        type: 'group_chat',
+        messageId: messageId,
+        status: 'sending',
+        groupId: groupId,
+      );
+      state.addMessage(chatKey, msg);
+      state.enqueuePendingMessage(chatKey, msg);
+      return true;
+    }
     try {
-      await _sendMessage('group_chat', content, extraHeaders: {
+      await _sendMessage('group_chat', text, extraHeaders: {
         'group_id': groupId.toString(),
         'message_id': messageId,
       });
@@ -1417,7 +1460,7 @@ class SocketService {
         chatKey,
         ChatMessage(
           sender: state.username!,
-          content: content,
+          content: text,
           type: 'group_chat',
           messageId: messageId,
           status: 'sent',
@@ -1426,9 +1469,78 @@ class SocketService {
       );
       return true;
     } catch (e) {
-      state.log('群聊发送失败: $e');
+      final msg = ChatMessage(
+        sender: state.username!,
+        content: text,
+        type: 'group_chat',
+        messageId: messageId,
+        status: 'sending',
+        groupId: groupId,
+      );
+      state.addMessage(chatKey, msg);
+      state.enqueuePendingMessage(chatKey, msg);
+      state.markPendingFailed(messageId);
+      state.log('群聊发送失败，已加入待重试队列: $e');
       return false;
     }
+  }
+
+  /// 重试发送失败的 pending 消息（阶段 I1）
+  /// 未连接：复位为"发送中"，等待重连自动补发（返回 false）；
+  /// 已连接：立即重发，成功出队（true）/ 失败保持 failed（false）。
+  Future<bool> retryPendingMessage(String messageId) async {
+    PendingMessage? entry;
+    for (final e in state.pendingMessages) {
+      if (e.message.messageId == messageId) {
+        entry = e;
+        break;
+      }
+    }
+    if (entry == null) return false;
+    state.markPendingSending(messageId);
+    if (_socket == null) return false;
+    try {
+      final msg = entry.message;
+      if (entry.chatKey.startsWith('group_')) {
+        final groupId = int.tryParse(entry.chatKey.substring(6));
+        if (groupId == null) {
+          state.markPendingFailed(messageId);
+          return false;
+        }
+        await _sendMessage('group_chat', msg.content, extraHeaders: {
+          'group_id': groupId.toString(),
+          'message_id': messageId,
+        });
+      } else {
+        await _sendMessage('chat', msg.content, extraHeaders: {
+          'to': entry.chatKey,
+          'message_id': messageId,
+        });
+      }
+      state.markPendingSent(messageId);
+      return true;
+    } catch (e) {
+      state.markPendingFailed(messageId);
+      state.log('重试发送失败: $e');
+      return false;
+    }
+  }
+
+  /// 补发 pending 队列（阶段 I1：重连成功后自动调用，也可手动触发）
+  /// 返回本次实际发出的条数。
+  ///
+  /// 每次重连都尝试补发**全部**队列条目（含此前补发失败的 failed 条目）：
+  /// 服务端按 (message_id, sender) 幂等去重，已送达的重发会被丢弃，不会二次
+  /// 下发；重连时的离线历史回显也会先把已入库消息自动出队。因此"每次重连
+  /// 全量补发"既能保证断线消息最终送达（不再依赖第二次重连），又不产生重复。
+  Future<int> flushPendingQueue() async {
+    if (_socket == null) return 0;
+    final entries = state.pendingMessages.toList();
+    int sent = 0;
+    for (final entry in entries) {
+      if (await retryPendingMessage(entry.message.messageId)) sent++;
+    }
+    return sent;
   }
 
   /// 发送文件
@@ -1587,7 +1699,8 @@ class SocketService {
     bool accept,
   ) async {
     if (_socket == null) return;
-    await _sendMessage('file_response',
+    await _sendMessage(
+      'file_response',
       '',
       extraHeaders: {
         'response': accept ? 'accept' : 'reject',
@@ -1605,7 +1718,8 @@ class SocketService {
     bool accept,
   ) async {
     if (_socket == null) return;
-    await _sendMessage('group_file_response',
+    await _sendMessage(
+      'group_file_response',
       '',
       extraHeaders: {
         'response': accept ? 'accept' : 'reject',
@@ -1619,7 +1733,8 @@ class SocketService {
   /// 添加好友
   Future<void> addFriend(String targetUser) async {
     if (_socket == null) return;
-    await _sendMessage('friend_request',
+    await _sendMessage(
+      'friend_request',
       '',
       extraHeaders: {'to': targetUser},
     );
@@ -1630,7 +1745,8 @@ class SocketService {
   Future<void> acceptFriend(String targetUser) async {
     if (_socket == null) return;
     // 服务端 accept_friend handler 使用 header.get("from") 识别请求发起者
-    await _sendMessage('accept_friend',
+    await _sendMessage(
+      'accept_friend',
       '',
       extraHeaders: {'to': targetUser, 'from': targetUser},
     );
@@ -1643,7 +1759,8 @@ class SocketService {
   /// 拒绝好友请求
   Future<void> rejectFriend(String targetUser) async {
     if (_socket == null) return;
-    await _sendMessage('reject_friend',
+    await _sendMessage(
+      'reject_friend',
       '',
       extraHeaders: {'to': targetUser, 'from': targetUser},
     );
@@ -1750,8 +1867,7 @@ class SocketService {
       extraHeaders['announcement'] = announcement;
       content = announcement;
     }
-    await _sendMessage('admin_command', content,
-        extraHeaders: extraHeaders);
+    await _sendMessage('admin_command', content, extraHeaders: extraHeaders);
   }
 
   /// 删除好友（阶段 F）

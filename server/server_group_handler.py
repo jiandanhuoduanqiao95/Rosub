@@ -121,6 +121,14 @@ class GroupHandler:
                     logging.warning(f"用户 {username} 尝试发送消息到未加入的群组: {group_id}")
                     return
 
+                # 阶段 I：重发幂等——客户端断线补发/手动重试复用原 message_id，
+                # 若此前已写入永久历史，跳过重复保存与广播，避免重复下发
+                if self.server.db.message_id_exists(original_message_id, sender=username):
+                    logging.info(
+                        f"重复群聊消息已跳过（幂等）: 用户={username}, "
+                        f"群组ID={group_id}, 消息ID={original_message_id}")
+                    return
+
                 message = data.decode("utf-8")
                 members = self.server.db.get_group_members(group_id)
                 message_with_metadata = json.dumps({"text": message, "group_id": group_id})
