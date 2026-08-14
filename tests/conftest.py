@@ -151,15 +151,28 @@ class Client:
             return None, None
 
     def expect(self, expected_type, timeout=3):
-        """读取一条消息并断言类型，返回 (header, data)。"""
-        self._sock.settimeout(timeout)
-        try:
-            header, data = recv_message(self._sock)
-        except socket.timeout:
-            pytest.fail(f"超时：等待 '{expected_type}' 超过 {timeout}s")
-        if header is None:
-            pytest.fail(f"连接已关闭，期望 '{expected_type}'")
-        return header, data
+        """读取一条消息并断言类型，返回 (header, data)。
+
+        阶段 J 修订：presence（在线状态广播，登录/登出触发）为通知性消息，
+        不属于测试关注的消息流。期望类型非 presence 时读到 presence 自动跳过
+        （避免既有多客户端测试被登录/登出广播噪声打断）；
+        期望类型恰为 presence 时不跳过（阶段 J 契约测试据此断言广播内容）。
+        """
+        deadline = time.time() + timeout
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                pytest.fail(f"超时：等待 '{expected_type}' 超过 {timeout}s")
+            self._sock.settimeout(remaining)
+            try:
+                header, data = recv_message(self._sock)
+            except socket.timeout:
+                pytest.fail(f"超时：等待 '{expected_type}' 超过 {timeout}s")
+            if header is None:
+                pytest.fail(f"连接已关闭，期望 '{expected_type}'")
+            if header.get("type") == "presence" and expected_type != "presence":
+                continue
+            return header, data
 
     def drain(self, timeout=0.4):
         """清空缓冲的待处理消息，返回消费数量。"""
@@ -181,6 +194,9 @@ class Client:
           4. 好友请求 — 0 或多条
           5. 好友列表（admin_response, response_type=list_friends）
           6. 群组列表（list_groups）
+          7. 好友元数据（admin_response, response_type=list_friends_meta）
+          8. 黑名单（admin_response, response_type=list_blocked）
+        全部消费完毕后返回（缓冲不留残余，后续 expect 不被打扰）。
         """
         result = {
             "login_response": None,
@@ -190,10 +206,14 @@ class Client:
             "friend_requests": [],
             "file_requests": [],
             "group_file_requests": [],
+            "friend_meta": [],
+            "blocked": [],
             "extra": [],
         }
         got_friends = False
         got_groups = False
+        got_meta = False
+        got_blocked = False
 
         # 第 1 条：登录响应
         h, d = self.recv(timeout=3)
@@ -217,12 +237,18 @@ class Client:
             elif t == "admin_response" and h.get("response_type") == "list_friends":
                 result["friends"] = json.loads(d.decode()) if d else []
                 got_friends = True
+            elif t == "admin_response" and h.get("response_type") == "list_friends_meta":
+                result["friend_meta"] = json.loads(d.decode()) if d else []
+                got_meta = True
+            elif t == "admin_response" and h.get("response_type") == "list_blocked":
+                result["blocked"] = json.loads(d.decode()) if d else []
+                got_blocked = True
             elif t == "list_groups":
                 result["groups"] = json.loads(d.decode()) if d else []
                 got_groups = True
             else:
                 result["extra"].append((h, d))
-            if got_friends and got_groups:
+            if got_friends and got_groups and got_meta and got_blocked:
                 break
         return result
 

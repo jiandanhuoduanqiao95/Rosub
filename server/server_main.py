@@ -48,6 +48,41 @@ class Server:
         else:
             send_message(sock, msg_type, content, extra_headers=extra_headers)
 
+    def broadcast_presence(self, username, online):
+        """向其他在线用户广播在线状态（阶段 J：P0-3）。
+
+        黑名单双向隐藏：subject 与 viewer 任一方向存在拉黑关系 → 不广播
+        （被拉黑者不可见拉黑者在线状态，反之亦然）。
+        """
+        online_flag = "1" if online else "0"
+        with self.client_map_lock:
+            targets = [(u, s) for u, s in self.client_map.items() if u != username]
+        for u, sock in targets:
+            try:
+                if self.db.is_blocked(u, username) or self.db.is_blocked(username, u):
+                    continue
+                self.guarded_send(sock, "presence", "",
+                                  extra_headers={"from": username, "online": online_flag})
+            except Exception as e:
+                logging.warning(f"presence 广播失败: {username} -> {u}, 错误={e}")
+
+    def send_presence_snapshot(self, username, ssock):
+        """向新登录者发送当前其他在线用户的 presence 快照（黑名单双向隐藏）。
+
+        快照须在初始数据（好友/群组列表）之前到达，客户端 _receiveInitialData
+        在收到好友/群组列表前会持续消费消息。
+        """
+        with self.client_map_lock:
+            others = [(u, s) for u, s in self.client_map.items() if u != username]
+        for u, sock in others:
+            try:
+                if self.db.is_blocked(username, u) or self.db.is_blocked(u, username):
+                    continue
+                self.guarded_send(ssock, "presence", "",
+                                  extra_headers={"from": u, "online": "1"})
+            except Exception as e:
+                logging.warning(f"presence 快照发送失败: {u} -> {username}, 错误={e}")
+
     def build_listen(self):
         if not os.path.exists("files"):
             os.makedirs("files")

@@ -104,7 +104,7 @@ class AsyncClient:
     async def consume_initial(self):
         result = {"login_ok": False, "friends": [], "groups": [],
                   "offline": [], "friend_requests": [], "file_requests": [],
-                  "extra": []}
+                  "friend_meta": [], "blocked": [], "extra": []}
         h, d = await self.recv()
         if h is None:
             return result
@@ -115,6 +115,8 @@ class AsyncClient:
             result["extra"].append((h, d))
         got_friends = False
         got_groups = False
+        got_meta = False
+        got_blocked = False
         for _ in range(40):
             h, d = await self.recv(timeout=1.5)
             if h is None:
@@ -129,12 +131,18 @@ class AsyncClient:
             elif t == "admin_response" and h.get("response_type") == "list_friends":
                 result["friends"] = json.loads(d.decode()) if d else []
                 got_friends = True
+            elif t == "admin_response" and h.get("response_type") == "list_friends_meta":
+                result["friend_meta"] = json.loads(d.decode()) if d else []
+                got_meta = True
+            elif t == "admin_response" and h.get("response_type") == "list_blocked":
+                result["blocked"] = json.loads(d.decode()) if d else []
+                got_blocked = True
             elif t == "list_groups":
                 result["groups"] = json.loads(d.decode()) if d else []
                 got_groups = True
             else:
                 result["extra"].append((h, d))
-            if got_friends and got_groups:
+            if got_friends and got_groups and got_meta and got_blocked:
                 break
         return result
 
@@ -213,6 +221,8 @@ class TestAsyncE2EAuth:
         # bob 下线
         await bob.close()
         await asyncio.sleep(0.2)
+        # 阶段 J：消费 bob 下线的 presence 广播（通知性噪声）
+        await alice.drain(1.0)
 
         # alice 发消息给离线 bob
         await alice.send_chat("ben", "while you were away")

@@ -51,11 +51,9 @@ MockSocketService buildService() {
   when(() => s.leaveGroup(any())).thenAnswer((_) async {});
   when(() => s.fetchGroupMembers(any())).thenAnswer((_) async {});
   when(() => s.adminCommand(any())).thenAnswer((_) async {});
-  when(() => s.adminCommand(any(),
-          targetUser: any(named: 'targetUser')))
+  when(() => s.adminCommand(any(), targetUser: any(named: 'targetUser')))
       .thenAnswer((_) async {});
-  when(() => s.adminCommand(any(),
-          announcement: any(named: 'announcement')))
+  when(() => s.adminCommand(any(), announcement: any(named: 'announcement')))
       .thenAnswer((_) async {});
   when(() => s.respondFileRequest(any(), any(), any()))
       .thenAnswer((_) async {});
@@ -86,7 +84,10 @@ void main() {
       await tester.tap(find.text('bob'));
       await tester.pumpAndSettle();
       verify(() => socket.fetchHistory(
-          to: 'bob', groupId: null, beforeMessageId: null, limit: 50)).called(1);
+          to: 'bob',
+          groupId: null,
+          beforeMessageId: null,
+          limit: 50)).called(1);
 
       // 聚焦输入框并输入
       await tester.tap(find.byType(RawTextField));
@@ -146,8 +147,10 @@ void main() {
     testWidgets('系统会话只读：无发送按钮、Enter 不产生网络调用', (tester) async {
       final socket = buildService();
       state.setLoggedIn('alice', false);
-      state.addMessage('服务器',
-          ChatMessage(sender: '服务器', content: '公告', messageId: 's1', type: 'system'));
+      state.addMessage(
+          '服务器',
+          ChatMessage(
+              sender: '服务器', content: '公告', messageId: 's1', type: 'system'));
       await pumpScreen(tester, socket);
 
       await tester.tap(find.text('系统消息'));
@@ -194,7 +197,7 @@ void main() {
   });
 
   group('好友请求对话框接线', () {
-    testWidgets('接受 → acceptFriend + 清 pending', (tester) async {
+    testWidgets('接受 → 备注询问跳过 → acceptFriend + 清 pending', (tester) async {
       final socket = buildService();
       state.setLoggedIn('alice', false);
       state.addPendingRequest('bob');
@@ -203,6 +206,9 @@ void main() {
       await tester.tap(find.byTooltip('待处理好友请求'));
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('接受').first);
+      await tester.pumpAndSettle();
+      // 阶段 J：接受时先询问是否添加备注 → 跳过
+      await tester.tap(find.text('跳过'));
       await tester.pumpAndSettle();
 
       verify(() => socket.acceptFriend('bob')).called(1);
@@ -227,8 +233,8 @@ void main() {
     testWidgets('私聊文件请求接受 → respondFileRequest', (tester) async {
       final socket = buildService();
       state.setLoggedIn('alice', false);
-      state.addFileRequest(
-          FileRequest(messageId: 'f1', sender: 'bob', filename: 'a.zip', filesize: 10));
+      state.addFileRequest(FileRequest(
+          messageId: 'f1', sender: 'bob', filename: 'a.zip', filesize: 10));
       await pumpScreen(tester, socket);
 
       await tester.tap(find.byTooltip('待处理文件请求'));
@@ -243,7 +249,11 @@ void main() {
       final socket = buildService();
       state.setLoggedIn('alice', false);
       state.addFileRequest(FileRequest(
-          messageId: 'f2', sender: 'bob', filename: 'b.zip', filesize: 10, groupId: 3));
+          messageId: 'f2',
+          sender: 'bob',
+          filename: 'b.zip',
+          filesize: 10,
+          groupId: 3));
       await pumpScreen(tester, socket);
 
       await tester.tap(find.byTooltip('待处理文件请求'));
@@ -321,15 +331,18 @@ void main() {
       await tester.pumpAndSettle();
 
       verify(() => socket.fetchHistory(
-          to: 'bob', groupId: null, beforeMessageId: null, limit: 50)).called(1);
+          to: 'bob',
+          groupId: null,
+          beforeMessageId: null,
+          limit: 50)).called(1);
     });
 
     testWidgets('选择已有消息的会话不重复加载历史', (tester) async {
       final socket = buildService();
       state.setLoggedIn('alice', false);
       state.setFriends(['bob']);
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: '已有', messageId: 'm1'));
+      state.addMessage(
+          'bob', ChatMessage(sender: 'bob', content: '已有', messageId: 'm1'));
       await pumpScreen(tester, socket);
 
       await tester.tap(find.text('bob'));
@@ -345,8 +358,10 @@ void main() {
     testWidgets('选择系统会话（服务器）不触发历史加载', (tester) async {
       final socket = buildService();
       state.setLoggedIn('alice', false);
-      state.addMessage('服务器',
-          ChatMessage(sender: '服务器', content: '公告', messageId: 's1', type: 'system'));
+      state.addMessage(
+          '服务器',
+          ChatMessage(
+              sender: '服务器', content: '公告', messageId: 's1', type: 'system'));
       await pumpScreen(tester, socket);
 
       await tester.tap(find.text('系统消息'));

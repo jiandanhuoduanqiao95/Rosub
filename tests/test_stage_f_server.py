@@ -229,6 +229,8 @@ class TestLeaveGroupHandler:
         bob = harness.client()
         bob.login("bob", "password456", consume=False)
         bob.recv_initial()
+        # 阶段 J：消费 bob 登录触发的 presence 广播（通知性噪声）
+        alice.drain(timeout=0.8)
         bob.send("join_group", str(gid))
         bob.drain(timeout=0.8)
 

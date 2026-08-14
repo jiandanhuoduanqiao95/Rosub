@@ -12,6 +12,7 @@ import '../services/socket_service.dart';
 import '../services/state_manager.dart';
 import '../widgets/chat_view.dart';
 import '../widgets/dialogs.dart';
+import '../widgets/raw_text_field.dart';
 import '../widgets/sidebar.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -144,9 +145,18 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _showAddFriendDialog() {
-    showAddFriendDialog(context, (username) {
-      widget.socketService.addFriend(username);
-    });
+    // 阶段 J（P1-10）：添加好友 → 用户搜索对话框（搜索 + 验证消息 + 可选备注名）
+    showUserSearchDialog(
+      context,
+      onSearch: (keyword) => widget.socketService.searchUsers(keyword),
+      onAdd: (username, message, note) {
+        widget.socketService.addFriend(username, message: message);
+        // 阶段 J 修复：发送请求时询问的备注名暂存，对方接受后自动设置
+        if (note.isNotEmpty) {
+          _state.setPendingFriendNote(username, note);
+        }
+      },
+    );
   }
 
   void _showCreateGroupDialog() {
@@ -169,9 +179,90 @@ class _ChatScreenState extends State<ChatScreen> {
     showChangePasswordDialog(context, widget.socketService);
   }
 
-  void _showDeleteFriendDialog(String username) {
-    showDeleteFriendDialog(context, username, () {
-      widget.socketService.deleteFriend(username);
+  void _showFriendMenuDialog(String username) {
+    // 阶段 J（P1-8/9）：长按好友 → 好友管理（资料/备注/分组/拉黑/删除）
+    showFriendManageDialog(
+      context,
+      username,
+      onViewProfile: () => _showProfileDialog(username),
+      onSetNote: () => _showSetNoteDialog(username),
+      onSetGroup: () => _showSetGroupDialog(username),
+      onBlock: () => _showBlockConfirm(username),
+      onUnblock: () => widget.socketService.unblockUser(username),
+      // 删除确认文本已展示在管理对话框中，直接删除
+      onDelete: () => widget.socketService.deleteFriend(username),
+    );
+  }
+
+  void _showProfileDialog(String username) {
+    widget.socketService.fetchProfile(username);
+    showProfileDialog(
+      context,
+      username: username,
+      profile: _state.profileOf(username),
+      onRefresh: () => widget.socketService.fetchProfile(username),
+      onEdit: username == _state.username ? _showEditProfileDialog : null,
+    );
+  }
+
+  void _showEditProfileDialog() {
+    final nicknameCtrl = TextEditingController(
+        text: _state.profileOf(_state.username!)?.nickname ?? '');
+    final signatureCtrl = TextEditingController(
+        text: _state.profileOf(_state.username!)?.signature ?? '');
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('编辑资料'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            RawTextField(
+              controller: nicknameCtrl,
+              hintText: '昵称',
+              showChineseInput: true,
+            ),
+            const SizedBox(height: 8),
+            RawTextField(
+              controller: signatureCtrl,
+              hintText: '个性签名',
+              showChineseInput: true,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          FilledButton(
+            onPressed: () {
+              widget.socketService.updateMyProfile(
+                nickname: nicknameCtrl.text.trim(),
+                signature: signatureCtrl.text.trim(),
+              );
+              Navigator.pop(ctx);
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showBlockConfirm(String username) {
+    showBlockConfirmDialog(context, username, () {
+      widget.socketService.blockUser(username);
+    });
+  }
+
+  void _showSetNoteDialog(String username) {
+    showSetFriendNoteDialog(context, username, (note) {
+      widget.socketService.setFriendNote(username, note);
+    });
+  }
+
+  void _showSetGroupDialog(String username) {
+    showSetFriendGroupDialog(context, username, (group) {
+      widget.socketService.setFriendGroup(username, group);
     });
   }
 
@@ -270,6 +361,13 @@ class _ChatScreenState extends State<ChatScreen> {
                   onPressed: _showAdminPanel,
                 ),
 
+              // 个人资料（阶段 J：P0-2）
+              IconButton(
+                icon: const Icon(Icons.account_circle_rounded),
+                tooltip: '个人资料',
+                onPressed: () => _showProfileDialog(_state.username!),
+              ),
+
               // 修改密码（阶段 G3）
               IconButton(
                 icon: const Icon(Icons.lock_outline_rounded),
@@ -335,8 +433,10 @@ class _ChatScreenState extends State<ChatScreen> {
                       onCreateGroup: _showCreateGroupDialog,
                       onJoinGroup: _showJoinGroupDialog,
                       unreadOf: _state.unreadOf,
-                      onDeleteFriend: _showDeleteFriendDialog,
+                      onDeleteFriend: _showFriendMenuDialog,
                       onGroupLongPress: _showGroupMenuDialog,
+                      isOnline: _state.isOnline,
+                      friendGroups: _state.friendsByGroup,
                     ),
 
                     // 分隔线
@@ -358,8 +458,8 @@ class _ChatScreenState extends State<ChatScreen> {
                               onSend: _sendMessage,
                               onSendFile: _sendFile,
                               onRecall: _confirmRecall,
-                              onLoadHistory: (beforeId) => _loadHistory(
-                                  _state.currentChat!, beforeId),
+                              onLoadHistory: (beforeId) =>
+                                  _loadHistory(_state.currentChat!, beforeId),
                               hasMoreHistory: _state.hasMoreHistory,
                               transferFraction: _state.transferFraction,
                               isSearchMode:
@@ -368,8 +468,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                   _state.searchQueryOf(_state.currentChat!),
                               onSearch: _runSearch,
                               onSearchExit: _exitSearch,
-                              onRetrySend: (messageId) => widget
-                                  .socketService
+                              onRetrySend: (messageId) => widget.socketService
                                   .retryPendingMessage(messageId),
                             )
                           : const Center(
@@ -400,9 +499,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _showFriendRequests() {
     showFriendRequestsDialog(context, _state.pendingRequests.toList(),
-        (username, accept) {
+        (username, accept, note) {
       if (accept) {
         widget.socketService.acceptFriend(username);
+        // 阶段 J：接受时填写的备注 → 设置好友备注名
+        if (note.isNotEmpty) {
+          widget.socketService.setFriendNote(username, note);
+        }
       } else {
         widget.socketService.rejectFriend(username);
       }

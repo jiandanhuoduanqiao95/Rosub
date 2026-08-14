@@ -51,27 +51,40 @@ LogicalKeyboardKey _charKey(String ch) {
   }
   if (ch == '-') return LogicalKeyboardKey.minus;
   return const {
-    'a': LogicalKeyboardKey.keyA, 'b': LogicalKeyboardKey.keyB,
-    'c': LogicalKeyboardKey.keyC, 'd': LogicalKeyboardKey.keyD,
-    'e': LogicalKeyboardKey.keyE, 'f': LogicalKeyboardKey.keyF,
-    'g': LogicalKeyboardKey.keyG, 'h': LogicalKeyboardKey.keyH,
-    'i': LogicalKeyboardKey.keyI, 'j': LogicalKeyboardKey.keyJ,
-    'k': LogicalKeyboardKey.keyK, 'l': LogicalKeyboardKey.keyL,
-    'm': LogicalKeyboardKey.keyM, 'n': LogicalKeyboardKey.keyN,
-    'o': LogicalKeyboardKey.keyO, 'p': LogicalKeyboardKey.keyP,
-    'q': LogicalKeyboardKey.keyQ, 'r': LogicalKeyboardKey.keyR,
-    's': LogicalKeyboardKey.keyS, 't': LogicalKeyboardKey.keyT,
-    'u': LogicalKeyboardKey.keyU, 'v': LogicalKeyboardKey.keyV,
-    'w': LogicalKeyboardKey.keyW, 'x': LogicalKeyboardKey.keyX,
-    'y': LogicalKeyboardKey.keyY, 'z': LogicalKeyboardKey.keyZ,
+    'a': LogicalKeyboardKey.keyA,
+    'b': LogicalKeyboardKey.keyB,
+    'c': LogicalKeyboardKey.keyC,
+    'd': LogicalKeyboardKey.keyD,
+    'e': LogicalKeyboardKey.keyE,
+    'f': LogicalKeyboardKey.keyF,
+    'g': LogicalKeyboardKey.keyG,
+    'h': LogicalKeyboardKey.keyH,
+    'i': LogicalKeyboardKey.keyI,
+    'j': LogicalKeyboardKey.keyJ,
+    'k': LogicalKeyboardKey.keyK,
+    'l': LogicalKeyboardKey.keyL,
+    'm': LogicalKeyboardKey.keyM,
+    'n': LogicalKeyboardKey.keyN,
+    'o': LogicalKeyboardKey.keyO,
+    'p': LogicalKeyboardKey.keyP,
+    'q': LogicalKeyboardKey.keyQ,
+    'r': LogicalKeyboardKey.keyR,
+    's': LogicalKeyboardKey.keyS,
+    't': LogicalKeyboardKey.keyT,
+    'u': LogicalKeyboardKey.keyU,
+    'v': LogicalKeyboardKey.keyV,
+    'w': LogicalKeyboardKey.keyW,
+    'x': LogicalKeyboardKey.keyX,
+    'y': LogicalKeyboardKey.keyY,
+    'z': LogicalKeyboardKey.keyZ,
   }[ch.toLowerCase()]!;
 }
 
 Future<void> typeInto(WidgetTester tester, String text,
-    {bool tapField = true}) async {
+    {bool tapField = true, int index = 0}) async {
   // RawTextField 不自动聚焦，先点击对话框内的输入框
   if (tapField) {
-    await tester.tap(find.byType(RawTextField).first);
+    await tester.tap(find.byType(RawTextField).at(index));
     await tester.pump();
   }
   for (final ch in text.split('')) {
@@ -106,11 +119,14 @@ void main() {
   group('添加好友对话框', () {
     testWidgets('合法用户名调用 onAdd（含 trim）', (tester) async {
       String? added;
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showAddFriendDialog(
-            tester.element(find.byType(ElevatedButton)), (name) => added = name),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showAddFriendDialog(
+                tester.element(find.byType(ElevatedButton)),
+                (name) => added = name),
+            child: const Text('open'),
+          ));
 
       await typeInto(tester, '  bobby  ');
       await tester.tap(find.text('添加'));
@@ -121,11 +137,14 @@ void main() {
 
     testWidgets('非法用户名弹 SnackBar 且对话框不关闭', (tester) async {
       String? added;
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showAddFriendDialog(
-            tester.element(find.byType(ElevatedButton)), (name) => added = name),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showAddFriendDialog(
+                tester.element(find.byType(ElevatedButton)),
+                (name) => added = name),
+            child: const Text('open'),
+          ));
 
       await typeInto(tester, 'ab'); // 太短
       await tester.tap(find.text('添加'));
@@ -138,11 +157,14 @@ void main() {
 
     testWidgets('取消关闭对话框且不回调', (tester) async {
       String? added;
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showAddFriendDialog(
-            tester.element(find.byType(ElevatedButton)), (name) => added = name),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showAddFriendDialog(
+                tester.element(find.byType(ElevatedButton)),
+                (name) => added = name),
+            child: const Text('open'),
+          ));
       await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();
       expect(added, isNull);
@@ -153,11 +175,14 @@ void main() {
   group('创建群组对话框', () {
     testWidgets('空群名点创建不回调且保持打开', (tester) async {
       String? created;
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showCreateGroupDialog(
-            tester.element(find.byType(ElevatedButton)), (name) => created = name),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showCreateGroupDialog(
+                tester.element(find.byType(ElevatedButton)),
+                (name) => created = name),
+            child: const Text('open'),
+          ));
       await tester.tap(find.text('创建'));
       await tester.pumpAndSettle();
       expect(created, isNull);
@@ -166,11 +191,14 @@ void main() {
 
     testWidgets('合法群名回调并关闭', (tester) async {
       String? created;
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showCreateGroupDialog(
-            tester.element(find.byType(ElevatedButton)), (name) => created = name),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showCreateGroupDialog(
+                tester.element(find.byType(ElevatedButton)),
+                (name) => created = name),
+            child: const Text('open'),
+          ));
       await typeInto(tester, 'devteam');
       await tester.tap(find.text('创建'));
       await tester.pumpAndSettle();
@@ -182,11 +210,14 @@ void main() {
   group('加入群组对话框', () {
     testWidgets('非法 ID（字母）弹 SnackBar', (tester) async {
       int? joined;
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showJoinGroupDialog(
-            tester.element(find.byType(ElevatedButton)), (id) => joined = id),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showJoinGroupDialog(
+                tester.element(find.byType(ElevatedButton)),
+                (id) => joined = id),
+            child: const Text('open'),
+          ));
       await typeInto(tester, 'abc');
       await tester.tap(find.text('加入'));
       await tester.pumpAndSettle();
@@ -197,16 +228,18 @@ void main() {
     testWidgets('ID=0 与负数被拒', (tester) async {
       for (final bad in ['0', '-5']) {
         int? joined;
-        await openDialog(tester, ElevatedButton(
-          onPressed: () => showJoinGroupDialog(
-              tester.element(find.byType(ElevatedButton)), (id) => joined = id),
-          child: const Text('open'),
-        ));
+        await openDialog(
+            tester,
+            ElevatedButton(
+              onPressed: () => showJoinGroupDialog(
+                  tester.element(find.byType(ElevatedButton)),
+                  (id) => joined = id),
+              child: const Text('open'),
+            ));
         await typeInto(tester, bad);
         await tester.tap(find.text('加入'));
         await tester.pumpAndSettle();
-        expect(find.text('请输入有效的群组 ID'), findsOneWidget,
-            reason: '输入 $bad 应被拒');
+        expect(find.text('请输入有效的群组 ID'), findsOneWidget, reason: '输入 $bad 应被拒');
         expect(joined, isNull);
         // 关闭对话框准备下一个
         await tester.tap(find.text('取消'));
@@ -216,11 +249,14 @@ void main() {
 
     testWidgets('合法 ID 回调', (tester) async {
       int? joined;
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showJoinGroupDialog(
-            tester.element(find.byType(ElevatedButton)), (id) => joined = id),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showJoinGroupDialog(
+                tester.element(find.byType(ElevatedButton)),
+                (id) => joined = id),
+            child: const Text('open'),
+          ));
       await typeInto(tester, '42');
       await tester.tap(find.text('加入'));
       await tester.pumpAndSettle();
@@ -230,68 +266,149 @@ void main() {
 
   group('好友请求对话框', () {
     testWidgets('空列表显示占位', (tester) async {
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showFriendRequestsDialog(
-            tester.element(find.byType(ElevatedButton)), const [], (u, a) {}),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showFriendRequestsDialog(
+                tester.element(find.byType(ElevatedButton)),
+                const [],
+                (u, a, n) {}),
+            child: const Text('open'),
+          ));
       expect(find.text('暂无待处理的好友请求'), findsOneWidget);
     });
 
-    testWidgets('接受/拒绝回调', (tester) async {
-      final responses = <(String, bool)>[];
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showFriendRequestsDialog(
-            tester.element(find.byType(ElevatedButton)), const ['bob', 'carol'],
-            (u, a) => responses.add((u, a))),
-        child: const Text('open'),
-      ));
+    testWidgets('展示请求者的验证消息（阶段 J）', (tester) async {
+      // 预置验证消息（服务端 friend_request 携带 message 头时写入）
+      AppState.instance.addPendingRequest('bob', message: '我是 alice，来自项目组');
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showFriendRequestsDialog(
+                tester.element(find.byType(ElevatedButton)),
+                const ['bob'],
+                (u, a, n) {}),
+            child: const Text('open'),
+          ));
+      expect(find.textContaining('我是 alice，来自项目组'), findsOneWidget);
+    });
+
+    testWidgets('无验证消息时显示默认提示', (tester) async {
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showFriendRequestsDialog(
+                tester.element(find.byType(ElevatedButton)),
+                const ['bob'],
+                (u, a, n) {}),
+            child: const Text('open'),
+          ));
+      expect(find.text('请求添加您为好友'), findsOneWidget);
+    });
+
+    testWidgets('接受 → 询问备注 → 跳过 → (username, true, "")', (tester) async {
+      final responses = <(String, bool, String)>[];
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showFriendRequestsDialog(
+                tester.element(find.byType(ElevatedButton)),
+                const ['bob', 'carol'],
+                (u, a, n) => responses.add((u, a, n))),
+            child: const Text('open'),
+          ));
       expect(find.text('bob'), findsOneWidget);
       expect(find.text('carol'), findsOneWidget);
 
-      // 接受 bob（对话框只展示一次，逐个流程）
+      // 接受 bob → 弹出备注询问框 → 跳过（不添加备注）
       await tester.tap(find.byTooltip('接受').first);
       await tester.pumpAndSettle();
-      expect(responses, [( 'bob', true)]);
+      expect(find.textContaining('是否添加备注'), findsOneWidget);
+      await tester.tap(find.text('跳过'));
+      await tester.pumpAndSettle();
+      expect(responses, [('bob', true, '')]);
       expect(find.text('好友请求'), findsNothing);
     });
 
+    testWidgets('接受 → 备注询问框填写备注 → (username, true, note)', (tester) async {
+      final responses = <(String, bool, String)>[];
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showFriendRequestsDialog(
+                tester.element(find.byType(ElevatedButton)),
+                const ['bob'],
+                (u, a, n) => responses.add((u, a, n))),
+            child: const Text('open'),
+          ));
+      await tester.tap(find.byTooltip('接受'));
+      await tester.pumpAndSettle();
+      // 输入备注名（RawTextField 逐键输入）
+      await typeInto(tester, 'ahbo');
+      await tester.tap(find.text('确定'));
+      await tester.pumpAndSettle();
+      expect(responses, [('bob', true, 'ahbo')]);
+    });
+
     testWidgets('拒绝回调', (tester) async {
-      final responses = <(String, bool)>[];
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showFriendRequestsDialog(
-            tester.element(find.byType(ElevatedButton)), const ['bob'],
-            (u, a) => responses.add((u, a))),
-        child: const Text('open'),
-      ));
+      final responses = <(String, bool, String)>[];
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showFriendRequestsDialog(
+                tester.element(find.byType(ElevatedButton)),
+                const ['bob'],
+                (u, a, n) => responses.add((u, a, n))),
+            child: const Text('open'),
+          ));
       await tester.tap(find.byTooltip('拒绝'));
       await tester.pumpAndSettle();
-      expect(responses, [('bob', false)]);
+      expect(responses, [('bob', false, '')]);
     });
   });
 
   group('文件请求对话框', () {
     testWidgets('空列表占位', (tester) async {
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showFileRequestsDialog(
-            tester.element(find.byType(ElevatedButton)), const [], (r, a) {}),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showFileRequestsDialog(
+                tester.element(find.byType(ElevatedButton)),
+                const [],
+                (r, a) {}),
+            child: const Text('open'),
+          ));
       expect(find.text('暂无待处理的文件请求'), findsOneWidget);
     });
 
     testWidgets('大小格式化 B/KB/MB', (tester) async {
       final reqs = [
-        FileRequest(messageId: 'a', sender: 'alice', filename: 'tiny.txt', filesize: 500),
-        FileRequest(messageId: 'b', sender: 'bob', filename: 'mid.dat', filesize: 2048),
-        FileRequest(messageId: 'c', sender: 'carol', filename: 'big.bin', filesize: 5 * 1024 * 1024),
-        FileRequest(messageId: 'd', sender: 'dave', filename: 'grp.dat', filesize: 1024, groupId: 7),
+        FileRequest(
+            messageId: 'a',
+            sender: 'alice',
+            filename: 'tiny.txt',
+            filesize: 500),
+        FileRequest(
+            messageId: 'b', sender: 'bob', filename: 'mid.dat', filesize: 2048),
+        FileRequest(
+            messageId: 'c',
+            sender: 'carol',
+            filename: 'big.bin',
+            filesize: 5 * 1024 * 1024),
+        FileRequest(
+            messageId: 'd',
+            sender: 'dave',
+            filename: 'grp.dat',
+            filesize: 1024,
+            groupId: 7),
       ];
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showFileRequestsDialog(
-            tester.element(find.byType(ElevatedButton)), reqs, (r, a) {}),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showFileRequestsDialog(
+                tester.element(find.byType(ElevatedButton)), reqs, (r, a) {}),
+            child: const Text('open'),
+          ));
       expect(find.textContaining('500 B'), findsOneWidget);
       expect(find.textContaining('2.0 KB'), findsOneWidget);
       expect(find.textContaining('5.0 MB'), findsOneWidget);
@@ -304,15 +421,16 @@ void main() {
           messageId: 'f1', sender: 'bob', filename: 'x.bin', filesize: 10);
       FileRequest? responded;
       bool? accepted;
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showFileRequestsDialog(
-            tester.element(find.byType(ElevatedButton)), [req],
-            (r, a) {
-          responded = r;
-          accepted = a;
-        }),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showFileRequestsDialog(
+                tester.element(find.byType(ElevatedButton)), [req], (r, a) {
+              responded = r;
+              accepted = a;
+            }),
+            child: const Text('open'),
+          ));
       await tester.tap(find.byTooltip('接受'));
       await tester.pumpAndSettle();
       expect(responded?.messageId, 'f1');
@@ -323,11 +441,15 @@ void main() {
   group('删除好友确认对话框', () {
     testWidgets('确认触发 onDelete', (tester) async {
       String? deleted;
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showDeleteFriendDialog(
-            tester.element(find.byType(ElevatedButton)), 'bob', () => deleted = 'bob'),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showDeleteFriendDialog(
+                tester.element(find.byType(ElevatedButton)),
+                'bob',
+                () => deleted = 'bob'),
+            child: const Text('open'),
+          ));
       expect(find.textContaining('确定删除好友 bob'), findsOneWidget);
       await tester.tap(find.text('删除'));
       await tester.pumpAndSettle();
@@ -336,11 +458,15 @@ void main() {
 
     testWidgets('取消不触发 onDelete', (tester) async {
       String? deleted;
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showDeleteFriendDialog(
-            tester.element(find.byType(ElevatedButton)), 'bob', () => deleted = 'bob'),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showDeleteFriendDialog(
+                tester.element(find.byType(ElevatedButton)),
+                'bob',
+                () => deleted = 'bob'),
+            child: const Text('open'),
+          ));
       await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();
       expect(deleted, isNull);
@@ -352,23 +478,24 @@ void main() {
     // "Null is not a subtype of Future<void>"，统一预置桩
     void stubAdmin(MockSocketService service) {
       when(() => service.adminCommand(any())).thenAnswer((_) async {});
-      when(() => service.adminCommand(any(),
-              targetUser: any(named: 'targetUser')))
+      when(() =>
+              service.adminCommand(any(), targetUser: any(named: 'targetUser')))
           .thenAnswer((_) async {});
       when(() => service.adminCommand(any(),
-              announcement: any(named: 'announcement')))
-          .thenAnswer((_) async {});
+          announcement: any(named: 'announcement'))).thenAnswer((_) async {});
     }
 
     testWidgets('查看所有用户调用 adminCommand(list_users)', (tester) async {
       final service = MockSocketService();
       stubAdmin(service);
       state.setLoggedIn('admin', true);
-      await openDialog(tester, ElevatedButton(
-        onPressed: () =>
-            showAdminPanel(tester.element(find.byType(ElevatedButton)), service, state),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showAdminPanel(
+                tester.element(find.byType(ElevatedButton)), service, state),
+            child: const Text('open'),
+          ));
       await tester.tap(find.text('查看所有用户'));
       await tester.pumpAndSettle();
       verify(() => service.adminCommand('list_users')).called(1);
@@ -378,35 +505,42 @@ void main() {
       final service = MockSocketService();
       stubAdmin(service);
       state.setLoggedIn('admin', true);
-      await openDialog(tester, ElevatedButton(
-        onPressed: () =>
-            showAdminPanel(tester.element(find.byType(ElevatedButton)), service, state),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showAdminPanel(
+                tester.element(find.byType(ElevatedButton)), service, state),
+            child: const Text('open'),
+          ));
       await tester.tap(find.text('发送系统公告'));
       await tester.pumpAndSettle();
 
       // 空公告点发送：不调用
       await tester.tap(find.text('发送'));
       await tester.pumpAndSettle();
-      verifyNever(() => service.adminCommand(any(), announcement: any(named: 'announcement')));
+      verifyNever(() => service.adminCommand(any(),
+          announcement: any(named: 'announcement')));
 
       // 输入公告
       await typeInto(tester, 'helloall');
       await tester.tap(find.text('发送'));
       await tester.pumpAndSettle();
-      verify(() => service.adminCommand('announcement', announcement: 'helloall')).called(1);
+      verify(() =>
+              service.adminCommand('announcement', announcement: 'helloall'))
+          .called(1);
     });
 
     testWidgets('删除用户：非法名弹 SnackBar，合法名调用 adminCommand', (tester) async {
       final service = MockSocketService();
       stubAdmin(service);
       state.setLoggedIn('admin', true);
-      await openDialog(tester, ElevatedButton(
-        onPressed: () =>
-            showAdminPanel(tester.element(find.byType(ElevatedButton)), service, state),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showAdminPanel(
+                tester.element(find.byType(ElevatedButton)), service, state),
+            child: const Text('open'),
+          ));
       // 注意：点"删除用户"会先 pop 管理面板再弹删除框
       await tester.tap(find.text('删除用户'));
       await tester.pumpAndSettle();
@@ -416,7 +550,8 @@ void main() {
       await tester.tap(find.text('删除'));
       await tester.pumpAndSettle();
       expect(find.text('用户名长度不能少于 3 个字符'), findsOneWidget);
-      verifyNever(() => service.adminCommand(any(), targetUser: any(named: 'targetUser')));
+      verifyNever(() =>
+          service.adminCommand(any(), targetUser: any(named: 'targetUser')));
 
       // 取消删除框 → 需重新打开管理面板（记录现状：面板已在打开删除框时关闭）
       await tester.tap(find.text('取消'));
@@ -428,7 +563,46 @@ void main() {
       await typeInto(tester, 'villain');
       await tester.tap(find.text('删除'));
       await tester.pumpAndSettle();
-      verify(() => service.adminCommand('delete_user', targetUser: 'villain')).called(1);
+      verify(() => service.adminCommand('delete_user', targetUser: 'villain'))
+          .called(1);
+    });
+
+    testWidgets('重置用户密码：短密码拦截，合法密码调用 adminResetPassword（阶段 J）', (tester) async {
+      final service = MockSocketService();
+      stubAdmin(service);
+      when(() => service.adminResetPassword(any(), any()))
+          .thenAnswer((_) async {});
+      state.setLoggedIn('admin', true);
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showAdminPanel(
+                tester.element(find.byType(ElevatedButton)), service, state),
+            child: const Text('open'),
+          ));
+      await tester.tap(find.text('重置用户密码'));
+      await tester.pumpAndSettle();
+
+      // 新密码过短 → SnackBar 拦截，不调用
+      await typeInto(tester, 'bob', index: 0);
+      await typeInto(tester, '123', index: 1);
+      await tester.tap(find.text('重置'));
+      await tester.pumpAndSettle();
+      expect(find.text('密码长度不能少于 6 个字符'), findsOneWidget);
+      verifyNever(() => service.adminResetPassword(any(), any()));
+
+      // 取消并重新打开（输入框内容清空）→ 合法输入 → 调用
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('重置用户密码'));
+      await tester.pumpAndSettle();
+      await typeInto(tester, 'bob', index: 0);
+      await typeInto(tester, 'newpass123', index: 1);
+      await tester.tap(find.text('重置'));
+      await tester.pumpAndSettle();
+      verify(() => service.adminResetPassword('bob', 'newpass123')).called(1);
     });
   });
 
@@ -439,19 +613,22 @@ void main() {
           .thenAnswer((_) async => true);
     }
 
-    testWidgets('新密码过短弹 SnackBar', (tester) async {
+    testWidgets('新密码为空弹 SnackBar（对齐服务端 P-17 文案）', (tester) async {
       final service = MockSocketService();
       stubChangePw(service);
       state.setLoggedIn('alice', false);
-      await openDialog(tester, ElevatedButton(
-        onPressed: () =>
-            showChangePasswordDialog(tester.element(find.byType(ElevatedButton)), service),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showChangePasswordDialog(
+                tester.element(find.byType(ElevatedButton)), service),
+            child: const Text('open'),
+          ));
       await typeInto(tester, 'oldpass'); // 旧密码
       await tester.tap(find.text('确认'));
       await tester.pumpAndSettle();
-      expect(find.text('密码长度不能少于 6 个字符'), findsOneWidget);
+      // 新密码为空 → 与服务端 validate_password 一致文案"密码不能为空"
+      expect(find.text('密码不能为空'), findsOneWidget);
       verifyNever(() => service.changePassword(any(), any()));
     });
 
@@ -459,11 +636,13 @@ void main() {
       final service = MockSocketService();
       stubChangePw(service);
       state.setLoggedIn('alice', false);
-      await openDialog(tester, ElevatedButton(
-        onPressed: () =>
-            showChangePasswordDialog(tester.element(find.byType(ElevatedButton)), service),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showChangePasswordDialog(
+                tester.element(find.byType(ElevatedButton)), service),
+            child: const Text('open'),
+          ));
       await typeInto(tester, 'oldpass');
       // 依次点击第 2、3 个输入框后输入
       await tester.tap(find.byType(RawTextField).at(1));
@@ -482,11 +661,13 @@ void main() {
       final service = MockSocketService();
       stubChangePw(service);
       state.setLoggedIn('alice', false);
-      await openDialog(tester, ElevatedButton(
-        onPressed: () =>
-            showChangePasswordDialog(tester.element(find.byType(ElevatedButton)), service),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showChangePasswordDialog(
+                tester.element(find.byType(ElevatedButton)), service),
+            child: const Text('open'),
+          ));
       await typeInto(tester, 'oldpass');
       await tester.tap(find.byType(RawTextField).at(1));
       await tester.pump();
@@ -505,11 +686,14 @@ void main() {
       state.setLoggedIn('alice', false);
       state.addGroup(Group(id: 1, name: '开发组'));
       state.updateGroupMembers(1, ['alice', 'bob', 'carol']);
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showGroupInfoDialog(
-            tester.element(find.byType(ElevatedButton)), state.groups.first),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showGroupInfoDialog(
+                tester.element(find.byType(ElevatedButton)),
+                state.groups.first),
+            child: const Text('open'),
+          ));
       expect(find.text('alice'), findsOneWidget);
       expect(find.text('bob'), findsOneWidget);
       expect(find.text('carol'), findsOneWidget);
@@ -519,11 +703,15 @@ void main() {
     testWidgets('成员为空显示加载态', (tester) async {
       state.setLoggedIn('alice', false);
       state.addGroup(Group(id: 1, name: '开发组'));
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showGroupInfoDialog(
-            tester.element(find.byType(ElevatedButton)), state.groups.first),
-        child: const Text('open'),
-      ), settle: false);
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showGroupInfoDialog(
+                tester.element(find.byType(ElevatedButton)),
+                state.groups.first),
+            child: const Text('open'),
+          ),
+          settle: false);
       expect(find.text('加载成员列表中…'), findsOneWidget);
     });
 
@@ -531,11 +719,14 @@ void main() {
       state.setLoggedIn('alice', false);
       state.addGroup(Group(id: 1, name: 'g'));
       state.updateGroupMembers(1, ['']);
-      await openDialog(tester, ElevatedButton(
-        onPressed: () => showGroupInfoDialog(
-            tester.element(find.byType(ElevatedButton)), state.groups.first),
-        child: const Text('open'),
-      ));
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showGroupInfoDialog(
+                tester.element(find.byType(ElevatedButton)),
+                state.groups.first),
+            child: const Text('open'),
+          ));
       expect(find.text('?'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });

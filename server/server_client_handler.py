@@ -1,4 +1,5 @@
 import ssl
+import socket
 import logging
 import time
 import bcrypt
@@ -70,6 +71,13 @@ class ClientHandler:
                 except Exception as e:
                     logging.warning(f"通知旧会话下线失败: 用户={username}, 错误={e}")
                 try:
+                    # shutdown 唤醒阻塞在 recv 的旧会话线程（close 不能打断
+                    # 阻塞读），其 finally 会清理 client_map / transfer_sockets；
+                    # 由于映射已指向新会话，不会误删新会话或广播下线
+                    old_sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
                     old_sock.close()
                 except Exception:
                     pass
@@ -139,6 +147,10 @@ class ClientHandler:
                         with self.server.client_map_lock:
                             self.server.client_map[username] = ssock
                         logging.info(f"注册成功: 用户={username}, 管理员={is_admin_register}")
+                        # 阶段 J：注册上线 → 更新 last_seen + presence 广播与快照
+                        self.server.db.update_last_seen(username)
+                        self.server.broadcast_presence(username, True)
+                        self.server.send_presence_snapshot(username, ssock)
                         # 加载离线数据并发送初始好友/群组列表
                         message_handler.load_offline_data(username, ssock)
                         message_handler.send_initial_data(username, ssock)
@@ -211,6 +223,10 @@ class ClientHandler:
                                     stale.close()
                                 except Exception:
                                     pass
+                        # 阶段 J：主会话上线 → 更新 last_seen + presence 广播与快照
+                        self.server.db.update_last_seen(username)
+                        self.server.broadcast_presence(username, True)
+                        self.server.send_presence_snapshot(username, ssock)
                         # 加载离线消息、好友请求和文件请求，并发送初始好友/群组列表
                         message_handler.load_offline_data(username, ssock)
                         message_handler.send_initial_data(username, ssock)
@@ -227,6 +243,7 @@ class ClientHandler:
             logging.error(f"处理客户端 {client_address} 时出错: {e}")
         finally:
             if username and wrapped is not None:
+                removed_main = False
                 with self.server.client_map_lock:
                     if is_transfer_session:
                         # 仅移除属于自己的传输通道映射
@@ -236,6 +253,7 @@ class ClientHandler:
                         # 仅移除属于自己的映射，避免误删重复登录后的新会话（阶段 G1）
                         if self.server.client_map.get(username) is wrapped:
                             self.server.client_map.pop(username, None)
+                            removed_main = True
                         # 主会话结束：一并关闭自己的传输通道
                         stale = self.server.transfer_sockets.pop(username, None)
                         if stale is not None and stale is not wrapped:
@@ -243,5 +261,11 @@ class ClientHandler:
                                 stale.close()
                             except Exception:
                                 pass
+                # 阶段 J：主会话下线 → presence 广播（传输通道/未登录成功不广播）
+                if removed_main:
+                    try:
+                        self.server.broadcast_presence(username, False)
+                    except Exception as e:
+                        logging.warning(f"presence 下线广播失败: 用户={username}, 错误={e}")
             logging.info(f"客户端断开连接: {client_address}")
             client_socket.close()

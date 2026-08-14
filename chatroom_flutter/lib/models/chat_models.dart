@@ -114,6 +114,95 @@ class ConversationMeta {
   }
 }
 
+/// 用户资料（阶段 J：P0-2）
+class UserProfile {
+  final String username;
+  final String nickname;
+  final String avatar;
+  final String signature;
+  final DateTime? lastSeen;
+  final bool isAdmin;
+
+  UserProfile({
+    required this.username,
+    this.nickname = '',
+    this.avatar = '',
+    this.signature = '',
+    this.lastSeen,
+    this.isAdmin = false,
+  });
+
+  /// 显示名：昵称非空用昵称，否则用户名；纯空白昵称视为未设置
+  String get displayName =>
+      (nickname.isNotEmpty && nickname.trim().isNotEmpty) ? nickname : username;
+
+  /// 是否已设置资料（任一字段非空）
+  bool get hasProfile =>
+      nickname.isNotEmpty || avatar.isNotEmpty || signature.isNotEmpty;
+
+  /// 防御性解析：缺失字段/类型漂移/null 均不抛异常
+  factory UserProfile.fromJson(Map<String, dynamic> json) {
+    String asStr(dynamic v) => v == null ? '' : v.toString();
+    DateTime? parseLastSeen(dynamic v) {
+      if (v == null || v.toString().isEmpty) return null;
+      try {
+        var s = v.toString().trim();
+        if (s.endsWith('Z')) s = s.substring(0, s.length - 1);
+        return DateTime.parse('${s}Z').toLocal();
+      } catch (_) {
+        return null;
+      }
+    }
+
+    bool asBool(dynamic v) {
+      if (v is bool) return v;
+      if (v is num) return v != 0;
+      return v == 'true' || v == '1';
+    }
+
+    return UserProfile(
+      username: asStr(json['username']),
+      nickname: asStr(json['nickname']),
+      avatar: asStr(json['avatar']),
+      signature: asStr(json['signature']),
+      lastSeen: parseLastSeen(json['last_seen']),
+      isAdmin: asBool(json['is_admin']),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'username': username,
+        'nickname': nickname,
+        'avatar': avatar,
+        'signature': signature,
+        'last_seen': lastSeen?.toUtc().toIso8601String(),
+        'is_admin': isAdmin ? 1 : 0,
+      };
+}
+
+/// 好友元数据（阶段 J：P1-8）——备注名 + 分组
+class FriendMeta {
+  final String username;
+  final String note;
+  final String groupName;
+
+  const FriendMeta({
+    required this.username,
+    this.note = '',
+    this.groupName = '',
+  });
+
+  /// 防御性解析：缺失字段/类型漂移/null 均不抛异常
+  factory FriendMeta.fromJson(Map<String, dynamic> json) {
+    String asStr(dynamic v) => v == null ? '' : v.toString();
+    return FriendMeta(
+      username: asStr(json['username']),
+      note: asStr(json['note']),
+      groupName: asStr(json['group_name']),
+    );
+  }
+}
+
 /// 群组信息
 class Group {
   final int id;
@@ -135,7 +224,8 @@ class Group {
   factory Group.fromJson(Map<String, dynamic> json) {
     // 防御性解析：服务端字段类型漂移（数字/字符串混用）时优雅降级，不抛异常
     final rawId = json['id'];
-    final id = rawId is int ? rawId : (int.tryParse(rawId?.toString() ?? '') ?? 0);
+    final id =
+        rawId is int ? rawId : (int.tryParse(rawId?.toString() ?? '') ?? 0);
     final rawName = json['group_name'] ?? json['name'];
     final name = rawName is String ? rawName : (rawName?.toString() ?? '');
     final rawMembers = json['members'];
@@ -231,9 +321,24 @@ class InputValidator {
     return ValidationResult.ok();
   }
 
+  /// 密码校验（与服务端 validation.py validate_password 保持一致：P-17）
+  ///
+  /// 规则：非空；长度 6–128；不含控制字符（Unicode Cc 类别：
+  /// U+0000–U+001F、U+007F–U+009F）。错误文案与服务端逐字一致。
   static ValidationResult validatePassword(String password) {
+    if (password.isEmpty) {
+      return ValidationResult.fail('密码不能为空');
+    }
     if (password.length < 6) {
       return ValidationResult.fail('密码长度不能少于 6 个字符');
+    }
+    if (password.length > 128) {
+      return ValidationResult.fail('密码长度不能超过 128 个字符');
+    }
+    for (final unit in password.codeUnits) {
+      if (unit < 0x20 || (unit >= 0x7F && unit <= 0x9F)) {
+        return ValidationResult.fail('密码不能包含控制字符');
+      }
     }
     return ValidationResult.ok();
   }

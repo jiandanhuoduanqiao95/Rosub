@@ -40,6 +40,19 @@ class MessageHandler:
         self.server.guarded_send(ssock, "list_groups", json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
         logging.info(f"发送初始群组列表给用户: {username}, 群组数={len(groups)}")
 
+        # 阶段 J 修复（拉黑状态不可逆）：好友备注/分组与黑名单随登录初始数据
+        # 一并推送。客户端 Dart SecureSocket 存在连续 add+flush 批次静默丢失
+        # 的 VM 缺陷（登录后立即连发 list_friends_meta / list_blocked 请求可能
+        # 整条丢失），改为服务端主动推送（客户端读侧可靠），登录即恢复状态，
+        # 无需任何客户端请求。
+        metas = self.server.db.get_friends_meta(username)
+        self.server.guarded_send(ssock, "admin_response", json.dumps(metas),
+                     extra_headers={"response_type": "list_friends_meta"})
+        blocked = self.server.db.get_blocked_users(username)
+        self.server.guarded_send(ssock, "admin_response", json.dumps(blocked),
+                     extra_headers={"response_type": "list_blocked"})
+        logging.info(f"发送初始社交元数据给用户: {username}, 备注/分组={len(metas)}, 黑名单={len(blocked)}")
+
     def load_offline_data(self, username, ssock):
         """加载用户的离线消息和文件请求"""
         messages = self.server.db.get_offline_messages(username)
@@ -153,13 +166,16 @@ class MessageHandler:
                     logging.info(
                         f"跳过发送群组文件请求给发送者本人: 发送者={sender}, 文件名={filename}, 群组ID={group_id}, 消息ID={message_id}")
 
-        # 加载待处理好友请求
-        pending_requests = self.server.db.get_pending_friend_requests(username)
+        # 加载待处理好友请求（阶段 J：携带验证消息）
+        pending_requests = self.server.db.get_pending_friend_requests_detail(username)
         logging.info(f"用户 {username} 的待处理好友请求: {len(pending_requests)} 条")
-        for requester in pending_requests:
+        for requester, request_message in pending_requests:
             try:
+                extra_headers = {"from": requester}
+                if request_message:
+                    extra_headers["message"] = request_message
                 self.server.guarded_send(ssock, "friend_request", f"来自 {requester} 的好友请求",
-                             extra_headers={"from": requester})
+                             extra_headers=extra_headers)
                 logging.info(f"发送待处理好友请求: 请求者={requester}, 接收者={username}")
             except Exception as e:
                 logging.error(f"发送待处理好友请求失败: 请求者={requester}, 接收者={username}, 错误={e}")
@@ -206,6 +222,12 @@ class MessageHandler:
                     recv_body(ssock, length)
                 self.server.guarded_send(ssock, "error", f"用户 {target} 不存在")
                 logging.warning(f"大文件直传失败: {username} -> {target}, 用户不存在")
+                return True
+            if self.server.db.is_blocked(target, username):
+                if length > 0:
+                    recv_body(ssock, length)
+                self.server.guarded_send(ssock, "error", "对方已将您拉黑，无法发送文件")
+                logging.warning(f"大文件直传失败: {username} -> {target}, 被对方拉黑")
                 return True
             if not self.server.db.is_friend(username, target):
                 if length > 0:
@@ -335,6 +357,12 @@ class MessageHandler:
             self.server.guarded_send(ssock, "error", f"错误：{target} 不是您的好友")
             logging.warning(f"文件发送失败: {username} -> {target}, 非好友")
             return True
+        if self.server.db.is_blocked(target, username):
+            if file_path:
+                self.server.db._delete_disk_file(file_path)
+            self.server.guarded_send(ssock, "error", "对方已将您拉黑，无法发送文件")
+            logging.warning(f"文件发送失败: {username} -> {target}, 被对方拉黑")
+            return True
         self.server.db.save_file_request(username, target, filename, effective_size, file_data, message_id, file_path=file_path)
         with self.server.client_map_lock:
             recipient_socket = self.server.client_map.get(target)
@@ -387,6 +415,11 @@ class MessageHandler:
                 elif msg_type == "chat":
                     target = header.get("to")
                     message_id = header.get("message_id", str(uuid.uuid4()))
+                    # 阶段 J：黑名单拦截（A 拉黑 B → B 对 A 的发送被拒）
+                    if self.server.db.is_blocked(target, username):
+                        self.server.guarded_send(ssock, "error", "对方已将您拉黑，无法发送消息")
+                        logging.warning(f"消息发送失败: {username} -> {target}, 被对方拉黑")
+                        continue
                     if not self.server.db.is_friend(username, target):
                         self.server.guarded_send(ssock, "error", f"错误：{target} 不是您的好友")
                         logging.warning(f"消息发送失败: {username} -> {target}, 非好友")
@@ -439,6 +472,10 @@ class MessageHandler:
                     if not self.server.db.user_exists(target):
                         self.server.guarded_send(ssock, "error", f"用户 {target} 不存在")
                         logging.warning(f"大文件探测失败: {username} -> {target}, 用户不存在")
+                        continue
+                    if self.server.db.is_blocked(target, username):
+                        self.server.guarded_send(ssock, "error", "对方已将您拉黑，无法传输文件")
+                        logging.warning(f"大文件探测失败: {username} -> {target}, 被对方拉黑")
                         continue
                     if not self.server.db.is_friend(username, target):
                         self.server.guarded_send(ssock, "error", f"错误：{target} 不是您的好友")
@@ -499,6 +536,12 @@ class MessageHandler:
 
                 elif msg_type == "friend_request":
                     target = header.get("to")
+                    # 阶段 J：黑名单双向不可请求
+                    if self.server.db.is_blocked(target, username) or \
+                            self.server.db.is_blocked(username, target):
+                        self.server.guarded_send(ssock, "error", "对方已将您拉黑，无法发送好友请求")
+                        logging.warning(f"好友请求失败: {username} -> {target}, 存在拉黑关系")
+                        continue
                     if not self.server.db.user_exists(target):
                         self.server.guarded_send(ssock, "error", f"用户 {target} 不存在")
                         logging.warning(f"好友请求失败: 目标用户 {target} 不存在")
@@ -507,13 +550,18 @@ class MessageHandler:
                         self.server.guarded_send(ssock, "error", f"用户 {target} 已是您的好友")
                         logging.warning(f"好友请求失败: {username} 和 {target} 已为好友")
                         continue
-                    if self.server.db.add_friend_request(username, target):
+                    # 阶段 J：好友请求可携带验证消息（P1-10）
+                    request_message = header.get("message")
+                    if self.server.db.add_friend_request(username, target, request_message):
                         with self.server.client_map_lock:
                             recipient_socket = self.server.client_map.get(target)
                         if recipient_socket:
                             try:
+                                extra_headers = {"from": username}
+                                if request_message:
+                                    extra_headers["message"] = request_message
                                 self.server.guarded_send(recipient_socket, "friend_request", f"来自 {username} 的好友请求",
-                                             extra_headers={"from": username})
+                                             extra_headers=extra_headers)
                                 logging.info(f"好友请求已发送: {username} -> {target}")
                             except Exception as e:
                                 logging.error(f"发送好友请求通知失败: {username} -> {target}, 错误={e}")
@@ -617,6 +665,137 @@ class MessageHandler:
                     logging.info(f"消息搜索: 用户={username}, 关键字={keyword}, "
                                  f"会话={with_user or group_id or '全局'}, "
                                  f"返回={len(batch)}条")
+
+                elif msg_type == "get_profile":
+                    # 用户资料查询（阶段 J：P0-2）
+                    target = header.get("to")
+                    profile = self.server.db.get_profile(target) if target else None
+                    if not profile:
+                        self.server.guarded_send(ssock, "error", f"用户 {target} 不存在")
+                        logging.warning(f"资料查询失败: 用户={username}, 目标={target} 不存在")
+                        continue
+                    body = json.dumps({
+                        "username": profile["username"],
+                        "nickname": profile["nickname"],
+                        "avatar": profile["avatar"],
+                        "signature": profile["signature"],
+                        "last_seen": profile["last_seen"],
+                        "is_admin": 1 if profile["is_admin"] else 0,
+                    })
+                    self.server.guarded_send(ssock, "profile_response", body,
+                                 extra_headers={"to": target})
+                    logging.info(f"资料查询: 用户={username}, 目标={target}")
+
+                elif msg_type == "set_profile":
+                    # 更新自己的资料（阶段 J：P0-2）
+                    # 至少提供一个字段（含空串清除语义）；三个字段均缺失才报错
+                    nickname = header.get("nickname")
+                    avatar = header.get("avatar")
+                    signature = header.get("signature")
+                    if nickname is None and avatar is None and signature is None:
+                        self.server.guarded_send(ssock, "error", "资料不能为空，请至少设置一个字段")
+                        logging.warning(f"资料更新失败: 用户={username}, 字段全部缺失")
+                        continue
+                    self.server.db.set_profile(
+                        username,
+                        nickname=nickname if nickname is not None else None,
+                        avatar=avatar if avatar is not None else None,
+                        signature=signature if signature is not None else None)
+                    profile = self.server.db.get_profile(username)
+                    body = json.dumps({
+                        "username": profile["username"],
+                        "nickname": profile["nickname"],
+                        "avatar": profile["avatar"],
+                        "signature": profile["signature"],
+                        "last_seen": profile["last_seen"],
+                        "is_admin": 1 if profile["is_admin"] else 0,
+                    })
+                    self.server.guarded_send(ssock, "profile_response", body,
+                                 extra_headers={"to": username})
+                    logging.info(f"资料更新: 用户={username}")
+
+                elif msg_type == "set_friend_note":
+                    # 好友备注名（阶段 J：P1-8）
+                    target = header.get("to")
+                    note = header.get("note", "")
+                    if not self.server.db.is_friend(username, target):
+                        self.server.guarded_send(ssock, "error", f"错误：{target} 不是您的好友")
+                        logging.warning(f"备注设置失败: {username} -> {target}, 非好友")
+                        continue
+                    if self.server.db.set_friend_note(username, target, note or ""):
+                        self.server.guarded_send(ssock, "chat", f"已更新 {target} 的备注")
+                        logging.info(f"备注已更新: {username} -> {target}")
+                    else:
+                        self.server.guarded_send(ssock, "error", "备注更新失败")
+                        logging.error(f"备注更新失败: {username} -> {target}")
+
+                elif msg_type == "set_friend_group":
+                    # 好友分组（阶段 J：P1-8）
+                    target = header.get("to")
+                    group_name = header.get("group_name", "")
+                    if not self.server.db.is_friend(username, target):
+                        self.server.guarded_send(ssock, "error", f"错误：{target} 不是您的好友")
+                        logging.warning(f"分组设置失败: {username} -> {target}, 非好友")
+                        continue
+                    if self.server.db.set_friend_group(username, target, group_name or ""):
+                        self.server.guarded_send(ssock, "chat", f"已更新 {target} 的分组")
+                        logging.info(f"分组已更新: {username} -> {target}, 分组={group_name}")
+                    else:
+                        self.server.guarded_send(ssock, "error", "分组更新失败")
+                        logging.error(f"分组更新失败: {username} -> {target}")
+
+                elif msg_type == "list_friends_meta":
+                    # 好友元数据（备注/分组，本视图方向）（阶段 J：P1-8）
+                    metas = self.server.db.get_friends_meta(username)
+                    self.server.guarded_send(ssock, "admin_response", json.dumps(metas),
+                                 extra_headers={"response_type": "list_friends_meta"})
+                    logging.info(f"好友元数据查询: 用户={username}, 数量={len(metas)}")
+
+                elif msg_type == "block_user":
+                    # 拉黑（阶段 J：P1-9）
+                    target = header.get("to")
+                    if target == username:
+                        self.server.guarded_send(ssock, "error", "不能拉黑自己")
+                        logging.warning(f"拉黑失败: 用户 {username} 尝试拉黑自己")
+                        continue
+                    if not self.server.db.user_exists(target):
+                        self.server.guarded_send(ssock, "error", f"用户 {target} 不存在")
+                        logging.warning(f"拉黑失败: 目标用户 {target} 不存在")
+                        continue
+                    if self.server.db.block_user(username, target):
+                        self.server.guarded_send(ssock, "chat", f"已拉黑 {target}")
+                        logging.info(f"拉黑成功: {username} -> {target}")
+                    else:
+                        self.server.guarded_send(ssock, "error", "拉黑失败")
+                        logging.error(f"拉黑失败: {username} -> {target}")
+
+                elif msg_type == "unblock_user":
+                    # 解除拉黑（阶段 J：P1-9）
+                    target = header.get("to")
+                    if self.server.db.unblock_user(username, target):
+                        self.server.guarded_send(ssock, "chat", f"已解除拉黑 {target}")
+                        logging.info(f"解除拉黑: {username} -> {target}")
+                    else:
+                        self.server.guarded_send(ssock, "error", f"未拉黑用户 {target}，不在黑名单中")
+                        logging.warning(f"解除拉黑失败: {username} -> {target}, 不在黑名单中")
+
+                elif msg_type == "list_blocked":
+                    # 黑名单列表（阶段 J：P1-9）
+                    blocked = self.server.db.get_blocked_users(username)
+                    self.server.guarded_send(ssock, "admin_response", json.dumps(blocked),
+                                 extra_headers={"response_type": "list_blocked"})
+                    logging.info(f"黑名单查询: 用户={username}, 数量={len(blocked)}")
+
+                elif msg_type == "search_users":
+                    # 用户搜索（阶段 J：P1-10）
+                    keyword = (header.get("keyword") or "").strip()
+                    if not keyword:
+                        self.server.guarded_send(ssock, "error", "搜索关键字不能为空")
+                        logging.warning(f"用户搜索失败: 用户={username}, 缺少关键字")
+                        continue
+                    results = self.server.db.search_users(keyword, exclude=username)
+                    self.server.guarded_send(ssock, "user_search_response", json.dumps(results))
+                    logging.info(f"用户搜索: 用户={username}, 关键字={keyword}, 返回={len(results)}条")
 
                 elif msg_type == "accept_friend":
                     requester = header.get("from")

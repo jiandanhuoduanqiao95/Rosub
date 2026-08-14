@@ -23,22 +23,27 @@ void main() {
     test('【已修复】group_name 为数字类型时优雅降级（回归锁定）', () {
       // 正确行为：类型不符的字段应降级（toString / 空串），不抛异常。
       // 当前实现：`json['group_name'] as String?` 直接 TypeError。
-      expect(() => Group.fromJson({'id': 1, 'group_name': 123}), returnsNormally,
+      expect(
+          () => Group.fromJson({'id': 1, 'group_name': 123}), returnsNormally,
           reason: '修复后不应再抛 TypeError');
     });
 
     test('【已修复】id 为字符串类型时优雅降级（回归锁定）', () {
-      expect(() => Group.fromJson({'id': '1', 'group_name': 'g'}), returnsNormally,
+      expect(
+          () => Group.fromJson({'id': '1', 'group_name': 'g'}), returnsNormally,
           reason: '修复后不应再抛 TypeError');
     });
 
     test('【已修复】id 为 double 时优雅降级（回归锁定）', () {
-      expect(() => Group.fromJson({'id': 1.5, 'group_name': 'g'}), returnsNormally,
+      expect(
+          () => Group.fromJson({'id': 1.5, 'group_name': 'g'}), returnsNormally,
           reason: '修复后不应再抛 TypeError');
     });
 
     test('【已修复】members 为字符串时优雅降级（回归锁定）', () {
-      expect(() => Group.fromJson({'id': 1, 'group_name': 'g', 'members': 'alice'}),
+      expect(
+          () =>
+              Group.fromJson({'id': 1, 'group_name': 'g', 'members': 'alice'}),
           returnsNormally,
           reason: '修复后不应再抛 TypeError');
     });
@@ -74,7 +79,6 @@ void main() {
       final g = Group.fromJson({'id': 1, 'group_name': 'g', 'members': null});
       expect(g.members, isEmpty);
     });
-
   });
 
   // ----------------------------------------------------------
@@ -83,10 +87,7 @@ void main() {
   group('ChatMessage 组合矩阵', () {
     test('group_chat 类型 displayText 为 sender: content', () {
       final m = ChatMessage(
-          sender: 'bob',
-          content: '大家好',
-          messageId: 'm1',
-          type: 'group_chat');
+          sender: 'bob', content: '大家好', messageId: 'm1', type: 'group_chat');
       expect(m.displayText, 'bob: 大家好');
     });
 
@@ -124,7 +125,8 @@ void main() {
 
     test('header 对任意 status 均返回 "sender "（含尾随空格，记录现状）', () {
       for (final s in ['sent', 'delivered', 'recalled', 'unknown_status']) {
-        final m = ChatMessage(sender: 'alice', content: 'c', messageId: 'm5', status: s);
+        final m = ChatMessage(
+            sender: 'alice', content: 'c', messageId: 'm5', status: s);
         // 现状：'$sender $statusStr' 拼接出一个尾随空格；UI 未使用该字段
         expect(m.header, 'alice ', reason: 'status=$s');
       }
@@ -204,7 +206,8 @@ void main() {
     String randomString(int maxLen) {
       final len = prng.nextInt(maxLen + 1);
       return String.fromCharCodes(
-        List.generate(len, (_) => seedChars.codeUnitAt(prng.nextInt(seedChars.length))),
+        List.generate(
+            len, (_) => seedChars.codeUnitAt(prng.nextInt(seedChars.length))),
       );
     }
 
@@ -214,26 +217,29 @@ void main() {
           0 => randomString(40), // 纯合法字符随机串
           1 => faker.lorem.sentence(), // 含空格/标点的自然文本
           2 => faker.internet.userName(), // 半合法用户名
-          _ => String.fromCharCodes(List.generate(
-              prng.nextInt(50),
-              (_) => prng.nextInt(0x100)), // 任意 ASCII 字节
-          ),
+          _ => String.fromCharCodes(
+              List.generate(
+                  prng.nextInt(50), (_) => prng.nextInt(0x100)), // 任意 ASCII 字节
+            ),
         };
 
         final expected = _referenceValidateUsername(input);
         final actual = InputValidator.validateUsername(input);
         expect(actual.valid, expected,
-            reason: 'input="${input.length > 60 ? input.substring(0, 60) : input}"'
+            reason:
+                'input="${input.length > 60 ? input.substring(0, 60) : input}"'
                 ' (len=${input.length}) 期望 valid=$expected 实际=${actual.valid}');
       }
     });
 
-    test('1000 次随机密码：长度 >= 6 即合法（属性测试）', () {
+    test('1000 次随机密码：6-128 位且无控制字符即合法（属性测试，对齐服务端 P-17）', () {
+      bool noControl(String s) =>
+          !s.codeUnits.any((u) => u < 0x20 || (u >= 0x7F && u <= 0x9F));
       for (var i = 0; i < 1000; i++) {
         final len = prng.nextInt(30);
         final input = String.fromCharCodes(
             List.generate(len, (_) => prng.nextInt(0x100)));
-        final expected = len >= 6;
+        final expected = len >= 6 && len <= 128 && noControl(input);
         final actual = InputValidator.validatePassword(input);
         expect(actual.valid, expected, reason: 'len=$len');
       }
@@ -247,7 +253,15 @@ void main() {
     });
 
     test('用户名 3-32 边界矩阵', () {
-      for (final n in ['abc', 'abcd', 'a' * 32, 'a' * 31, 'a' * 33, 'ab', 'a']) {
+      for (final n in [
+        'abc',
+        'abcd',
+        'a' * 32,
+        'a' * 31,
+        'a' * 33,
+        'ab',
+        'a'
+      ]) {
         final expected = n.length >= 3 && n.length <= 32;
         expect(InputValidator.validateUsername(n).valid, expected,
             reason: 'len=${n.length}');

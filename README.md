@@ -14,7 +14,7 @@
   - tkinter 图形界面 —— 保留作为功能参照（`client/gui/`）
 - **协议**: 自定义二进制协议（4 字节头长度 + JSON 头 + 消息体，v1.0.0 已冻结）
 - **认证**: bcrypt 密码哈希 + 管理员二次密钥
-- **测试**: pytest 410 个（pytest-xdist 并行）+ Flutter widget 测试 480 个 + Dart 协议 42 个
+- **测试**: pytest 522 个（pytest-xdist 并行）+ Flutter widget 测试 595 个 + Dart 协议 42 个
 
 ---
 
@@ -88,7 +88,7 @@ chatroom/
 │   ├── lib/protocol.dart              #   编解码 + MessageReader
 │   └── test/protocol_test.dart        #   15 个单元测试
 ├── protocol.py                        # Python 协议层（v1.0.0，已冻结）
-├── database.py                        # SQLite 数据库层（9 张表）
+├── database.py                        # SQLite 数据库层（11 张表）
 ├── config.py                          # 配置加载模块
 ├── config.yaml                        # 全局配置文件
 ├── validation.py                      # 用户名/密码格式验证
@@ -153,7 +153,13 @@ chatroom/
 | UI | Flutter Linux 桌面端 | Material 3 主题、深色模式、聊天气泡、侧边栏分组 |
 | UI | 中文输入法桥接 | Python GTK 透明窗口桥接 fcitx，避免 Flutter 死锁 |
 | UI | 光标同步 | 方向键移动光标时 Flutter 视觉光标与 GTK 输入框同步 |
-| 测试 | 自动化测试 | pytest 283 个 + Flutter 106 个 + Dart 15 个 |
+| 身份 | 用户资料 | 昵称/头像/签名/最后在线时间；资料页查看与编辑（J1） |
+| 身份 | 在线状态 | presence 广播 + 登录快照；好友侧边栏在线圆点；黑名单双向隐藏（J2） |
+| 身份 | 管理员重置密码 | 无需旧密码直接重置；目标用户在线时被强制下线（J3） |
+| 身份 | 好友备注/分组 | 备注名显示于侧边栏；分组分区渲染；登录自动同步（J4） |
+| 身份 | 黑名单 | 拦截消息/文件/好友请求；跨登录保持；解除恢复（J4） |
+| 身份 | 好友请求验证消息 + 用户搜索 | 搜索用户名发请求；可附验证消息；发送请求时可预填备注名（J4） |
+| 测试 | 自动化测试 | pytest 522 个 + Flutter 595 个 + Dart 42 个 |
 
 ### 下一步开发
 
@@ -188,10 +194,10 @@ chatroom/
 | 删除好友 | 无协议、无 UI，好友关系不可撤销 | ✅ 已完成 |
 | 退出群组 | 无协议、无 UI，加入后永久接收消息 | ✅ 已完成 |
 | 群成员列表 | 服务端不向客户端发送成员列表 | ✅ 已完成 |
-| 重复登录踢出 | 同账号登录不踢旧会话，旧客户端"冻结" | 待开发 |
-| 修改密码 | 无协议、无 UI | 待开发 |
-| 文件大小限制 | 无上限，大文件可 OOM | 待开发 |
-| 文件名安全过滤 | 未过滤路径穿越 | 待开发 |
+| 重复登录踢出 | 同账号登录不踢旧会话，旧客户端"冻结" | ✅ 已完成（阶段 G1：旧会话强制下线） |
+| 修改密码 | 无协议、无 UI | ✅ 已完成（阶段 G2/G3：服务端校验 + UI） |
+| 文件大小限制 | 无上限，大文件可 OOM | ✅ 已完成（阶段 G4：5GB 上限 + 大小文件分流） |
+| 文件名安全过滤 | 未过滤路径穿越 | ✅ 已完成（阶段 G5） |
 | 消息搜索 | DB 有 API 但协议/UI 未接入 | ✅ 已完成（私聊/群聊两类范围，系统会话只读无搜索入口） |
 | 登录速率限制 | 无暴力破解防护 | ✅ 已完成 |
 | Session 持久化 | 重启需重新输入凭据 | ✅ 已完成（记住我回填；管理员密钥不落盘） |
@@ -206,9 +212,13 @@ chatroom/
 阶段 H：提醒 + Session + 搜索 ← ✅ 已完成（任务栏闪烁/记住我/消息搜索）
     ↓
 阶段 I：消息可靠性 + 数据地基  ← ✅ 已完成（发送队列/conversations 表/备份恢复）
-阶段 J：身份与社交            ← ⏳ 规划中（资料/在线状态/密码重置/黑名单）
+    ↓
+阶段 J：身份与社交            ← ✅ 已完成（资料/在线状态/密码重置/黑名单/备注分组/验证消息）
+    ↓
 阶段 K：会话体验              ← ⏳ 规划中（置顶/草稿/静音/提示音/编辑/引用/转发/反应）
+    ↓
 阶段 L：多端前置              ← ⏳ 规划中（多会话并存/钥匙串/本地缓存）
+    ↓
 阶段 M：群组治理 + 运维        ← ⏳ 规划中（群主权限/入群审批/状态面板/存储治理）
 ```
 
@@ -255,36 +265,40 @@ chatroom/
 
 ---
 
-## 数据库设计（9 张表）
+## 数据库设计（11 张表）
 
-> 规划中扩展（见开发文档 §13）：`users` 表将新增 nickname/avatar_path/signature/last_seen（P0-2）、
-> `friends` 表新增 note 备注名（P1-8）、新增第 10 张 `conversations` 会话元数据表（P0-8，阶段 I 落地）。
+> 阶段 J 已落地：`users` 表新增 nickname/avatar/signature/last_seen（P0-2）、
+> `friends` 表新增 note/group_name/request_message（P1-8/P1-10）、第 10 张
+> `conversations` 会话元数据表（P0-8，阶段 I 落地）、第 11 张 `blocked_users`
+> 黑名单表（P1-9，阶段 J 落地）。
 
 | 表 | 用途 |
 |----|------|
-| `users` | 用户认证（username, bcrypt hash, is_admin） |
+| `users` | 用户认证与资料（username, bcrypt hash, is_admin, nickname/avatar/signature/last_seen） |
 | `offline_messages` | 聊天消息持久化（sent/delivered/recalled） |
 | `message_history` | 永久消息历史（分页查询 + 关键字搜索） |
-| `friends` | 好友关系（pending/accepted） |
+| `friends` | 好友关系（pending/accepted；备注名/分组/请求验证消息） |
 | `file_requests` | 私聊文件请求 |
 | `groups` | 群组定义 |
 | `group_members` | 群成员 |
 | `group_file_requests` | 群文件请求 |
 | `group_file_responses` | 群文件响应 |
+| `conversations` | 会话元数据（pinned/muted/draft/cleared_at，阶段 I） |
+| `blocked_users` | 黑名单（单向拉黑关系，阶段 J） |
 
 ---
 
 ## 测试体系
 
 ```bash
-./run_tests.sh --all          # 全部 410 个测试（pytest-xdist 并行 ~40s）
+./run_tests.sh --all          # 全部 522 个测试（pytest-xdist 并行 ~40s）
 ./run_tests.sh --quick        # 快速测试（跳过 E2E/异步/状态机）
 ./run_tests.sh --db           # 仅数据库（含阶段 F 扩展）
 ./run_tests.sh --e2e          # 仅端到端（含异步 E2E）
 ./run_tests.sh --no-parallel  # 串行执行
 ```
 
-> 注：下表为阶段 F 快照（283 个）；最新计数 410 个（Python）+ 42 个（Dart）+ 480 个（Flutter）= 932 项，
+> 注：下表为阶段 F 快照（283 个）；最新计数 522 个（Python）+ 42 个（Dart）+ 595 个（Flutter）= 1159 项，
 > 逐文件明细见 `TESTING_GUIDE_FLUTTER.md` §3。
 
 | 层 | 文件 | 数量 | 覆盖内容 |
@@ -302,7 +316,7 @@ chatroom/
 | 守护测试 | `test_socket_guard.py` | 8 | pytest-socket 纯逻辑不触网 |
 | 后端集成 | `test_backend_integration.py` | 7 | 运行时路径验证 |
 
-Flutter 测试（480 个）：
+Flutter 测试（595 个）：
 
 ```bash
 cd chatroom_flutter
@@ -320,7 +334,7 @@ flutter test integration_test/chatroom_app_test.dart -d linux   # 集成绑定
 | 服务端 | Python 3.12 |
 | 客户端 | Flutter (Dart) / tkinter (保留) |
 | 网络 | TCP socket + SSL/TLS |
-| 数据库 | SQLite3（10 张表，含阶段 I conversations） |
+| 数据库 | SQLite3（11 张表，含阶段 I conversations + 阶段 J blocked_users） |
 | 密码 | bcrypt |
 | 配置 | config.yaml + PyYAML |
 | 测试 | pytest 9.x / flutter_test / mocktail / integration_test |
@@ -329,6 +343,17 @@ flutter test integration_test/chatroom_app_test.dart -d linux   # 集成绑定
 ---
 
 ## 变更日志
+
+### v7.0.0 (2026-08-15)
+
+- **阶段 J：身份与社交完成**
+  - J1 用户资料：`users` 表扩展 nickname/avatar/signature/last_seen；get_profile/set_profile 协议 + 资料页
+  - J2 在线状态：presence 广播（登录/登出）+ 新登录者快照；黑名单双向隐藏；侧边栏在线圆点
+  - J3 管理员重置密码：`admin_reset_password` 命令 + 管理面板入口；重置后目标用户强制下线（shutdown+close 唤醒阻塞线程并广播下线）
+  - J4 好友备注/分组、黑名单（拦截 chat/文件/好友请求）、好友请求验证消息、用户搜索；发送请求时可预填备注名（接受后自动设置）
+  - 密码格式校验客户端与服务端对齐（6-128 位、无控制字符，P-17）
+  - 修复 dart:io SecureSocket 发送随机丢失缺陷的三层根因：好友元数据/黑名单改由服务端登录初始数据推送、传输通道按需建立、`_receiveInitialData` 同步消费推送（防旧推送覆盖新操作）、发送 5s 超时触发重连、关键操作先乐观更新后发送
+  - 测试：Python 522（410 + 112 阶段 J）+ Dart 42 + Flutter 595（480 + 103 阶段 J + 2 真实服务端 E2E）= 1159 项全绿
 
 ### v6.0.0 (2026-08-13)
 

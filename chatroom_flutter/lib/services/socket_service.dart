@@ -81,10 +81,24 @@ class SocketService {
   }
 
   /// 排队发送协议消息
+  ///
+  /// 阶段 J 修复（dart:io SecureSocket 缺陷）：每条发送带超时——底层
+  /// flush 可能永不返回（发送挂起，数据甚至已到达服务端）。超时后
+  /// 抛异常并触发重连重建连接（服务端按 message_id 幂等去重，
+  /// 断线补发/手动重试不会重复）。
   Future<void> _sendMessage(String type, dynamic content,
       {Map<String, dynamic>? extraHeaders}) {
-    return _enqueueSend(
-        () => sendMessage(_socket!, type, content, extraHeaders: extraHeaders));
+    return _enqueueSend(() async {
+      try {
+        await sendMessage(_socket!, type, content, extraHeaders: extraHeaders)
+            .timeout(const Duration(seconds: 5));
+      } on TimeoutException {
+        state.log('发送超时（连接写侧疑似损坏）: $type');
+        // 写侧已挂死：触发重连（旧 socket 在 _onConnectionLost 中关闭）
+        _onConnectionLost();
+        rethrow;
+      }
+    });
   }
 
   /// 节流更新传输进度（100ms 合并一次，完成时必须更新）
@@ -376,8 +390,8 @@ class SocketService {
     if (type == 'error') return '登录被拒（凭据可能已失效）';
     // 同步离线期间消息（依赖 addMessage 的 messageId 去重兜底重复）
     await _receiveInitialData();
-    // 重建大文件传输通道（阶段 G4b-问题2）
-    unawaited(_ensureTransferConnection());
+    // 好友备注/分组与黑名单随登录初始数据由服务端推送（见 login() 说明），
+    // 重连后无需立即请求；传输通道按需建立（大文件发送时）。
     return null;
   }
 
@@ -388,6 +402,8 @@ class SocketService {
   /// 建立大文件传输专用连接：以 transfer=1 登录，注册到服务端
   /// transfer_sockets。文件数据在此通道收发，聊天走主连接。
   /// 传输通道登录不踢主会话、不加载离线数据。
+  /// 阶段 J 修复：整体加超时——握手/登录发送挂起时放弃并关闭通道
+  /// （dart:io SecureSocket 缺陷），下次发送大文件时重建。
   Future<bool> _ensureTransferConnection() async {
     if (_transferSocket != null && _transferReader != null) return true;
     if (_savedUsername == null || _savedPassword == null) return false;
@@ -404,9 +420,10 @@ class SocketService {
         'password': _savedPassword!,
         'transfer': '1',
       };
-      await sendMessage(s, 'login', _savedUsername!,
-          extraHeaders: extraHeaders);
-      final (header, _) = await recvMessage(_transferReader!, chunkSize: 65536);
+      await sendMessage(s, 'login', _savedUsername!, extraHeaders: extraHeaders)
+          .timeout(const Duration(seconds: 5));
+      final (header, _) = await recvMessage(_transferReader!, chunkSize: 65536)
+          .timeout(const Duration(seconds: 5));
       if (header == null || header['type'] == 'error') {
         _closeTransferSocket();
         return false;
@@ -531,16 +548,22 @@ class SocketService {
     _saveCredentials(username, password, adminSecret);
 
     // 接收初始数据：离线消息 + 好友列表 + 群组列表
+    // 阶段 J 修复：好友备注/分组与黑名单已随登录初始数据由服务端主动推送
+    // （send_initial_data），无需登录后立即请求——客户端 Dart SecureSocket
+    // 存在连续 add+flush 批次静默丢失的 VM 缺陷，登录后连发请求可能整条丢失
+    // （拉黑状态重登后丢失、备注/分组不同步）。
     await _receiveInitialData();
 
-    // 启动后台消息监听
+    // 启动后台消息监听（消费初始数据中推送的 list_friends_meta / list_blocked）
     _startListening();
 
     // 启动心跳
     _startKeepalive();
 
-    // 建立大文件传输通道（异步，不阻塞登录流程）
-    unawaited(_ensureTransferConnection());
+    // 注意（阶段 J 修复）：传输通道不再于登录时建立——登录后立即并发
+    // 建立第二个 SSL 连接会触发 dart:io SecureSocket 发送竞态（主连接
+    // add+flush 批次静默丢失/挂起，表现为拉黑状态丢失、消息随机发不出）。
+    // 改为按需建立：发送大文件时由 sendFile 调用 _ensureTransferConnection。
 
     return null; // null = 成功
   }
@@ -574,7 +597,7 @@ class SocketService {
     // 保存凭据以备重连（仅内存）
     _saveCredentials(username, password, adminSecret);
 
-    // 接收初始数据
+    // 接收初始数据（含服务端推送的好友元数据/黑名单，见 login() 说明）
     await _receiveInitialData();
 
     // 启动后台消息监听
@@ -583,8 +606,8 @@ class SocketService {
     // 启动心跳
     _startKeepalive();
 
-    // 建立大文件传输通道（异步，不阻塞注册流程）
-    unawaited(_ensureTransferConnection());
+    // 传输通道按需建立（见 login() 说明：登录时并发建立会触发
+    // dart:io SecureSocket 发送竞态）
 
     return null; // null = 成功
   }
@@ -597,6 +620,8 @@ class SocketService {
     int safetyCounter = 0;
     bool gotFriendList = false;
     bool gotGroupList = false;
+    bool gotMeta = false;
+    bool gotBlocked = false;
 
     while (_running && safetyCounter < 200) {
       safetyCounter++;
@@ -778,8 +803,16 @@ class SocketService {
 
         case 'friend_request':
           if (from != null) {
-            state.addPendingRequest(from);
+            state.addPendingRequest(from,
+                message: header['message'] as String?);
             state.log('收到好友请求: $from');
+          }
+          break;
+
+        case 'presence':
+          // 阶段 J：登录时的在线快照（presence 在初始数据之前到达）
+          if (from != null) {
+            state.updatePresence(from, header['online'] == '1');
           }
           break;
 
@@ -790,7 +823,31 @@ class SocketService {
             try {
               final List<dynamic> list = jsonDecode(friendsJson);
               state.setFriends(list.map((e) => e.toString()).toList());
+              // 阶段 J 修复：好友列表更新时消费发送请求时预填的备注名
+              _applyPendingFriendNotes();
               gotFriendList = true;
+            } catch (_) {}
+          } else if (responseType == 'list_friends_meta') {
+            // 阶段 J 修复：好友备注/分组随登录初始数据推送，同步消费——
+            // 若留给 listen loop 异步处理，晚到的旧推送会覆盖用户
+            // 登录后的新操作（备注/分组丢失）
+            final metaJson = utf8.decode(body as Uint8List);
+            try {
+              final List<dynamic> list = jsonDecode(metaJson);
+              state.setFriendMetaList(list
+                  .map((e) => FriendMeta.fromJson(e as Map<String, dynamic>))
+                  .toList());
+              gotMeta = true;
+            } catch (_) {}
+          } else if (responseType == 'list_blocked') {
+            // 阶段 J 修复：黑名单随登录初始数据推送，同步消费——
+            // 若留给 listen loop 异步处理，晚到的旧推送会覆盖用户
+            // 登录后的拉黑操作（拉黑状态"不可逆"的根源）
+            final blockedJson = utf8.decode(body as Uint8List);
+            try {
+              final List<dynamic> list = jsonDecode(blockedJson);
+              state.setBlockedUsers(list.map((e) => e.toString()).toList());
+              gotBlocked = true;
             } catch (_) {}
           }
           break;
@@ -813,8 +870,10 @@ class SocketService {
           break;
       }
 
-      // 如果已收到好友列表和群组列表，说明初始数据接收完毕
-      if (gotFriendList && gotGroupList) {
+      // 收齐好友/群组列表 + 好友元数据 + 黑名单后初始数据接收完毕
+      // （阶段 J 修复：后两者随登录初始数据由服务端推送，必须同步消费完，
+      // 避免晚到的旧推送覆盖用户登录后的新操作）
+      if (gotFriendList && gotGroupList && gotMeta && gotBlocked) {
         break;
       }
     }
@@ -999,6 +1058,12 @@ class SocketService {
               _pendingPasswordChange = null;
             }
           }
+          // 密码被管理员重置（阶段 J 修复）：内存凭据已失效，主动退出回登录页
+          // （服务端也会强制关闭该会话；此处主动断开避免无谓的重连重试）
+          if (text.contains('密码已被管理员重置')) {
+            state.log('密码已被管理员重置，强制退出');
+            disconnect();
+          }
           // 检测好友请求被接受的系统通知，自动刷新好友列表
           if (sender == '系统' &&
               (text.contains('已接受') || text.contains('接受您的好友请求'))) {
@@ -1070,7 +1135,34 @@ class SocketService {
       // ---- 好友请求 ----
       case 'friend_request':
         if (from != null) {
-          state.addPendingRequest(from);
+          state.addPendingRequest(from, message: header['message'] as String?);
+        }
+        break;
+
+      // ---- 在线状态广播（阶段 J2）----
+      case 'presence':
+        if (from != null) {
+          state.updatePresence(from, header['online'] == '1');
+        }
+        break;
+
+      // ---- 用户资料响应（阶段 J1）----
+      case 'profile_response':
+        try {
+          final json = jsonDecode(utf8.decode(body)) as Map<String, dynamic>;
+          state.updateProfile(UserProfile.fromJson(json));
+        } catch (e) {
+          state.log('解析资料失败: $e');
+        }
+        break;
+
+      // ---- 用户搜索结果（阶段 J4）----
+      case 'user_search_response':
+        try {
+          final List<dynamic> list = jsonDecode(utf8.decode(body));
+          state.setUserSearchResults(list.map((e) => e.toString()).toList());
+        } catch (e) {
+          state.log('解析用户搜索结果失败: $e');
         }
         break;
 
@@ -1279,6 +1371,8 @@ class SocketService {
           try {
             final List<dynamic> list = jsonDecode(responseBody);
             state.setFriends(list.map((e) => e.toString()).toList());
+            // 阶段 J 修复：好友列表更新时消费发送请求时预填的备注名
+            _applyPendingFriendNotes();
           } catch (_) {}
         } else if (responseType == 'list_users') {
           // 仅管理员可查看用户列表
@@ -1321,6 +1415,24 @@ class SocketService {
             } catch (_) {
               state.log('解析群成员列表失败: $responseBody');
             }
+          }
+        } else if (responseType == 'list_friends_meta') {
+          // 好友备注/分组（阶段 J4：P1-8）
+          try {
+            final List<dynamic> list = jsonDecode(responseBody);
+            state.setFriendMetaList(list
+                .map((e) => FriendMeta.fromJson(e as Map<String, dynamic>))
+                .toList());
+          } catch (_) {
+            state.log('解析好友元数据失败: $responseBody');
+          }
+        } else if (responseType == 'list_blocked') {
+          // 黑名单列表（阶段 J4：P1-9）
+          try {
+            final List<dynamic> list = jsonDecode(responseBody);
+            state.setBlockedUsers(list.map((e) => e.toString()).toList());
+          } catch (_) {
+            state.log('解析黑名单失败: $responseBody');
           }
         } else {
           // 其他管理响应仅管理员可见
@@ -1730,15 +1842,146 @@ class SocketService {
     state.removeFileRequest(messageId);
   }
 
-  /// 添加好友
-  Future<void> addFriend(String targetUser) async {
+  /// 添加好友（阶段 J：可携带验证消息 P1-10）
+  Future<void> addFriend(String targetUser, {String? message}) async {
     if (_socket == null) return;
+    final extra = <String, String>{'to': targetUser};
+    if (message != null && message.isNotEmpty) {
+      extra['message'] = message;
+    }
     await _sendMessage(
       'friend_request',
       '',
-      extraHeaders: {'to': targetUser},
+      extraHeaders: extra,
     );
     state.log('已向 $targetUser 发送好友请求');
+  }
+
+  /// 拉取用户资料（阶段 J1）
+  Future<void> fetchProfile(String username) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('get_profile', '', extraHeaders: {'to': username});
+    } catch (e) {
+      state.log('获取资料失败: $e');
+    }
+  }
+
+  /// 更新自己的资料（阶段 J1；未传字段保持原值）
+  Future<void> updateMyProfile({
+    String? nickname,
+    String? avatar,
+    String? signature,
+  }) async {
+    if (_socket == null) return;
+    final extra = <String, String>{};
+    if (nickname != null) extra['nickname'] = nickname;
+    if (avatar != null) extra['avatar'] = avatar;
+    if (signature != null) extra['signature'] = signature;
+    try {
+      await _sendMessage('set_profile', '', extraHeaders: extra);
+    } catch (e) {
+      state.log('更新资料失败: $e');
+    }
+  }
+
+  /// 搜索用户（阶段 J4：P1-10）
+  Future<void> searchUsers(String keyword) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('search_users', '',
+          extraHeaders: {'keyword': keyword});
+    } catch (e) {
+      state.log('搜索用户失败: $e');
+    }
+  }
+
+  /// 设置好友备注（阶段 J4：P1-8；空串清除）
+  Future<void> setFriendNote(String target, String note) async {
+    if (_socket == null) return;
+    // 先乐观更新本地状态（侧边栏立即显示备注名），再发送——发送挂起/丢失时
+    // 状态与用户操作不脱节；权威状态以服务端（登录推送/重连同步）为准
+    state.updateFriendMeta(target, note: note);
+    try {
+      await _sendMessage('set_friend_note', '',
+          extraHeaders: {'to': target, 'note': note});
+    } catch (e) {
+      state.log('设置备注失败: $e');
+    }
+  }
+
+  /// 设置好友分组（阶段 J4：P1-8；空串移回未分组）
+  Future<void> setFriendGroup(String target, String groupName) async {
+    if (_socket == null) return;
+    // 先乐观更新本地状态（侧边栏立即按分组渲染），再发送
+    state.updateFriendMeta(target, groupName: groupName);
+    try {
+      await _sendMessage('set_friend_group', '',
+          extraHeaders: {'to': target, 'group_name': groupName});
+    } catch (e) {
+      state.log('设置分组失败: $e');
+    }
+  }
+
+  /// 拉黑（阶段 J4：P1-9）
+  ///
+  /// 阶段 J 修复：先乐观更新本地状态再发送——dart:io SecureSocket 存在
+  /// 发送挂起缺陷（flush 永不返回），若先发送后更新，挂起时 UI 状态
+  /// 与用户操作脱节（表现为"拉黑不可逆"）。
+  Future<void> blockUser(String target) async {
+    if (_socket == null) return;
+    state.addBlockedUser(target);
+    try {
+      await _sendMessage('block_user', '', extraHeaders: {'to': target});
+    } catch (e) {
+      state.log('拉黑失败: $e');
+    }
+  }
+
+  /// 解除拉黑（阶段 J4：P1-9）
+  Future<void> unblockUser(String target) async {
+    if (_socket == null) return;
+    state.removeBlockedUser(target);
+    try {
+      await _sendMessage('unblock_user', '', extraHeaders: {'to': target});
+    } catch (e) {
+      state.log('解除拉黑失败: $e');
+    }
+  }
+
+  /// 拉取黑名单列表（阶段 J4：P1-9）
+  Future<void> fetchBlockedList() async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('list_blocked', '');
+    } catch (e) {
+      state.log('拉取黑名单失败: $e');
+    }
+  }
+
+  /// 拉取好友元数据（备注/分组，阶段 J4：P1-8）
+  Future<void> fetchFriendsMeta() async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('list_friends_meta', '');
+    } catch (e) {
+      state.log('拉取好友元数据失败: $e');
+    }
+  }
+
+  /// 好友请求被接受后自动补设备注名（阶段 J 修复）
+  ///
+  /// 发送请求时用户可预填备注名（pendingFriendNote）；对方接受请求、
+  /// 好友列表出现该用户后自动调用 set_friend_note 落库。每个备注
+  /// 仅消费一次（takePendingFriendNote），好友列表多次刷新不重复设置。
+  void _applyPendingFriendNotes() {
+    if (_socket == null) return;
+    for (final friend in state.friends) {
+      final note = state.takePendingFriendNote(friend);
+      if (note != null && note.isNotEmpty) {
+        setFriendNote(friend, note);
+      }
+    }
   }
 
   /// 接受好友请求
@@ -1868,6 +2111,19 @@ class SocketService {
       content = announcement;
     }
     await _sendMessage('admin_command', content, extraHeaders: extraHeaders);
+  }
+
+  /// 管理员重置用户密码（阶段 J3：P0-5，无需旧密码）
+  Future<void> adminResetPassword(String targetUser, String newPassword) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('admin_command', targetUser, extraHeaders: {
+        'action': 'reset_password',
+        'new_password': newPassword,
+      });
+    } catch (e) {
+      state.log('重置密码失败: $e');
+    }
   }
 
   /// 删除好友（阶段 F）

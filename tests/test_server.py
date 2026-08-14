@@ -137,16 +137,26 @@ def expect_response(sock, expected_type, timeout=3):
       - sock: 客户端 socket
       - expected_type: 期望的消息类型（如 'chat', 'error' 等）
       - timeout: 超时秒数
+
+    阶段 J 修订：presence（在线状态广播）为通知性消息，期望类型非 presence
+    时读到 presence 自动跳过（登录/登出广播噪声）。
     """
-    sock.settimeout(timeout)
-    try:
-        header, data = recv_message(sock)
+    deadline = time.time() + timeout
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            pytest.fail(f"超时：等待消息类型 '{expected_type}' 超过 {timeout}s")
+        sock.settimeout(remaining)
+        try:
+            header, data = recv_message(sock)
+        except socket.timeout:
+            pytest.fail(f"超时：等待消息类型 '{expected_type}' 超过 {timeout}s")
         if header is None:
             raise Exception("连接已关闭（收到空消息）")
+        if header.get("type") == "presence" and expected_type != "presence":
+            continue
         # 不在此处 assert，让调用者做更灵活的检查
         return header, data
-    except socket.timeout:
-        pytest.fail(f"超时：等待消息类型 '{expected_type}' 超过 {timeout}s")
 
 
 def recv_all_initial_data(sock):
@@ -158,6 +168,9 @@ def recv_all_initial_data(sock):
     4. 好友请求（friend_request）— 0或多条
     5. 好友列表（admin_response, response_type=list_friends）
     6. 群组列表（list_groups）
+    7. 好友元数据（admin_response, response_type=list_friends_meta）
+    8. 黑名单（admin_response, response_type=list_blocked）
+    （阶段 J 修复：7/8 随登录初始数据推送，本函数一并消费，缓冲不残留）
     
     返回一个 dict 方便后续测试使用。
     """
@@ -182,9 +195,11 @@ def recv_all_initial_data(sock):
     except socket.timeout:
         pytest.fail("超时：等待登录响应超过 3s")
 
-    # 接收后续初始数据（离线消息/文件请求/好友请求/好友列表/群组列表）
+    # 接收后续初始数据（离线消息/文件请求/好友请求/好友列表/群组列表/好友元数据/黑名单）
     got_friends = False
     got_groups = False
+    got_meta = False
+    got_blocked = False
     for _ in range(50):
         try:
             h, d = expect_response(sock, "initial_data", timeout=3)
@@ -202,12 +217,18 @@ def recv_all_initial_data(sock):
         elif t == "admin_response" and h.get("response_type") == "list_friends":
             result["friends"] = json.loads(d.decode()) if d else []
             got_friends = True
+        elif t == "admin_response" and h.get("response_type") == "list_friends_meta":
+            result["friend_meta"] = json.loads(d.decode()) if d else []
+            got_meta = True
+        elif t == "admin_response" and h.get("response_type") == "list_blocked":
+            result["blocked"] = json.loads(d.decode()) if d else []
+            got_blocked = True
         elif t == "list_groups":
             result["groups"] = json.loads(d.decode()) if d else []
             got_groups = True
         else:
             result.setdefault("extra", []).append((h, d))
-        if got_friends and got_groups:
+        if got_friends and got_groups and got_meta and got_blocked:
             break
 
     return result
@@ -1193,6 +1214,9 @@ class TestAdminCommands:
             h_fr, _ = expect_response(s2, "admin_response")
             # 群组列表
             expect_response(s2, "list_groups")
+            # 阶段 J：好友元数据与黑名单随登录初始数据推送，一并消费
+            expect_response(s2, "admin_response")
+            expect_response(s2, "admin_response")
 
             # admin 请求用户列表
             send_message(s2, "admin_command", "",
@@ -1244,6 +1268,9 @@ class TestAdminCommands:
             expect_response(s_admin_cli, "admin_response")
             # 群组列表
             expect_response(s_admin_cli, "list_groups")
+            # 阶段 J：好友元数据与黑名单随登录初始数据推送，一并消费
+            expect_response(s_admin_cli, "admin_response")
+            expect_response(s_admin_cli, "admin_response")
 
             # admin 发公告
             send_message(s_admin_cli, "admin_command", "系统维护通知",

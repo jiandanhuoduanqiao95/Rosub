@@ -77,7 +77,11 @@ class Database:
                     username TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
                     is_admin BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    nickname TEXT DEFAULT '',
+                    avatar TEXT DEFAULT '',
+                    signature TEXT DEFAULT '',
+                    last_seen TEXT
                 )
             ''')
             cursor.execute('''
@@ -100,6 +104,9 @@ class Database:
                     user2 TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    note TEXT DEFAULT '',
+                    group_name TEXT DEFAULT '',
+                    request_message TEXT DEFAULT '',
                     PRIMARY KEY (user1, user2),
                     FOREIGN KEY (user1) REFERENCES users(username),
                     FOREIGN KEY (user2) REFERENCES users(username)
@@ -193,6 +200,16 @@ class Database:
                     PRIMARY KEY (username, peer_key)
                 )
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS blocked_users (
+                    blocker TEXT NOT NULL,
+                    blocked TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (blocker, blocked),
+                    FOREIGN KEY (blocker) REFERENCES users(username),
+                    FOREIGN KEY (blocked) REFERENCES users(username)
+                )
+            ''')
 
             # 迁移：为旧版 message_history 表添加 status 列
             try:
@@ -209,6 +226,27 @@ class Database:
                 except sqlite3.OperationalError:
                     cursor.execute(f"ALTER TABLE {table} ADD COLUMN file_path TEXT")
                     logging.info(f"{table} 表已迁移：新增 file_path 列")
+
+            # 迁移：users 表新增资料列（阶段 J：P0-2 用户资料）
+            for col in ("nickname", "avatar", "signature"):
+                try:
+                    cursor.execute(f"SELECT {col} FROM users LIMIT 1")
+                except sqlite3.OperationalError:
+                    cursor.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT ''")
+                    logging.info(f"users 表已迁移：新增 {col} 列")
+            try:
+                cursor.execute("SELECT last_seen FROM users LIMIT 1")
+            except sqlite3.OperationalError:
+                cursor.execute("ALTER TABLE users ADD COLUMN last_seen TEXT")
+                logging.info("users 表已迁移：新增 last_seen 列")
+
+            # 迁移：friends 表新增好友备注/分组/验证消息列（阶段 J：P1-8/P1-10）
+            for col in ("note", "group_name", "request_message"):
+                try:
+                    cursor.execute(f"SELECT {col} FROM friends LIMIT 1")
+                except sqlite3.OperationalError:
+                    cursor.execute(f"ALTER TABLE friends ADD COLUMN {col} TEXT DEFAULT ''")
+                    logging.info(f"friends 表已迁移：新增 {col} 列")
 
             conn.commit()
 
@@ -263,6 +301,92 @@ class Database:
 
     def user_exists(self, username):
         return self.get_user(username) is not None
+
+    # ============================================================
+    # 用户资料（阶段 J：P0-2）
+    # ============================================================
+
+    def set_profile(self, username, nickname=None, avatar=None, signature=None):
+        """部分更新用户资料：仅更新传入的非 None 字段；传 '' 表示清除。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1 FROM users WHERE username = ?", (username,))
+                if cursor.fetchone() is None:
+                    return False
+                sets = []
+                params = []
+                if nickname is not None:
+                    sets.append("nickname = ?")
+                    params.append(nickname)
+                if avatar is not None:
+                    sets.append("avatar = ?")
+                    params.append(avatar)
+                if signature is not None:
+                    sets.append("signature = ?")
+                    params.append(signature)
+                if not sets:
+                    return True
+                params.append(username)
+                cursor.execute(f"UPDATE users SET {', '.join(sets)} WHERE username = ?", params)
+                conn.commit()
+                return True
+        except sqlite3.Error as e:
+            logging.error(f"设置用户资料失败: {username}, {e}")
+            return False
+
+    def get_profile(self, username):
+        """查询用户资料；不存在返回 None。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT username, nickname, avatar, signature, last_seen, is_admin, created_at
+                FROM users WHERE username = ?
+            ''', (username,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "username": row[0],
+                "nickname": row[1] or "",
+                "avatar": row[2] or "",
+                "signature": row[3] or "",
+                "last_seen": row[4],
+                "is_admin": row[5],
+                "created_at": row[6],
+            }
+
+    def update_last_seen(self, username):
+        """更新最后在线时间为当前时间；用户不存在返回 False。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE username = ?",
+                    (username,))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"更新最后在线时间失败: {username}, {e}")
+            return False
+
+    # ============================================================
+    # 管理员重置密码（阶段 J：P0-5）
+    # ============================================================
+
+    def admin_reset_password(self, username, new_hash):
+        """管理员直接覆写用户密码哈希（不校验旧密码）；用户不存在返回 False。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE users SET password_hash = ? WHERE username = ?
+                ''', (new_hash, username))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"管理员重置密码失败: {username}, {e}")
+            return False
 
     def save_offline_message(self, sender, receiver, message_type, content, filename=None, message_id=None, file_path=None):
         try:
@@ -344,6 +468,7 @@ class Database:
             cursor.execute('DELETE FROM group_members WHERE username = ?', (username,))
             cursor.execute('DELETE FROM group_file_requests WHERE sender = ?', (username,))
             cursor.execute('DELETE FROM group_file_responses WHERE username = ?', (username,))
+            cursor.execute('DELETE FROM blocked_users WHERE blocker = ? OR blocked = ?', (username, username))
             friends_deleted = cursor.rowcount
             cursor.execute('DELETE FROM users WHERE username = ?', (username,))
             users_deleted = cursor.rowcount
@@ -516,7 +641,8 @@ class Database:
             members_to_check = [m for m in members if m != sender]
             return set(members_to_check).issubset(set(responded))
 
-    def add_friend_request(self, requester, target):
+    def add_friend_request(self, requester, target, message=None):
+        """添加好友请求；message 为可选验证消息（阶段 J：P1-10）。"""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -536,9 +662,9 @@ class Database:
                     logging.error(f"好友请求已存在或已是好友：{requester} -> {target}")
                     return False
                 cursor.execute('''
-                    INSERT INTO friends (user1, user2, status)
-                    VALUES (?, ?, 'pending')
-                ''', (requester, target))
+                    INSERT INTO friends (user1, user2, status, request_message)
+                    VALUES (?, ?, 'pending', ?)
+                ''', (requester, target, message or ""))
                 conn.commit()
                 logging.info(f"好友请求已保存：{requester} -> {target}")
                 return True
@@ -615,6 +741,161 @@ class Database:
                 WHERE user2 = ? AND status = 'pending'
             ''', (username,))
             return [row[0] for row in cursor.fetchall()]
+
+    def get_pending_friend_requests_detail(self, username):
+        """查询待处理好友请求（含验证消息），按创建时间排序。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT user1, request_message FROM friends
+                WHERE user2 = ? AND status = 'pending'
+                ORDER BY created_at ASC
+            ''', (username,))
+            return [(row[0], row[1] or "") for row in cursor.fetchall()]
+
+    # ============================================================
+    # 好友备注名 / 分组（阶段 J：P1-8）
+    # ============================================================
+
+    def set_friend_note(self, username, friend, note):
+        """设置好友备注名（本视图方向）；非好友关系返回 False。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE friends SET note = ?
+                    WHERE user1 = ? AND user2 = ? AND status = 'accepted'
+                ''', (note or "", username, friend))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"设置好友备注失败: {username} -> {friend}, {e}")
+            return False
+
+    def set_friend_group(self, username, friend, group_name):
+        """设置好友分组名（本视图方向）；非好友关系返回 False。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE friends SET group_name = ?
+                    WHERE user1 = ? AND user2 = ? AND status = 'accepted'
+                ''', (group_name or "", username, friend))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"设置好友分组失败: {username} -> {friend}, {e}")
+            return False
+
+    def get_friends_meta(self, username):
+        """查询好友元数据（备注/分组），返回 [{username, note, group_name}]。
+
+        备注/分组均为"本视图方向"（user1 = username 的行）；
+        对仅有反向行的旧数据（防御），备注/分组取空串。
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT f.user2 AS friend, f.note, f.group_name
+                FROM friends f
+                WHERE f.user1 = ? AND f.status = 'accepted'
+                UNION
+                SELECT f.user1 AS friend, '', ''
+                FROM friends f
+                WHERE f.user2 = ? AND f.status = 'accepted'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM friends g
+                      WHERE g.user1 = ? AND g.user2 = f.user1
+                        AND g.status = 'accepted'
+                  )
+            ''', (username, username, username))
+            return [
+                {"username": r[0], "note": r[1] or "", "group_name": r[2] or ""}
+                for r in cursor.fetchall()
+            ]
+
+    # ============================================================
+    # 黑名单（阶段 J：P1-9）
+    # ============================================================
+
+    def block_user(self, blocker, blocked):
+        """拉黑用户（单向，INSERT OR IGNORE 幂等）；不能拉黑自己。"""
+        if not blocker or not blocked or blocker == blocked:
+            return False
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR IGNORE INTO blocked_users (blocker, blocked)
+                    VALUES (?, ?)
+                ''', (blocker, blocked))
+                conn.commit()
+                return True
+        except sqlite3.Error as e:
+            logging.error(f"拉黑失败: {blocker} -> {blocked}, {e}")
+            return False
+
+    def unblock_user(self, blocker, blocked):
+        """解除拉黑；不存在返回 False。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    DELETE FROM blocked_users
+                    WHERE blocker = ? AND blocked = ?
+                ''', (blocker, blocked))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"解除拉黑失败: {blocker} -> {blocked}, {e}")
+            return False
+
+    def is_blocked(self, blocker, blocked):
+        """单向语义：仅当 blocker 拉黑了 blocked 时为 True。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT 1 FROM blocked_users
+                WHERE blocker = ? AND blocked = ?
+            ''', (blocker, blocked))
+            return cursor.fetchone() is not None
+
+    def get_blocked_users(self, blocker):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT blocked FROM blocked_users WHERE blocker = ?
+            ''', (blocker,))
+            return [row[0] for row in cursor.fetchall()]
+
+    # ============================================================
+    # 用户搜索（阶段 J：P1-10）
+    # ============================================================
+
+    def search_users(self, keyword, exclude=None, limit=50):
+        """按用户名 LIKE 模糊搜索（不区分大小写）；空关键字返回 []。"""
+        if not keyword:
+            return []
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                like_pattern = f"%{keyword}%"
+                if exclude:
+                    cursor.execute('''
+                        SELECT username FROM users
+                        WHERE username LIKE ? AND username != ?
+                        ORDER BY username ASC LIMIT ?
+                    ''', (like_pattern, exclude, limit))
+                else:
+                    cursor.execute('''
+                        SELECT username FROM users
+                        WHERE username LIKE ?
+                        ORDER BY username ASC LIMIT ?
+                    ''', (like_pattern, limit))
+                return [row[0] for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            logging.error(f"搜索用户失败: keyword={keyword}, {e}")
+            return []
 
     def is_friend(self, user1, user2):
         with self._get_connection() as conn:

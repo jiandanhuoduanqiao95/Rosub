@@ -5,6 +5,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/chat_models.dart';
+import '../services/state_manager.dart';
 
 class Sidebar extends StatelessWidget {
   final List<ChatTarget> chatTargets;
@@ -17,6 +18,12 @@ class Sidebar extends StatelessWidget {
   final void Function(String username)? onDeleteFriend;
   final void Function(ChatTarget target)? onGroupLongPress;
 
+  /// 阶段 J：好友在线状态判定（null = 不显示在线标记，回归兼容）
+  final bool Function(String key)? isOnline;
+
+  /// 阶段 J：好友分组（分组名 → 好友 key 列表；null = 扁平渲染，回归兼容）
+  final Map<String, List<String>>? friendGroups;
+
   const Sidebar({
     super.key,
     required this.chatTargets,
@@ -28,6 +35,8 @@ class Sidebar extends StatelessWidget {
     required this.unreadOf,
     this.onDeleteFriend,
     this.onGroupLongPress,
+    this.isOnline,
+    this.friendGroups,
   });
 
   @override
@@ -100,13 +109,34 @@ class Sidebar extends StatelessWidget {
                         onTap: () => onSelectChat(s.key),
                       )),
                 ],
-                // 好友分组
-                if (friends.isNotEmpty) ...[
+                // 好友分区（阶段 J4：提供 friendGroups 时按分组渲染）
+                if (friendGroups != null && friends.isNotEmpty) ...[
+                  for (final entry in friendGroups!.entries) ...[
+                    if (entry.value.any((k) => friends.any((f) => f.key == k)))
+                      _SectionHeader(title: entry.key),
+                    ...entry.value
+                        .where((k) => friends.any((f) => f.key == k))
+                        .map((k) => friends.firstWhere((f) => f.key == k))
+                        .map((f) => _ChatTile(
+                              target: f,
+                              isSelected: currentChat == f.key,
+                              unread: unreadOf(f.key),
+                              isOnline: isOnline,
+                              onTap: () => onSelectChat(f.key),
+                              onLongPress: onDeleteFriend != null
+                                  ? () => onDeleteFriend!(f.key)
+                                  : null,
+                            )),
+                  ],
+                  // 未分组好友
+                  ..._renderUngroupedFriends(friends),
+                ] else if (friends.isNotEmpty) ...[
                   _SectionHeader(title: '好友 (${friends.length})'),
                   ...friends.map((f) => _ChatTile(
                         target: f,
                         isSelected: currentChat == f.key,
                         unread: unreadOf(f.key),
+                        isOnline: isOnline,
                         onTap: () => onSelectChat(f.key),
                         onLongPress: onDeleteFriend != null
                             ? () => onDeleteFriend!(f.key)
@@ -155,6 +185,28 @@ class Sidebar extends StatelessWidget {
       ),
     );
   }
+
+  /// 未分组好友渲染（阶段 J4）：分组参数提供时，不在任何分组中的好友
+  /// 归入 AppState.ungroupedLabel（"未分组"）分区
+  List<Widget> _renderUngroupedFriends(List<ChatTarget> friends) {
+    final groupedKeys = <String>{};
+    friendGroups?.forEach((_, keys) => groupedKeys.addAll(keys));
+    final ungrouped =
+        friends.where((f) => !groupedKeys.contains(f.key)).toList();
+    if (ungrouped.isEmpty) return const [];
+    return [
+      const _SectionHeader(title: AppState.ungroupedLabel),
+      ...ungrouped.map((f) => _ChatTile(
+            target: f,
+            isSelected: currentChat == f.key,
+            unread: unreadOf(f.key),
+            isOnline: isOnline,
+            onTap: () => onSelectChat(f.key),
+            onLongPress:
+                onDeleteFriend != null ? () => onDeleteFriend!(f.key) : null,
+          )),
+    ];
+  }
 }
 
 class _SectionHeader extends StatelessWidget {
@@ -184,16 +236,24 @@ class _ChatTile extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
 
+  /// 阶段 J：在线状态判定（null = 不显示在线标记）
+  final bool Function(String key)? isOnline;
+
   const _ChatTile({
     required this.target,
     required this.isSelected,
     required this.unread,
     required this.onTap,
     this.onLongPress,
+    this.isOnline,
   });
 
   @override
   Widget build(BuildContext context) {
+    // 阶段 J：仅好友会话显示在线标记（群组/系统会话不显示）
+    final showOnlineDot =
+        isOnline != null && !target.isGroup && target.key != '服务器';
+    final online = showOnlineDot && isOnline!(target.key);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       child: Material(
@@ -222,12 +282,25 @@ class _ChatTile extends StatelessWidget {
               fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
             ),
           ),
-          trailing: unread > 0
-              ? Badge(
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (showOnlineDot)
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: Icon(
+                    Icons.circle,
+                    size: 10,
+                    color: online ? Colors.green : Colors.grey,
+                  ),
+                ),
+              if (unread > 0)
+                Badge(
                   label: Text('$unread'),
                   isLabelVisible: true,
-                )
-              : null,
+                ),
+            ],
+          ),
           dense: true,
           onTap: onTap,
         ),

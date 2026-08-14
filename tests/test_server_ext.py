@@ -344,6 +344,8 @@ class TestAdminExtended:
         admin = harness.client()
         admin.login("admin", "adminpass", admin_secret="test-admin-secret", consume=False)
         admin.recv_initial()
+        # 阶段 J：消费 admin 登录触发的 presence 广播（通知性噪声）
+        alice.drain(timeout=0.8)
         admin.send("admin_command", "全民公告内容", action="announcement")
         # admin 先收到自己被广播的公告，再收到"公告发送成功"
         admin.recv(timeout=2)

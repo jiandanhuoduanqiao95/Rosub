@@ -1,6 +1,9 @@
 import json
 import logging
+import socket
+import bcrypt
 from protocol import send_message
+from validation import validate_password
 
 class AdminHandler:
     def __init__(self, server):
@@ -41,15 +44,18 @@ class AdminHandler:
                     try:
                         self.server.guarded_send(target_socket, "error", "您的账户已被管理员删除")
                         logging.info(f"通知用户 {target_user} 账户被删除")
-                        target_socket.close()
-                        with self.server.client_map_lock:
-                            if self.server.client_map.get(target_user) is target_socket:
-                                self.server.client_map.pop(target_user, None)
                     except Exception as e:
                         logging.error(f"通知用户 {target_user} 失败: {e}")
-                        with self.server.client_map_lock:
-                            if self.server.client_map.get(target_user) is target_socket:
-                                self.server.client_map.pop(target_user, None)
+                    # shutdown 唤醒阻塞在 recv 的目标线程（close 不能打断阻塞读），
+                    # 由 handle_client 的 finally 清理 client_map 并广播 presence 下线
+                    try:
+                        target_socket.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    try:
+                        target_socket.close()
+                    except Exception:
+                        pass
             else:
                 self.server.guarded_send(ssock, "error", f"删除用户 {target_user} 失败")
                 logging.error(f"删除用户失败: {target_user}")
@@ -92,3 +98,51 @@ class AdminHandler:
         elif command == "exit":
             self.server.guarded_send(ssock, "admin_response", "退出成功")
             logging.info(f"管理员 {username} 退出")
+        elif command == "reset_password":
+            # 管理员重置密码（阶段 J：P0-5）
+            target_user = data.decode("utf-8").strip()
+            new_password = header.get("new_password") or ""
+            valid, error = validate_password(new_password)
+            if not valid:
+                self.server.guarded_send(ssock, "error", error)
+                logging.warning(f"重置密码失败: 管理员={username}, 目标={target_user}, 新密码格式不合法: {error}")
+                return
+            if not self.server.db.user_exists(target_user):
+                self.server.guarded_send(ssock, "error", f"用户 {target_user} 不存在")
+                logging.warning(f"重置密码失败: 管理员={username}, 目标={target_user} 不存在")
+                return
+            new_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+            if self.server.db.admin_reset_password(target_user, new_hash):
+                # 先回执管理员（若目标即管理员本人，后续关闭其会话不丢回执）
+                self.server.guarded_send(ssock, "admin_response",
+                             f"已将用户 {target_user} 的密码重置",
+                             extra_headers={"response_type": "reset_password"})
+                logging.info(f"管理员 {username} 重置用户 {target_user} 密码成功")
+                # 通知在线目标用户并强制下线：密码已失效的旧会话立即关闭，
+                # 防止其继续以旧凭据收发消息（阶段 J 修复）。shutdown 唤醒
+                # 阻塞在 recv 的目标线程（close 不能打断阻塞读），由
+                # handle_client 的 finally 清理 client_map / transfer_sockets
+                # 并广播 presence 下线。
+                target_socket = None
+                with self.server.client_map_lock:
+                    target_socket = self.server.client_map.get(target_user)
+                if target_socket:
+                    try:
+                        self.server.guarded_send(target_socket, "chat",
+                                     "您的密码已被管理员重置，请重新登录",
+                                     extra_headers={"from": "系统"})
+                        logging.info(f"已通知用户 {target_user} 密码被管理员重置")
+                    except Exception as e:
+                        logging.error(f"通知用户 {target_user} 密码被重置失败: {e}")
+                    try:
+                        target_socket.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    try:
+                        target_socket.close()
+                        logging.info(f"强制下线用户 {target_user}（密码已被管理员重置）")
+                    except Exception as e:
+                        logging.warning(f"关闭用户 {target_user} 连接失败: {e}")
+            else:
+                self.server.guarded_send(ssock, "error", f"重置用户 {target_user} 密码失败")
+                logging.error(f"管理员 {username} 重置用户 {target_user} 密码失败")

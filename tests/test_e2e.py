@@ -94,12 +94,19 @@ class HeadlessTestClient:
         self.send("register", username, password=password)
         self.username = username
 
-    def consume_initial(self, max_msg=15):
+    def consume_initial(self, max_msg=40):
         """
         消费登录后的初始推送。
         返回 (login_ok, friends_json, groups_json, offline_msgs)
+        阶段 J 修复：好友元数据/黑名单随登录初始数据推送，本方法一并消费，
+        收齐好友列表+群组列表+好友元数据+黑名单后提前退出（缓冲不残留）。
         """
-        result = {"login_ok": False, "friends": [], "groups": [], "offline": [], "friend_requests": []}
+        result = {"login_ok": False, "friends": [], "groups": [], "offline": [],
+                  "friend_requests": [], "blocked": [], "friend_meta": []}
+        got_friends = False
+        got_groups = False
+        got_meta = False
+        got_blocked = False
         for _ in range(max_msg):
             h, d = self.recv(timeout=2)
             if h is None:
@@ -116,10 +123,20 @@ class HeadlessTestClient:
                     continue
             elif t == "admin_response" and h.get("response_type") == "list_friends":
                 result["friends"] = json.loads(d.decode()) if d else []
+                got_friends = True
+            elif t == "admin_response" and h.get("response_type") == "list_friends_meta":
+                result["friend_meta"] = json.loads(d.decode()) if d else []
+                got_meta = True
+            elif t == "admin_response" and h.get("response_type") == "list_blocked":
+                result["blocked"] = json.loads(d.decode()) if d else []
+                got_blocked = True
             elif t == "list_groups":
                 result["groups"] = json.loads(d.decode()) if d else []
+                got_groups = True
             elif t == "friend_request":
                 result["friend_requests"].append((h, d))
+            if got_friends and got_groups and got_meta and got_blocked:
+                break
         return result
 
     def drain(self, timeout=0.5):
@@ -332,6 +349,8 @@ class TestE2EAuthentication:
         # bob 下线
         bob.disconnect()
         time.sleep(0.3)
+        # 阶段 J：消费 bob 下线的 presence 广播（通知性噪声）
+        alice.drain(timeout=1.0)
 
         # alice 发消息给离线的 bob
         alice.send_chat("bob", "离线消息测试内容")

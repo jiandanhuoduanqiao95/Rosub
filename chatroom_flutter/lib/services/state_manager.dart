@@ -38,6 +38,146 @@ class AppState extends ChangeNotifier {
   UnmodifiableListView<String> get pendingRequests =>
       UnmodifiableListView(_pendingRequests);
 
+  // ---- 好友请求验证消息（阶段 J：P1-10）----
+  final Map<String, String> _pendingRequestMessages = {};
+
+  /// 某请求来源的验证消息；未设置返回 null
+  String? pendingRequestMessageOf(String username) =>
+      _pendingRequestMessages[username];
+
+  // ---- 发送好友请求时预填的备注名（阶段 J 修复）----
+  // 发送请求时可询问是否给对方取备注名；备注暂存于此，
+  // 待对方接受请求（出现在好友列表）后由 SocketService 自动设置为备注名。
+  final Map<String, String> _pendingFriendNotes = {};
+
+  void setPendingFriendNote(String username, String note) {
+    if (note.isEmpty) return;
+    _pendingFriendNotes[username] = note;
+  }
+
+  /// 某用户的待应用备注名；未设置返回 null
+  String? pendingFriendNoteOf(String username) => _pendingFriendNotes[username];
+
+  /// 取出并移除某用户的待应用备注（好友关系建立后消费一次）
+  String? takePendingFriendNote(String username) =>
+      _pendingFriendNotes.remove(username);
+
+  // ---- 在线状态（阶段 J：P0-3）----
+  final Set<String> _onlineUsers = {};
+  UnmodifiableSetView<String> get onlineUsers =>
+      UnmodifiableSetView(_onlineUsers);
+
+  bool isOnline(String username) => _onlineUsers.contains(username);
+
+  /// 整体替换在线集合
+  void setOnlineUsers(Iterable<String> users) {
+    _onlineUsers
+      ..clear()
+      ..addAll(users);
+    notifyListeners();
+  }
+
+  /// 更新单用户在线状态（幂等）
+  void updatePresence(String username, bool online) {
+    if (username.isEmpty) return;
+    if (online) {
+      if (_onlineUsers.add(username)) notifyListeners();
+    } else {
+      if (_onlineUsers.remove(username)) notifyListeners();
+    }
+  }
+
+  // ---- 用户资料缓存（阶段 J：P0-2）----
+  final Map<String, UserProfile> _profiles = {};
+
+  UserProfile? profileOf(String username) => _profiles[username];
+
+  void updateProfile(UserProfile profile) {
+    _profiles[profile.username] = profile;
+    notifyListeners();
+  }
+
+  // ---- 好友备注/分组（阶段 J：P1-8）----
+  static const String ungroupedLabel = '未分组';
+
+  final Map<String, FriendMeta> _friendMeta = {};
+
+  FriendMeta? friendMetaOf(String username) => _friendMeta[username];
+  String? friendNoteOf(String username) => _friendMeta[username]?.note;
+  String? friendGroupOf(String username) => _friendMeta[username]?.groupName;
+
+  /// 部分更新备注/分组（未传字段保持原值）
+  void updateFriendMeta(String username, {String? note, String? groupName}) {
+    final current = _friendMeta[username] ?? FriendMeta(username: username);
+    _friendMeta[username] = FriendMeta(
+      username: username,
+      note: note ?? current.note,
+      groupName: groupName ?? current.groupName,
+    );
+    notifyListeners();
+  }
+
+  /// 批量替换好友元数据（list_friends_meta 响应）
+  void setFriendMetaList(List<FriendMeta> metas) {
+    _friendMeta.clear();
+    for (final m in metas) {
+      _friendMeta[m.username] = m;
+    }
+    notifyListeners();
+  }
+
+  /// 分组视图：分组名 → 好友用户名列表（空分组归"未分组"）
+  Map<String, List<String>> get friendsByGroup {
+    final result = <String, List<String>>{};
+    for (final meta in _friendMeta.values) {
+      final key = meta.groupName.isEmpty ? ungroupedLabel : meta.groupName;
+      result.putIfAbsent(key, () => []).add(meta.username);
+    }
+    return result;
+  }
+
+  // ---- 黑名单（阶段 J：P1-9）----
+  final Set<String> _blockedUsers = {};
+  UnmodifiableSetView<String> get blockedUsers =>
+      UnmodifiableSetView(_blockedUsers);
+
+  bool isBlocked(String username) => _blockedUsers.contains(username);
+
+  void addBlockedUser(String username) {
+    if (_blockedUsers.add(username)) notifyListeners();
+  }
+
+  void removeBlockedUser(String username) {
+    if (_blockedUsers.remove(username)) notifyListeners();
+  }
+
+  /// 批量替换黑名单（list_blocked 响应）
+  void setBlockedUsers(List<String> users) {
+    _blockedUsers
+      ..clear()
+      ..addAll(users);
+    notifyListeners();
+  }
+
+  // ---- 用户搜索结果（阶段 J：P1-10）----
+  final List<String> _userSearchResults = [];
+  List<String> get userSearchResults =>
+      UnmodifiableListView(_userSearchResults);
+
+  void setUserSearchResults(List<String> usernames) {
+    _userSearchResults
+      ..clear()
+      ..addAll(usernames);
+    notifyListeners();
+  }
+
+  void clearUserSearchResults() {
+    if (_userSearchResults.isNotEmpty) {
+      _userSearchResults.clear();
+      notifyListeners();
+    }
+  }
+
   // ---- 群组列表 ----
   final List<Group> _groups = [];
   UnmodifiableListView<Group> get groups => UnmodifiableListView(_groups);
@@ -299,6 +439,8 @@ class AppState extends ChangeNotifier {
     _groups.clear();
     _messages.clear();
     _pendingRequests.clear();
+    _pendingRequestMessages.clear();
+    _pendingFriendNotes.clear();
     _pendingFileRequests.clear();
     _messageMap.clear();
     _unreadCount.clear();
@@ -308,6 +450,11 @@ class AppState extends ChangeNotifier {
     _searchQueries.clear();
     _pendingMessages.clear();
     _conversationMeta.clear();
+    _onlineUsers.clear();
+    _profiles.clear();
+    _friendMeta.clear();
+    _blockedUsers.clear();
+    _userSearchResults.clear();
     _currentChat = null;
     _noticeQueue.clear();
     _log('已断开连接');
@@ -350,6 +497,7 @@ class AppState extends ChangeNotifier {
     _unreadCount.remove(friend);
     _searchResults.remove(friend);
     _searchQueries.remove(friend);
+    _friendMeta.remove(friend);
     if (_currentChat == friend) _currentChat = null;
     notifyListeners();
   }
@@ -384,15 +532,17 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  void addPendingRequest(String username) {
+  void addPendingRequest(String username, {String? message}) {
     if (!_pendingRequests.contains(username)) {
       _pendingRequests.add(username);
-      notifyListeners();
     }
+    _pendingRequestMessages[username] = message ?? '';
+    notifyListeners();
   }
 
   void removePendingRequest(String username) {
     _pendingRequests.remove(username);
+    _pendingRequestMessages.remove(username);
     notifyListeners();
   }
 
@@ -407,6 +557,9 @@ class AppState extends ChangeNotifier {
 
   /// 添加一条消息到对应会话
   void addMessage(String chatKey, ChatMessage msg) {
+    // 阶段 J：黑名单后不接收消息——被拉黑用户的消息不落地、不计未读
+    // （服务端已拦截，此为客户端纵深防御）
+    if (msg.sender != _username && isBlocked(msg.sender)) return;
     // 阶段 I1 修复：同 messageId 的服务端回显（登录/重连的离线历史推送）
     // 证明该消息已入库——若此前因"发送异常"误入补发队列，这里直接出队，
     // 重连 flush 不再重发已送达的消息
@@ -510,7 +663,11 @@ class AppState extends ChangeNotifier {
       ));
     }
     for (final f in _friends) {
-      targets.add(ChatTarget(key: f, displayName: f));
+      final note = _friendMeta[f]?.note;
+      targets.add(ChatTarget(
+        key: f,
+        displayName: (note != null && note.isNotEmpty) ? note : f,
+      ));
     }
     for (final g in _groups) {
       targets.add(ChatTarget(

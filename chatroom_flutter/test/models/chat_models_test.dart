@@ -59,8 +59,10 @@ void main() {
       final before = DateTime.now();
       final m = ChatMessage(sender: 'a', content: 'x', messageId: 'm5');
       final after = DateTime.now();
-      expect(m.timestamp.isAfter(before.subtract(const Duration(seconds: 1))), isTrue);
-      expect(m.timestamp.isBefore(after.add(const Duration(seconds: 1))), isTrue);
+      expect(m.timestamp.isAfter(before.subtract(const Duration(seconds: 1))),
+          isTrue);
+      expect(
+          m.timestamp.isBefore(after.add(const Duration(seconds: 1))), isTrue);
       expect(m.status, 'sent');
       expect(m.isHistory, isFalse);
     });
@@ -215,6 +217,33 @@ void main() {
     test('validatePassword accepts >=6', () {
       expect(InputValidator.validatePassword('123456').valid, isTrue);
       expect(InputValidator.validatePassword('longpassword99').valid, isTrue);
+    });
+
+    test('validatePassword rejects empty / too long（对齐服务端 P-17）', () {
+      expect(InputValidator.validatePassword('').valid, isFalse,
+          reason: '空密码应被拒');
+      expect(InputValidator.validatePassword('a' * 128).valid, isTrue,
+          reason: '128 位为合法上限');
+      expect(InputValidator.validatePassword('a' * 129).valid, isFalse,
+          reason: '129 位超出上限');
+      expect(
+        InputValidator.validatePassword('a' * 129).error,
+        '密码长度不能超过 128 个字符',
+      );
+    });
+
+    test('validatePassword rejects control chars（对齐服务端 P-17）', () {
+      for (final p in [
+        'ab\tcdxx',
+        'ab\ncdxx',
+        'ab\x00cdxx',
+        'ab\x7Fcdxx',
+        'abc\rxxx'
+      ]) {
+        expect(InputValidator.validatePassword(p).valid, isFalse,
+            reason: '$p 含控制字符应被拒');
+      }
+      expect(InputValidator.validatePassword('ab\x7Fcdxx').error, '密码不能包含控制字符');
     });
 
     test('ValidationResult.ok / fail', () {
