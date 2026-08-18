@@ -12,10 +12,15 @@ enum ConnectionStatus {
   reconnecting,
 }
 
+/// 表情回应默认表情盘（阶段 K：P1-4，Telegram 风格彩色 emoji）
+const List<String> defaultReactionEmojis = [
+  '👍', '❤️', '🔥', '😂', '😮', '😢', '😡', '🎉', '👏', '🙏',
+];
+
 /// 一条聊天消息
 class ChatMessage {
   final String sender;
-  final String content;
+  String content;
   final String type; // 'chat', 'group_chat', 'file', 'recalled', 'system'
   final String messageId;
   final DateTime timestamp;
@@ -24,6 +29,11 @@ class ChatMessage {
   String? filename; // 文件消息的文件名
   Uint8List? fileData; // 文件消息的数据
   int? groupId; // 群聊消息的群组 ID
+
+  // ---- 阶段 K5（P1-2/P1-4）消息操作扩展 ----
+  String? replyTo; // 引用原消息 id（P1-2）
+  String? replyPreview; // 引用原文缩略（P1-2）
+  Map<String, List<String>> reactions; // emoji → 用户列表（P1-4）
 
   ChatMessage({
     required this.sender,
@@ -36,6 +46,9 @@ class ChatMessage {
     this.filename,
     this.fileData,
     this.groupId,
+    this.replyTo,
+    this.replyPreview,
+    this.reactions = const {},
   }) : timestamp = timestamp ?? DateTime.now();
 
   /// 是否已撤回
@@ -46,6 +59,9 @@ class ChatMessage {
 
   /// 是否发送失败（阶段 I1：待重试状态）
   bool get isFailed => status == 'failed';
+
+  /// 是否携带引用（阶段 K5：P1-2）
+  bool get hasQuote => replyTo != null;
 
   /// 显示用的消息文本
   String get displayText {
@@ -82,12 +98,14 @@ class PendingMessage {
 ///
 /// 支撑会话置顶（K1）/ 逐会话草稿（K2）/ 静音（K3）/ 清空标记（K4）。
 class ConversationMeta {
+  final String peerKey; // 会话 key（好友用户名 或 'group_N'，阶段 K 登录推送解析）
   final bool pinned;
   final bool muted;
   final String draft;
   final DateTime? clearedAt;
 
   const ConversationMeta({
+    this.peerKey = '',
     this.pinned = false,
     this.muted = false,
     this.draft = '',
@@ -104,12 +122,43 @@ class ConversationMeta {
     Object? clearedAt = _unset,
   }) {
     return ConversationMeta(
+      peerKey: peerKey,
       pinned: pinned ?? this.pinned,
       muted: muted ?? this.muted,
       draft: draft ?? this.draft,
       clearedAt: identical(clearedAt, _unset)
           ? this.clearedAt
           : clearedAt as DateTime?,
+    );
+  }
+
+  /// 防御性解析（阶段 K：服务端 list_conversations 登录推送）：
+  /// 缺失字段/类型漂移/null 均不抛异常
+  factory ConversationMeta.fromJson(Map<String, dynamic> json) {
+    String asStr(dynamic v) => v == null ? '' : v.toString();
+    bool asBool(dynamic v) {
+      if (v is bool) return v;
+      if (v is num) return v != 0;
+      return v == 'true' || v == '1';
+    }
+
+    DateTime? parseClearedAt(dynamic v) {
+      if (v == null || v.toString().isEmpty) return null;
+      try {
+        var s = v.toString().trim();
+        if (s.endsWith('Z')) s = s.substring(0, s.length - 1);
+        return DateTime.parse('${s}Z').toLocal();
+      } catch (_) {
+        return null;
+      }
+    }
+
+    return ConversationMeta(
+      peerKey: asStr(json['peer_key']),
+      pinned: asBool(json['pinned']),
+      muted: asBool(json['muted']),
+      draft: asStr(json['draft']),
+      clearedAt: parseClearedAt(json['cleared_at']),
     );
   }
 }

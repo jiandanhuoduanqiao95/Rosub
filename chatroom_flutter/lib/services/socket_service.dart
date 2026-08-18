@@ -153,6 +153,21 @@ class SocketService {
     }
   }
 
+  /// 解析表情回应聚合头（K5：离线推送/历史携带 JSON {emoji: [usernames]}）
+  static Map<String, List<String>> _parseReactionsHeader(String? jsonStr) {
+    if (jsonStr == null || jsonStr.isEmpty) return const {};
+    try {
+      final decoded = jsonDecode(jsonStr);
+      if (decoded is! Map<String, dynamic>) return const {};
+      return {
+        for (final e in decoded.entries)
+          e.key: (e.value as List<dynamic>? ?? const []).map((u) => u.toString()).toList(),
+      };
+    } catch (_) {
+      return const {};
+    }
+  }
+
   // ============================================================
   // 连接管理
   // ============================================================
@@ -616,12 +631,15 @@ class SocketService {
   /// 服务器登录成功后依次发送：
   ///   1. load_offline_data(): chat/file/group_chat (history=true)
   ///   2. send_initial_data(): admin_response(list_friends) + list_groups
+  ///   3. 好友元数据（list_friends_meta）+ 黑名单（list_blocked）
+  ///   4. 会话元数据（list_conversations，阶段 K 最后一条）
   Future<void> _receiveInitialData() async {
     int safetyCounter = 0;
     bool gotFriendList = false;
     bool gotGroupList = false;
     bool gotMeta = false;
     bool gotBlocked = false;
+    bool gotConversations = false;
 
     while (_running && safetyCounter < 200) {
       safetyCounter++;
@@ -635,6 +653,9 @@ class SocketService {
       final isHistory = header['history'] == 'true';
       final msgTimestamp = _parseTimestamp(header['timestamp'] as String?);
       final msgStatus = header['status'] as String? ?? 'delivered';
+      // 阶段 K5：离线投递的引用元数据
+      final replyTo = header['reply_to'] as String?;
+      final replyPreview = header['reply_preview'] as String?;
       // file 消息体流式落盘（阶段 G 大文件支持），其余读入内存
       final dynamic body;
       if (type == 'file' && bodyLen > 0) {
@@ -705,6 +726,8 @@ class SocketService {
                   ),
                 );
               } else {
+                // 系统消息仅用于重要信息（公告/帐号处理等）：
+                // 好友/群组等操作事件只做 SnackBar 即时提示，不留档
                 state.showNotice(text);
               }
             } else {
@@ -722,9 +745,36 @@ class SocketService {
                   timestamp: msgTimestamp,
                   isHistory: false,
                   status: msgStatus,
+                  replyTo: replyTo,
+                  replyPreview: replyPreview,
+                  reactions: _parseReactionsHeader(header['reactions'] as String?),
                 ),
               );
             }
+          } else if (from != null) {
+            // 实时消息在登录/重连初始数据窗口内到达：不得丢弃——
+            // 否则"发送方登录后发出的第一条消息"在接收端静默丢失
+            // （无气泡、无提示音，后续消息才正常）。
+            // 与监听循环 _handleMessage 同路径处理：落地 + 提醒 + 回执。
+            final sender = from;
+            final to = header['to'] as String?;
+            final chatKey =
+                (sender == state.username) ? (to ?? sender) : sender;
+            final live = ChatMessage(
+              sender: sender,
+              content: text,
+              type: 'chat',
+              messageId: messageId,
+              timestamp: msgTimestamp,
+              status: 'sent',
+              replyTo: replyTo,
+              replyPreview: replyPreview,
+              reactions:
+                  _parseReactionsHeader(header['reactions'] as String?),
+            );
+            state.addMessage(chatKey, live);
+            _notifyIncoming(live, chatKey);
+            _sendReceipt(messageId, sender);
           }
           break;
 
@@ -750,6 +800,24 @@ class SocketService {
                 status: msgStatus,
               ),
             );
+          } else if (from != null && !isHistory) {
+            // 实时文件在初始数据窗口内到达（消息体已流式落盘）：
+            // 不丢弃（见 'chat' 分支说明），添加气泡并提醒
+            final filename = header['filename'] as String? ?? 'file';
+            final to = header['to'] as String?;
+            final chatKey =
+                (from == state.username && to != null) ? to : from;
+            final live = ChatMessage(
+              sender: from,
+              content: '[收到文件] $filename',
+              type: 'file',
+              messageId: messageId,
+              filename: filename,
+              timestamp: msgTimestamp,
+              status: 'delivered',
+            );
+            state.addMessage(chatKey, live);
+            _notifyIncoming(live, chatKey);
           }
           break;
 
@@ -769,8 +837,31 @@ class SocketService {
                 isHistory: false,
                 status: msgStatus,
                 groupId: groupId != null ? int.tryParse(groupId) : null,
+                replyTo: replyTo,
+                replyPreview: replyPreview,
+                reactions: _parseReactionsHeader(header['reactions'] as String?),
               ),
             );
+          } else if (from != null) {
+            // 实时群聊消息在初始数据窗口内到达：不丢弃（见 'chat' 分支说明）
+            final groupId = header['group_id'] as String?;
+            final chatKey = groupId != null ? 'group_$groupId' : from;
+            final text = utf8.decode(body as Uint8List);
+            final live = ChatMessage(
+              sender: from,
+              content: text,
+              type: 'group_chat',
+              messageId: messageId,
+              timestamp: msgTimestamp,
+              status: 'sent',
+              groupId: groupId != null ? int.tryParse(groupId) : null,
+              replyTo: replyTo,
+              replyPreview: replyPreview,
+              reactions:
+                  _parseReactionsHeader(header['reactions'] as String?),
+            );
+            state.addMessage(chatKey, live);
+            _notifyIncoming(live, chatKey);
           }
           break;
 
@@ -849,6 +940,19 @@ class SocketService {
               state.setBlockedUsers(list.map((e) => e.toString()).toList());
               gotBlocked = true;
             } catch (_) {}
+          } else if (responseType == 'list_conversations') {
+            // 阶段 K（K1-K3）：会话元数据（置顶/静音/草稿/清空标记）
+            // 随登录初始数据推送（最后一条），同步消费——晚到的旧推送
+            // 会覆盖用户登录后的置顶/静音/草稿操作
+            final conversationsJson = utf8.decode(body as Uint8List);
+            try {
+              final List<dynamic> list = jsonDecode(conversationsJson);
+              state.setConversationMetaList(list
+                  .map((e) =>
+                      ConversationMeta.fromJson(e as Map<String, dynamic>))
+                  .toList());
+              gotConversations = true;
+            } catch (_) {}
           }
           break;
 
@@ -870,10 +974,14 @@ class SocketService {
           break;
       }
 
-      // 收齐好友/群组列表 + 好友元数据 + 黑名单后初始数据接收完毕
-      // （阶段 J 修复：后两者随登录初始数据由服务端推送，必须同步消费完，
-      // 避免晚到的旧推送覆盖用户登录后的新操作）
-      if (gotFriendList && gotGroupList && gotMeta && gotBlocked) {
+      // 收齐好友/群组列表 + 好友元数据 + 黑名单 + 会话元数据后初始数据接收完毕
+      // （阶段 J 修复：元数据与黑名单随登录初始数据由服务端推送，必须同步消费完，
+      // 避免晚到的旧推送覆盖用户登录后的新操作；阶段 K 会话元数据同理）
+      if (gotFriendList &&
+          gotGroupList &&
+          gotMeta &&
+          gotBlocked &&
+          gotConversations) {
         break;
       }
     }
@@ -1033,7 +1141,10 @@ class SocketService {
         final text = utf8.decode(body);
         if (isHistory) break; // 初始数据阶段已处理
         final sender = from ?? '系统';
-        // 系统来源消息：公告 → 系统消息会话；其余 → 临时通知
+        // 阶段 K5：引用/转发元数据
+        final replyTo = header['reply_to'] as String?;
+        final replyPreview = header['reply_preview'] as String?;
+        // 系统来源消息：公告 → 系统消息会话；其余 → SnackBar 即时提示
         final isSystemSender =
             sender == '系统' || sender == '服务器' || sender.startsWith('[');
         if (isSystemSender) {
@@ -1050,7 +1161,7 @@ class SocketService {
             // 桌面通知（阶段 H2）：未聚焦窗口时通知系统公告
             _notifyIncoming(msg, '服务器');
           } else {
-            // 其他系统消息（操作确认、离线提示等）→ SnackBar 通知
+            // 其他系统消息（操作确认等）→ SnackBar 即时提示，不留档
             state.showNotice(text);
             // 修改密码成功（阶段 G3）：更新内存凭据，保证断线重连仍可登录
             if (text.contains('密码修改成功') && _pendingPasswordChange != null) {
@@ -1077,6 +1188,8 @@ class SocketService {
             type: 'chat',
             messageId: messageId,
             status: 'sent',
+            replyTo: replyTo,
+            replyPreview: replyPreview,
           );
           state.addMessage(sender, msg);
           // 桌面通知（阶段 H2）：未聚焦窗口时通知新私聊消息
@@ -1193,6 +1306,8 @@ class SocketService {
           messageId: messageId,
           status: 'sent',
           groupId: groupId != null ? int.tryParse(groupId) : null,
+          replyTo: header['reply_to'] as String?,
+          replyPreview: header['reply_preview'] as String?,
         );
         state.addMessage(chatKey, msg);
         // 桌面通知（阶段 H2）：未聚焦窗口时通知群聊消息
@@ -1259,6 +1374,33 @@ class SocketService {
         }
         break;
 
+      // ---- 表情回应（阶段 K5：P1-4）----
+      case 'reaction':
+        final reactId = header['message_id'] as String?;
+        final emoji = header['emoji'] as String?;
+        final action = header['action'] as String?;
+        final reactor = header['from'] as String?;
+        if (reactId != null && emoji != null && reactor != null) {
+          final current = <String, List<String>>{
+            for (final e
+                in (state.messageById(reactId)?.reactions ?? const {}).entries)
+              e.key: List<String>.of(e.value),
+          };
+          final users = List<String>.from(current[emoji] ?? const []);
+          if (action == 'remove') {
+            users.remove(reactor);
+          } else if (!users.contains(reactor)) {
+            users.add(reactor);
+          }
+          if (users.isEmpty) {
+            current.remove(emoji);
+          } else {
+            current[emoji] = users;
+          }
+          state.updateMessageReactions(reactId, current);
+        }
+        break;
+
       // ---- 删除好友通知（阶段 F）----
       case 'delete_friend':
         final deleter = header['from'] as String?;
@@ -1290,6 +1432,7 @@ class SocketService {
                 ts = DateTime.parse('${tsStr.trim()}Z').toLocal();
               } catch (_) {}
             }
+            final rawReactions = m['reactions'];
             msgs.add(ChatMessage(
               sender: m['sender'] as String? ?? '',
               content: m['content'] as String? ?? '',
@@ -1301,6 +1444,16 @@ class SocketService {
               timestamp: ts,
               isHistory: true,
               status: m['status'] as String? ?? 'delivered',
+              // 阶段 K5：引用元数据 + 表情回应
+              replyTo: m['reply_to'] as String?,
+              reactions: rawReactions is Map<String, dynamic>
+                  ? {
+                      for (final e in rawReactions.entries)
+                        e.key: (e.value as List<dynamic>? ?? const [])
+                            .map((u) => u.toString())
+                            .toList(),
+                    }
+                  : const {},
             ));
           }
           if (batch.isEmpty) {
@@ -1348,6 +1501,8 @@ class SocketService {
               timestamp: ts,
               isHistory: true,
               status: m['status'] as String? ?? 'delivered',
+              // 阶段 K5：引用元数据
+              replyTo: m['reply_to'] as String?,
             ));
           }
           // 服务端按时间倒序返回（最新在前），聊天展示需旧→新，翻转后写入
@@ -2094,6 +2249,169 @@ class SocketService {
         'to': to,
       });
     } catch (_) {}
+  }
+
+  // ============================================================
+  // 阶段 K（会话体验）—— 会话元数据与消息操作 API
+  // 未连接（_socket == null）时全部方法静默无副作用；
+  // 连接态按阶段 J 惯例"先乐观更新本地状态再发送"。
+  // ============================================================
+
+  /// 置顶会话（K1：P1-11，协议 pin）
+  Future<void> pinConversation(String chatKey) async {
+    if (_socket == null) return;
+    state.setConversationPinned(chatKey, true);
+    try {
+      await _sendMessage('pin', '', extraHeaders: {'peer_key': chatKey});
+    } catch (e) {
+      state.log('置顶会话失败: $e');
+    }
+  }
+
+  /// 取消置顶（K1：协议 unpin）
+  Future<void> unpinConversation(String chatKey) async {
+    if (_socket == null) return;
+    state.setConversationPinned(chatKey, false);
+    try {
+      await _sendMessage('unpin', '', extraHeaders: {'peer_key': chatKey});
+    } catch (e) {
+      state.log('取消置顶失败: $e');
+    }
+  }
+
+  /// 逐会话静音（K3：P1-13，协议 mute）
+  Future<void> muteConversation(String chatKey, bool muted) async {
+    if (_socket == null) return;
+    state.setConversationMuted(chatKey, muted);
+    try {
+      await _sendMessage('mute', '', extraHeaders: {
+        'peer_key': chatKey,
+        'muted': muted ? '1' : '0',
+      });
+    } catch (e) {
+      state.log('静音设置失败: $e');
+    }
+  }
+
+  /// 保存逐会话草稿（K2：P1-12，协议 set_draft；空串清除）
+  Future<void> saveConversationDraft(String chatKey, String draft) async {
+    if (_socket == null) return;
+    state.setConversationDraft(chatKey, draft);
+    try {
+      await _sendMessage('set_draft', draft,
+          extraHeaders: {'peer_key': chatKey});
+    } catch (e) {
+      state.log('草稿保存失败: $e');
+    }
+  }
+
+  /// 引用回复（K5：P1-2，协议 reply；乐观本地气泡 + 服务端生成/沿用 message_id）
+  Future<void> replyMessage(
+      String messageId, String text, String chatKey) async {
+    if (_socket == null) return;
+    if (text.trim().isEmpty) return;
+    final quoted = state.messageById(messageId);
+    final mid = _generateMessageId();
+    final isGroup = chatKey.startsWith('group_');
+    state.addMessage(
+      chatKey,
+      ChatMessage(
+        sender: state.username!,
+        content: text,
+        type: isGroup ? 'group_chat' : 'chat',
+        messageId: mid,
+        status: 'sent',
+        groupId: isGroup ? int.tryParse(chatKey.substring(6)) : null,
+        replyTo: messageId,
+        replyPreview: quoted?.content ?? '',
+      ),
+    );
+    try {
+      final extra = <String, String>{
+        'reply_to': messageId,
+        'message_id': mid,
+      };
+      if (isGroup) {
+        extra['group_id'] = chatKey.substring(6);
+      } else {
+        extra['to'] = chatKey;
+      }
+      await _sendMessage('reply', text, extraHeaders: extra);
+    } catch (e) {
+      state.log('引用回复失败: $e');
+    }
+  }
+
+  /// 转发消息（K5：P1-3，协议 forward；乐观本地气泡；
+  /// 以转发人为第一手——无来源标注）
+  Future<void> forwardMessage(String messageId, String targetChatKey) async {
+    if (_socket == null) return;
+    final source = state.messageById(messageId);
+    if (source == null) return;
+    final mid = _generateMessageId();
+    final isGroup = targetChatKey.startsWith('group_');
+    state.addMessage(
+      targetChatKey,
+      ChatMessage(
+        sender: state.username!,
+        content: source.content,
+        type: isGroup ? 'group_chat' : 'chat',
+        messageId: mid,
+        status: 'sent',
+        groupId: isGroup ? int.tryParse(targetChatKey.substring(6)) : null,
+      ),
+    );
+    try {
+      final extra = <String, String>{
+        'source_message_id': messageId,
+        'message_id': mid,
+      };
+      if (isGroup) {
+        extra['group_id'] = targetChatKey.substring(6);
+      } else {
+        extra['to'] = targetChatKey;
+      }
+      await _sendMessage('forward', '', extraHeaders: extra);
+    } catch (e) {
+      state.log('转发失败: $e');
+    }
+  }
+
+  /// 添加表情回应（K5：P1-4，协议 reaction；乐观更新）
+  Future<void> addReaction(
+      String messageId, String emoji, String chatKey) async {
+    if (_socket == null) return;
+    if (emoji.isEmpty) return;
+    state.toggleReaction(messageId, emoji, state.username!);
+    await _sendReaction(messageId, emoji, 'add', chatKey);
+  }
+
+  /// 移除表情回应（K5：P1-4；乐观更新）
+  Future<void> removeReaction(
+      String messageId, String emoji, String chatKey) async {
+    if (_socket == null) return;
+    if (emoji.isEmpty) return;
+    state.toggleReaction(messageId, emoji, state.username!);
+    await _sendReaction(messageId, emoji, 'remove', chatKey);
+  }
+
+  Future<void> _sendReaction(
+      String messageId, String emoji, String action, String chatKey) async {
+    try {
+      final extra = <String, String>{
+        'message_id': messageId,
+        'emoji': emoji,
+        'action': action,
+      };
+      if (chatKey.startsWith('group_')) {
+        extra['group_id'] = chatKey.substring(6);
+      } else {
+        extra['to'] = chatKey;
+      }
+      await _sendMessage('reaction', '', extraHeaders: extra);
+    } catch (e) {
+      state.log('表情回应失败: $e');
+    }
   }
 
   /// 管理员命令

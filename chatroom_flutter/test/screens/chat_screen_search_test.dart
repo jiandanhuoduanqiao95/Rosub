@@ -34,6 +34,7 @@ void resetState() {
 MockSocketService buildService() {
   final s = MockSocketService();
   when(() => s.sendChat(any(), any())).thenAnswer((_) async => true);
+  when(() => s.saveConversationDraft(any(), any())).thenAnswer((_) async {});
   when(() => s.sendGroupChat(any(), any())).thenAnswer((_) async => true);
   when(() => s.sendFile(any(), any(), any())).thenAnswer((_) async => true);
   when(() => s.searchHistory(any(),

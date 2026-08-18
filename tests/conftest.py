@@ -196,7 +196,15 @@ class Client:
           6. 群组列表（list_groups）
           7. 好友元数据（admin_response, response_type=list_friends_meta）
           8. 黑名单（admin_response, response_type=list_blocked）
+          9. 会话元数据（admin_response, response_type=list_conversations，
+             阶段 K 规划中，可选尾随推送）
         全部消费完毕后返回（缓冲不留残余，后续 expect 不被打扰）。
+
+        阶段 K 追加（规划中，2026-08-15）：服务端在 list_blocked 之后
+        追加推送 conversations 会话元数据（admin_response,
+        response_type="list_conversations"）。此处用短超时尾随消费，
+        服务端未实现该推送时静默跳过（多一次 ~0.1s 空读），实现后
+        既有的 login(consume=True) 测试不被残留推送打断。
         """
         result = {
             "login_response": None,
@@ -208,6 +216,7 @@ class Client:
             "group_file_requests": [],
             "friend_meta": [],
             "blocked": [],
+            "conversations": [],
             "extra": [],
         }
         got_friends = False
@@ -243,6 +252,8 @@ class Client:
             elif t == "admin_response" and h.get("response_type") == "list_blocked":
                 result["blocked"] = json.loads(d.decode()) if d else []
                 got_blocked = True
+            elif t == "admin_response" and h.get("response_type") == "list_conversations":
+                result["conversations"] = json.loads(d.decode()) if d else []
             elif t == "list_groups":
                 result["groups"] = json.loads(d.decode()) if d else []
                 got_groups = True
@@ -250,6 +261,13 @@ class Client:
                 result["extra"].append((h, d))
             if got_friends and got_groups and got_meta and got_blocked:
                 break
+        # 阶段 K 尾随消费：list_conversations 在 list_blocked 之后推送（规划中），
+        # 主循环在收齐四个列表后已 break，这里短超时补读一次。
+        # 服务端实现该推送前此读返回 None（约 0.1s），不影响既有测试。
+        h, d = self.recv(timeout=0.1)
+        if (h is not None and h.get("type") == "admin_response"
+                and h.get("response_type") == "list_conversations"):
+            result["conversations"] = json.loads(d.decode()) if d else []
         return result
 
     def login(self, username, password, admin_secret=None, consume=True):

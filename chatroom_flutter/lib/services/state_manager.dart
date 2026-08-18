@@ -386,6 +386,88 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 批量替换会话元数据（阶段 K：服务端 list_conversations 登录推送）
+  void setConversationMetaList(List<ConversationMeta> metas) {
+    _conversationMeta.clear();
+    for (final m in metas) {
+      if (m.peerKey.isEmpty) continue;
+      _conversationMeta[m.peerKey] = m;
+    }
+    notifyListeners();
+  }
+
+  // ---- 会话置顶（阶段 K1：P1-11）----
+  // 置顶会话排序：chatTargets 原顺序过滤（置顶在前由 Sidebar 分区渲染）
+
+  /// 置顶的会话目标（保持 chatTargets 原顺序）
+  List<ChatTarget> get pinnedChatTargets =>
+      chatTargets.where((t) => isPinned(t.key)).toList();
+
+  /// 非置顶的会话目标
+  List<ChatTarget> get unpinnedChatTargets =>
+      chatTargets.where((t) => !isPinned(t.key)).toList();
+
+  // ---- 消息操作状态（阶段 K5：P1-2 引用 / P1-4 表情回应）----
+
+  /// 按 messageId 查询消息本体；不存在返回 null
+  ChatMessage? messageById(String messageId) => _messageMap[messageId];
+
+  /// 设置/清除引用信息（P1-2）
+  void setMessageQuote(String messageId,
+      {String? replyTo, String? replyPreview}) {
+    final msg = _messageMap[messageId];
+    if (msg == null) return;
+    msg.replyTo = replyTo;
+    msg.replyPreview = replyPreview;
+    notifyListeners();
+  }
+
+  /// 整体替换消息的表情回应（P1-4，副本语义）
+  void updateMessageReactions(
+      String messageId, Map<String, List<String>> reactions) {
+    final msg = _messageMap[messageId];
+    if (msg == null) return;
+    msg.reactions = {
+      for (final entry in reactions.entries)
+        entry.key: List<String>.of(entry.value),
+    };
+    notifyListeners();
+  }
+
+  /// 切换某用户对消息的表情回应（乐观更新）：
+  /// 已在 emoji 列表 → 移除（该 emoji 空则删键）；不在 → 加入
+  void toggleReaction(String messageId, String emoji, String username) {
+    final msg = _messageMap[messageId];
+    if (msg == null) return;
+    // 整体替换映射实例（消息 reactions 可能为 const 空映射，不可原地修改）
+    final current = {
+      for (final e in msg.reactions.entries) e.key: List<String>.of(e.value),
+    };
+    final users = List<String>.from(current[emoji] ?? const []);
+    if (users.contains(username)) {
+      users.remove(username);
+      if (users.isEmpty) {
+        current.remove(emoji);
+      } else {
+        current[emoji] = users;
+      }
+    } else {
+      current[emoji] = [...users, username];
+    }
+    msg.reactions = current;
+    notifyListeners();
+  }
+
+  /// 仅我删除（本地）：从自己界面移除消息（不删除他人/服务端记录）
+  void removeMessageLocally(String chatKey, String messageId) {
+    final list = _messages[chatKey];
+    if (list == null) return;
+    final before = list.length;
+    list.removeWhere((m) => m.messageId == messageId);
+    _messageMap.remove(messageId);
+    if (list.length != before) notifyListeners();
+  }
+
   // ---- 状态日志 ----
   final List<String> _statusLog = [];
   UnmodifiableListView<String> get statusLog =>

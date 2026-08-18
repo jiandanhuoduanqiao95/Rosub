@@ -11,6 +11,7 @@ import '../models/chat_models.dart';
 import 'raw_text_field.dart';
 import '../services/socket_service.dart';
 import '../services/state_manager.dart';
+import '../services/taskbar_notifier.dart';
 
 // ============================================================
 // 用户资料对话框（阶段 J：P0-2）
@@ -286,6 +287,11 @@ void showFriendManageDialog(
   required VoidCallback onBlock,
   required VoidCallback onUnblock,
   required VoidCallback onDelete,
+  // 阶段 K1/K3：置顶与静音入口（未提供回调时不渲染，回归兼容）
+  bool pinned = false,
+  bool muted = false,
+  ValueChanged<bool>? onTogglePin,
+  ValueChanged<bool>? onToggleMute,
 }) {
   final state = AppState.instance;
   showDialog(
@@ -326,6 +332,28 @@ void showFriendManageDialog(
                   onSetGroup();
                 },
               ),
+              // 阶段 K1：置顶/取消置顶
+              if (onTogglePin != null)
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.push_pin),
+                  title: Text(pinned ? '取消置顶' : '置顶'),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    onTogglePin(!pinned);
+                  },
+                ),
+              // 阶段 K3：静音/取消静音
+              if (onToggleMute != null)
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.notifications_off_outlined),
+                  title: Text(muted ? '取消静音' : '静音'),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    onToggleMute(!muted);
+                  },
+                ),
               const Divider(),
               Text(
                 '确定删除好友 $username 吗？\n删除后双方的好友关系将解除。',
@@ -1032,8 +1060,13 @@ void showGroupMenuDialog(
   BuildContext context,
   Group group,
   void Function(Group group) onShowMembers,
-  void Function(int groupId) onLeaveGroup,
-) {
+  void Function(int groupId) onLeaveGroup, {
+  // 阶段 K1/K3：置顶与静音入口（未提供回调时不渲染，回归兼容）
+  bool pinned = false,
+  bool muted = false,
+  ValueChanged<bool>? onTogglePin,
+  ValueChanged<bool>? onToggleMute,
+}) {
   final state = AppState.instance;
   showDialog(
     context: context,
@@ -1070,6 +1103,26 @@ void showGroupMenuDialog(
                     onShowMembers(group);
                   },
                 ),
+                // 阶段 K1：置顶/取消置顶
+                if (onTogglePin != null)
+                  ListTile(
+                    leading: const Icon(Icons.push_pin),
+                    title: Text(pinned ? '取消置顶' : '置顶'),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      onTogglePin(!pinned);
+                    },
+                  ),
+                // 阶段 K3：静音/取消静音
+                if (onToggleMute != null)
+                  ListTile(
+                    leading: const Icon(Icons.notifications_off_outlined),
+                    title: Text(muted ? '取消静音' : '静音'),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      onToggleMute(!muted);
+                    },
+                  ),
                 const Divider(),
                 ListTile(
                   leading: Icon(Icons.exit_to_app_rounded,
@@ -1154,6 +1207,153 @@ void showGroupInfoDialog(BuildContext context, Group group) {
                       );
                     },
                   ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('关闭'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
+
+// ============================================================
+// 设置对话框（阶段 K3：P1-13/14 提示音 + 免打扰）
+// ============================================================
+
+void showSettingsDialog(BuildContext context) {
+  showDialog(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setState) {
+        final dndEnd = TaskbarNotifier.dndEndTime;
+        return AlertDialog(
+          title: const Text('设置'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SwitchListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: const Text('提示音'),
+                value: TaskbarNotifier.soundEnabled,
+                onChanged: (v) =>
+                    setState(() => TaskbarNotifier.soundEnabled = v),
+              ),
+              SwitchListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: const Text('免打扰'),
+                subtitle: TaskbarNotifier.dndEnabled
+                    ? Text(
+                        '至 ${DateFormat('yyyy-MM-dd HH:mm').format(dndEnd)} 自动结束',
+                        style: const TextStyle(fontSize: 12),
+                      )
+                    : null,
+                value: TaskbarNotifier.dndEnabled,
+                onChanged: (v) => setState(() {
+                  TaskbarNotifier.dndEnabled = v;
+                  if (v) TaskbarNotifier.ensureDndEndInFuture();
+                }),
+              ),
+              if (TaskbarNotifier.dndEnabled)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Text('结束日期'),
+                          const SizedBox(width: 8),
+                          TextButton.icon(
+                            icon: const Icon(Icons.calendar_month_rounded,
+                                size: 18),
+                            label: Text(DateFormat('yyyy-MM-dd')
+                                .format(TaskbarNotifier.dndEndTime)),
+                            onPressed: () async {
+                              final now = DateTime.now();
+                              final firstDate =
+                                  DateTime(now.year, now.month, now.day);
+                              final lastDate =
+                                  DateTime(now.year + 1, now.month, now.day);
+                              final dndEnd = TaskbarNotifier.dndEndTime;
+                              final picked = await showDatePicker(
+                                context: ctx,
+                                // 防御：dndEndTime 早于今天（如跨天后未到期巡检）
+                                // 时钳制为今天，避免 initialDate < firstDate 断言崩溃
+                                initialDate: dndEnd.isBefore(firstDate)
+                                    ? firstDate
+                                    : dndEnd,
+                                firstDate: firstDate,
+                                lastDate: lastDate,
+                              );
+                              if (picked != null) {
+                                final old = TaskbarNotifier.dndEndTime;
+                                TaskbarNotifier.dndEndTime = DateTime(
+                                  picked.year,
+                                  picked.month,
+                                  picked.day,
+                                  old.hour,
+                                  old.minute,
+                                );
+                                if (ctx.mounted) setState(() {});
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Text('结束时刻'),
+                          const SizedBox(width: 8),
+                          DropdownButton<int>(
+                            value: TaskbarNotifier.dndEndTime.hour,
+                            items: [
+                              for (var h = 0; h < 24; h++)
+                                DropdownMenuItem(value: h, child: Text('$h 时')),
+                            ],
+                            onChanged: (h) {
+                              if (h != null) {
+                                final old = TaskbarNotifier.dndEndTime;
+                                TaskbarNotifier.dndEndTime = DateTime(
+                                    old.year, old.month, old.day, h, old.minute);
+                                setState(() {});
+                              }
+                            },
+                          ),
+                          const SizedBox(width: 12),
+                          DropdownButton<int>(
+                            value: TaskbarNotifier.dndEndTime.minute,
+                            items: [
+                              for (var m = 0; m < 60; m++)
+                                DropdownMenuItem(
+                                    value: m, child: Text('$m 分')),
+                            ],
+                            onChanged: (m) {
+                              if (m != null) {
+                                final old = TaskbarNotifier.dndEndTime;
+                                TaskbarNotifier.dndEndTime = DateTime(
+                                    old.year, old.month, old.day, old.hour, m);
+                                setState(() {});
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        '免打扰到期后自动关闭并提醒',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
           ),
           actions: [
             TextButton(

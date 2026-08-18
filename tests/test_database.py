@@ -71,8 +71,8 @@ class TestDatabaseInit:
 
     def test_tables_created(self, db):
         """
-        【测试16】数据库创建时，11 张表都已正确建立（阶段 I 新增 conversations，
-        阶段 J 新增 blocked_users）
+        【测试16】数据库创建时，12 张表都已正确建立（阶段 I 新增 conversations，
+        阶段 J 新增 blocked_users，阶段 K 新增 reactions）
         
         怎么做：查询 SQLite 的 sqlite_master 系统表
         验证点：所有预期的表都存在
@@ -85,7 +85,7 @@ class TestDatabaseInit:
         expected = {
             "users", "offline_messages", "friends", "file_requests",
             "groups", "group_members", "group_file_requests", "group_file_responses",
-            "message_history", "conversations", "blocked_users"
+            "message_history", "conversations", "blocked_users", "reactions"
         }
         assert tables == expected, f"缺少表: {expected - tables}"
 

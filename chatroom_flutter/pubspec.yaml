@@ -32,3 +32,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  # 彩色 emoji 字体（阶段 K：表情回应彩色渲染，Telegram 风格）
+  fonts:
+    - family: NotoColorEmoji
+      fonts:
+        - asset: assets/fonts/NotoColorEmoji.ttf

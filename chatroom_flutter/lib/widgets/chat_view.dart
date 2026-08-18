@@ -4,6 +4,8 @@
 /// 支持文本发送、文件发送、消息撤回、上滑加载历史（阶段 E）。
 /// 输入框使用 RawTextField + IME 桥接，避免 Flutter + fcitx GTK IM Context 死锁。
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../models/chat_models.dart';
@@ -28,6 +30,16 @@ class ChatView extends StatefulWidget {
   final VoidCallback onSearchExit; // 退出搜索模式
   final ValueChanged<String>? onRetrySend; // 发送失败重试回调（阶段 I1）
 
+  // ---- 阶段 K2（P1-12 逐会话草稿）----
+  final ValueChanged<String>? onInputChanged; // 输入文本变化回调（草稿数据源）
+
+  // ---- 阶段 K5（P1-2/P1-3/P1-4 消息操作）----
+  final ValueChanged<String>? onReplyMessage;
+  final ValueChanged<String>? onForwardMessage;
+  final void Function(String messageId, String emoji)? onAddReaction;
+  final ValueChanged<String>? onDeleteMessage; // 仅我删除（本地）
+  final ValueChanged<String>? onJumpToMessage; // 点击引用块跳转原消息
+
   const ChatView({
     super.key,
     required this.chatKey,
@@ -47,6 +59,12 @@ class ChatView extends StatefulWidget {
     this.onSearch = _noopSearch,
     this.onSearchExit = _noopExit,
     this.onRetrySend,
+    this.onInputChanged,
+    this.onReplyMessage,
+    this.onForwardMessage,
+    this.onAddReaction,
+    this.onDeleteMessage,
+    this.onJumpToMessage,
   });
 
   static void _noopSearch(String _) {}
@@ -62,9 +80,20 @@ class _ChatViewState extends State<ChatView> {
   bool _isLoadingHistory = false;
   bool _searchInputVisible = false;
 
+  /// 阶段 K5（P1-2 修复）：引用跳转的目标消息高亮（点击后闪烁约 2s）
+  String? _highlightMessageId;
+  Timer? _highlightTimer;
+
   /// 搜索入口私聊/群聊会话提供（服务端 search_history 支持 to / group_id 范围）；
   /// 系统消息会话（'服务器'，只读）不提供搜索入口
   bool get _canSearch => widget.chatKey != '服务器';
+
+  /// 阶段 K5：是否启用消息菜单（任一 K5 回调非空）
+  bool get _kMenuEnabled =>
+      widget.onReplyMessage != null ||
+      widget.onForwardMessage != null ||
+      widget.onAddReaction != null ||
+      widget.onDeleteMessage != null;
 
   /// 提交搜索（空关键字不触发回调）
   void _submitSearch(String keyword) {
@@ -78,6 +107,8 @@ class _ChatViewState extends State<ChatView> {
   void initState() {
     super.initState();
     _scrollCtrl.addListener(_onScroll);
+    // 阶段 K2：监听输入文本变化 → onInputChanged（逐会话草稿数据源）
+    widget.inputCtrl.addListener(_onInputTextChanged);
   }
 
   @override
@@ -85,7 +116,13 @@ class _ChatViewState extends State<ChatView> {
     _scrollCtrl.removeListener(_onScroll);
     _scrollCtrl.dispose();
     _searchCtrl.dispose();
+    _highlightTimer?.cancel();
+    widget.inputCtrl.removeListener(_onInputTextChanged);
     super.dispose();
+  }
+
+  void _onInputTextChanged() {
+    widget.onInputChanged?.call(widget.inputCtrl.text);
   }
 
   void _onScroll() {
@@ -119,6 +156,51 @@ class _ChatViewState extends State<ChatView> {
           _isLoadingHistory = false;
         });
       }
+    });
+  }
+
+  /// 阶段 K5（P1-2 修复）：点击引用块跳转到被引用的原消息
+  ///
+  /// 修复内容（2026-08-18，P-30 手动测试发现）：
+  /// ① 跳转目标应为 message.replyTo（原实现误跳当前消息自身，点击无效果）；
+  /// ② 长会话分页后目标消息可能未加载：先按最旧游标翻页加载历史，
+  ///    直到找到目标或没有更早消息（上限 30 页防死循环）；
+  /// ③ 跳转后目标气泡高亮闪烁约 2s，便于在长列表中定位。
+  /// 滚动定位为 reverse 列表按序号比例的近似定位（无逐项测量依赖）。
+  Future<void> _jumpToMessage(String messageId) async {
+    var idx = widget.messages.indexWhere((m) => m.messageId == messageId);
+    // 目标未加载 → 循环加载更早历史直到找到或没有更早消息
+    var pages = 0;
+    while (idx < 0 &&
+        !widget.isSearchMode &&
+        widget.hasMoreHistory(widget.chatKey) &&
+        widget.messages.isNotEmpty &&
+        pages < 30) {
+      final oldestId = widget.messages.first.messageId;
+      await widget.onLoadHistory(oldestId);
+      pages++;
+      idx = widget.messages.indexWhere((m) => m.messageId == messageId);
+    }
+    if (idx < 0 || !_scrollCtrl.hasClients) return;
+    final total = widget.messages.length;
+    final visualIndex = total - 1 - idx; // reverse 列表的视觉序号
+    final max = _scrollCtrl.position.maxScrollExtent;
+    if (total <= 1 || max <= 0) return;
+    final target = (max * visualIndex / (total - 1)).clamp(0.0, max);
+    await _scrollCtrl.animateTo(
+      target,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOut,
+    );
+    if (mounted) _flashHighlight(messageId);
+  }
+
+  /// 目标消息高亮闪烁（约 2s 后自动清除）
+  void _flashHighlight(String messageId) {
+    _highlightTimer?.cancel();
+    setState(() => _highlightMessageId = messageId);
+    _highlightTimer = Timer(const Duration(milliseconds: 2000), () {
+      if (mounted) setState(() => _highlightMessageId = null);
     });
   }
 
@@ -178,8 +260,7 @@ class _ChatViewState extends State<ChatView> {
                 IconButton(
                   icon: const Icon(Icons.search_rounded),
                   tooltip: '搜索消息',
-                  onPressed: () =>
-                      setState(() => _searchInputVisible = true),
+                  onPressed: () => setState(() => _searchInputVisible = true),
                 ),
             ],
           ),
@@ -216,8 +297,7 @@ class _ChatViewState extends State<ChatView> {
                 IconButton(
                   icon: const Icon(Icons.close_rounded),
                   tooltip: '关闭搜索',
-                  onPressed: () =>
-                      setState(() => _searchInputVisible = false),
+                  onPressed: () => setState(() => _searchInputVisible = false),
                 ),
               ],
             ),
@@ -258,16 +338,27 @@ class _ChatViewState extends State<ChatView> {
                         return _MessageBubble(
                           message: msg,
                           isSelf: msg.sender == widget.username,
-                          onRecall: msg.isRecalled ||
-                                  msg.sender != widget.username
-                              ? null
-                              : () => widget.onRecall(msg.messageId),
+                          onRecall:
+                              msg.isRecalled || msg.sender != widget.username
+                                  ? null
+                                  : () => widget.onRecall(msg.messageId),
                           transferFraction: msg.type == 'file'
                               ? widget.transferFraction?.call(msg.messageId)
                               : null,
                           onRetrySend: msg.sender == widget.username
                               ? widget.onRetrySend
                               : null,
+                          kMenuEnabled: _kMenuEnabled,
+                          onReplyMessage: widget.onReplyMessage,
+                          onForwardMessage: widget.onForwardMessage,
+                          onAddReaction: widget.onAddReaction,
+                          onDeleteMessage: widget.onDeleteMessage,
+                          onJumpToMessage: widget.onJumpToMessage,
+                          // 跳转目标是被引用的原消息（P-30 修复）
+                          onJump: () => _jumpToMessage(
+                              msg.replyTo ?? msg.messageId),
+                          highlighted:
+                              msg.messageId == _highlightMessageId,
                         );
                       },
                     ),
@@ -412,13 +503,55 @@ class _MessageBubble extends StatelessWidget {
   final double? transferFraction; // 传输进度 0~1；null 表示无传输（阶段 G 可视化）
   final ValueChanged<String>? onRetrySend; // 发送失败重试（阶段 I1）
 
+  // ---- 阶段 K5：消息菜单与操作回调 ----
+  final bool kMenuEnabled;
+  final ValueChanged<String>? onReplyMessage;
+  final ValueChanged<String>? onForwardMessage;
+  final void Function(String messageId, String emoji)? onAddReaction;
+  final ValueChanged<String>? onDeleteMessage; // 仅我删除（本地）
+  final ValueChanged<String>? onJumpToMessage;
+  final VoidCallback onJump; // 内部跳转（引用块点击）
+  final bool highlighted; // 引用跳转高亮（P-30）
+
   const _MessageBubble({
     required this.message,
     required this.isSelf,
     this.onRecall,
     this.transferFraction,
     this.onRetrySend,
+    this.kMenuEnabled = false,
+    this.onReplyMessage,
+    this.onForwardMessage,
+    this.onAddReaction,
+    this.onDeleteMessage,
+    this.onJumpToMessage,
+    required this.onJump,
+    this.highlighted = false,
   });
+
+  /// 阶段 K5：文字/文件消息且提供 K5 回调时启用消息菜单
+  /// （P-33 修订 2026-08-18：文件消息改用新菜单交互——长按弹菜单，
+  /// 菜单内仅"撤回"入口；系统/已撤回消息仍不弹菜单）
+  bool get _showMenu =>
+      kMenuEnabled &&
+      message.type != 'system' &&
+      !message.isRecalled;
+
+  void _openMenu(BuildContext context) {
+    if (!_showMenu) return;
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => _MessageMenuSheet(
+        message: message,
+        isSelf: isSelf,
+        onRecall: onRecall,
+        onReplyMessage: onReplyMessage,
+        onForwardMessage: onForwardMessage,
+        onAddReaction: onAddReaction,
+        onDeleteMessage: onDeleteMessage,
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -435,17 +568,25 @@ class _MessageBubble extends StatelessWidget {
     // 阶段 I1：自己发送失败的消息可点击重试（与长按撤回共存）。
     // 文件消息不走文字发送队列（传输进度条承载状态），不提供重试交互。
     final retryable = isSelf && message.isFailed && message.type != 'file';
+    // 阶段 K5：菜单启用时文字消息改用菜单；否则保持既有直接撤回交互（回归）
+    final VoidCallback? menuOrRecall =
+        _showMenu ? () => _openMenu(context) : onRecall;
     return MouseRegion(
-      cursor: onRecall == null ? MouseCursor.defer : SystemMouseCursors.click,
+      cursor: onRecall == null && !_showMenu
+          ? MouseCursor.defer
+          : SystemMouseCursors.click,
       child: GestureDetector(
-        onLongPress: onRecall,
-        onSecondaryTap: onRecall,
-        onTap: retryable
-            ? () => onRetrySend?.call(message.messageId)
-            : null,
+        onLongPress: menuOrRecall,
+        onSecondaryTap: menuOrRecall,
+        onTap: retryable ? () => onRetrySend?.call(message.messageId) : null,
         child: Container(
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
+          decoration: highlighted
+              ? BoxDecoration(
+                  color: Colors.amber.withValues(alpha: 0.25),
+                )
+              : null,
           child: Column(
             crossAxisAlignment: alignment,
             children: [
@@ -470,6 +611,40 @@ class _MessageBubble extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 2),
+              // 阶段 K5：引用块（原文缩略 + 点击跳转）
+              if (message.hasQuote)
+                GestureDetector(
+                  onTap: () {
+                    onJumpToMessage?.call(message.replyTo!);
+                    onJump();
+                  },
+                  child: Container(
+                    margin: const EdgeInsets.only(bottom: 4),
+                    constraints: const BoxConstraints(maxWidth: 320),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context)
+                          .colorScheme
+                          .surfaceContainerHighest
+                          .withValues(alpha: 0.5),
+                      borderRadius: BorderRadius.circular(8),
+                      border: const Border(
+                        left: BorderSide(color: Colors.grey, width: 3),
+                      ),
+                    ),
+                    child: Text(
+                      message.replyPreview ?? '',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontStyle: FontStyle.italic,
+                        color: Colors.grey[600],
+                      ),
+                    ),
+                  ),
+                ),
               // 消息内容气泡
               Container(
                 constraints: BoxConstraints(
@@ -584,9 +759,7 @@ class _MessageBubble extends StatelessWidget {
                                   valueColor: AlwaysStoppedAnimation<Color>(
                                     isSelf
                                         ? Colors.white
-                                        : Theme.of(context)
-                                            .colorScheme
-                                            .primary,
+                                        : Theme.of(context).colorScheme.primary,
                                   ),
                                   backgroundColor: isSelf
                                       ? Colors.white.withValues(alpha: 0.35)
@@ -612,6 +785,39 @@ class _MessageBubble extends StatelessWidget {
                   ],
                 ),
               ),
+              // 阶段 K5：表情回应 chips（emoji 计数 + 点击触发 onAddReaction；
+              // NotoColorEmoji 字体保证彩色渲染）
+              if (message.reactions.isNotEmpty && !isRecalled)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Wrap(
+                    spacing: 6,
+                    children: [
+                      for (final entry in message.reactions.entries)
+                        GestureDetector(
+                          onTap: () =>
+                              onAddReaction?.call(message.messageId, entry.key),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .surfaceContainerHighest,
+                              borderRadius: BorderRadius.circular(999),
+                            ),
+                            child: Text(
+                              '${entry.key} ${entry.value.length}',
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontFamily: 'NotoColorEmoji',
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
             ],
           ),
         ),
@@ -662,6 +868,140 @@ class _SystemMessage extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 阶段 K5：消息操作菜单（编辑/引用回复/转发/表情回应/撤回）
+class _MessageMenuSheet extends StatefulWidget {
+  final ChatMessage message;
+  final bool isSelf;
+  final VoidCallback? onRecall;
+  final ValueChanged<String>? onReplyMessage;
+  final ValueChanged<String>? onForwardMessage;
+  final void Function(String messageId, String emoji)? onAddReaction;
+  final ValueChanged<String>? onDeleteMessage; // 仅我删除（本地）
+
+  const _MessageMenuSheet({
+    required this.message,
+    required this.isSelf,
+    this.onRecall,
+    this.onReplyMessage,
+    this.onForwardMessage,
+    this.onAddReaction,
+    this.onDeleteMessage,
+  });
+
+  @override
+  State<_MessageMenuSheet> createState() => _MessageMenuSheetState();
+}
+
+class _MessageMenuSheetState extends State<_MessageMenuSheet> {
+  bool _showEmojiPalette = false;
+
+  void _close() => Navigator.pop(context);
+
+  void _invoke(VoidCallback action) {
+    _close();
+    action();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final canEditOrRecall = widget.isSelf;
+    // 文件消息（P-33 修订 2026-08-18）：菜单仅提供"撤回"入口
+    // （文件不支持引用/转发/表情/仅我删除）
+    final isFile = widget.message.type == 'file';
+    final entries = <Widget>[];
+    if (!isFile && widget.onReplyMessage != null) {
+      entries.add(_MenuTile(
+        icon: Icons.reply_rounded,
+        title: '引用回复',
+        onTap: () =>
+            _invoke(() => widget.onReplyMessage!(widget.message.messageId)),
+      ));
+    }
+    if (!isFile && widget.onForwardMessage != null) {
+      entries.add(_MenuTile(
+        icon: Icons.forward_rounded,
+        title: '转发',
+        onTap: () =>
+            _invoke(() => widget.onForwardMessage!(widget.message.messageId)),
+      ));
+    }
+    if (!isFile && widget.onAddReaction != null) {
+      entries.add(_MenuTile(
+        icon: Icons.add_reaction_outlined,
+        title: '表情回应',
+        onTap: () => setState(() => _showEmojiPalette = !_showEmojiPalette),
+      ));
+    }
+    if (canEditOrRecall && widget.onRecall != null) {
+      entries.add(_MenuTile(
+        icon: Icons.undo_rounded,
+        title: '撤回',
+        onTap: () => _invoke(widget.onRecall!),
+      ));
+    }
+    // 仅我删除（本地，微信式）：仅自己的文字消息，从自己界面移除
+    if (!isFile && canEditOrRecall && widget.onDeleteMessage != null) {
+      entries.add(_MenuTile(
+        icon: Icons.delete_outline_rounded,
+        title: '仅我删除',
+        onTap: () =>
+            _invoke(() => widget.onDeleteMessage!(widget.message.messageId)),
+      ));
+    }
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ...entries,
+            if (_showEmojiPalette)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Wrap(
+                  spacing: 8,
+                  children: [
+                    for (final emoji in defaultReactionEmojis)
+                      ActionChip(
+                        label: Text(emoji,
+                            style: const TextStyle(
+                                fontFamily: 'NotoColorEmoji')),
+                        onPressed: () => _invoke(() => widget.onAddReaction!(
+                            widget.message.messageId, emoji)),
+                      ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MenuTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final VoidCallback onTap;
+
+  const _MenuTile({
+    required this.icon,
+    required this.title,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      dense: true,
+      leading: Icon(icon),
+      title: Text(title),
+      onTap: onTap,
     );
   }
 }

@@ -104,7 +104,7 @@ class AsyncClient:
     async def consume_initial(self):
         result = {"login_ok": False, "friends": [], "groups": [],
                   "offline": [], "friend_requests": [], "file_requests": [],
-                  "friend_meta": [], "blocked": [], "extra": []}
+                  "friend_meta": [], "blocked": [], "conversations": [], "extra": []}
         h, d = await self.recv()
         if h is None:
             return result
@@ -137,6 +137,8 @@ class AsyncClient:
             elif t == "admin_response" and h.get("response_type") == "list_blocked":
                 result["blocked"] = json.loads(d.decode()) if d else []
                 got_blocked = True
+            elif t == "admin_response" and h.get("response_type") == "list_conversations":
+                result["conversations"] = json.loads(d.decode()) if d else []
             elif t == "list_groups":
                 result["groups"] = json.loads(d.decode()) if d else []
                 got_groups = True
@@ -144,6 +146,15 @@ class AsyncClient:
                 result["extra"].append((h, d))
             if got_friends and got_groups and got_meta and got_blocked:
                 break
+        # 阶段 K 尾随消费：list_conversations 在 list_blocked 之后推送（最后一条），
+        # 主循环在收齐四个列表后已 break，这里短超时补读一次，缓冲不残留
+        try:
+            h, d = await self.recv(timeout=0.2)
+            if (h is not None and h.get("type") == "admin_response"
+                    and h.get("response_type") == "list_conversations"):
+                result["conversations"] = json.loads(d.decode()) if d else []
+        except asyncio.TimeoutError:
+            pass
         return result
 
     async def drain(self, timeout=0.5):

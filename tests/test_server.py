@@ -226,10 +226,23 @@ def recv_all_initial_data(sock):
         elif t == "list_groups":
             result["groups"] = json.loads(d.decode()) if d else []
             got_groups = True
+        elif t == "admin_response" and h.get("response_type") == "list_conversations":
+            result["conversations"] = json.loads(d.decode()) if d else []
         else:
             result.setdefault("extra", []).append((h, d))
         if got_friends and got_groups and got_meta and got_blocked:
             break
+
+    # 阶段 K 尾随消费：list_conversations 在 list_blocked 之后推送（最后一条），
+    # 主循环在收齐四个列表后已 break，这里短超时补读一次，缓冲不残留
+    try:
+        sock.settimeout(0.1)
+        h, d = recv_message(sock)
+        if (h is not None and h.get("type") == "admin_response"
+                and h.get("response_type") == "list_conversations"):
+            result["conversations"] = json.loads(d.decode()) if d else []
+    except (socket.timeout, Exception):
+        pass
 
     return result
 
@@ -1217,6 +1230,8 @@ class TestAdminCommands:
             # 阶段 J：好友元数据与黑名单随登录初始数据推送，一并消费
             expect_response(s2, "admin_response")
             expect_response(s2, "admin_response")
+            # 阶段 K：会话元数据（list_conversations）随登录初始数据推送（最后一条），一并消费
+            expect_response(s2, "admin_response")
 
             # admin 请求用户列表
             send_message(s2, "admin_command", "",
@@ -1270,6 +1285,8 @@ class TestAdminCommands:
             expect_response(s_admin_cli, "list_groups")
             # 阶段 J：好友元数据与黑名单随登录初始数据推送，一并消费
             expect_response(s_admin_cli, "admin_response")
+            expect_response(s_admin_cli, "admin_response")
+            # 阶段 K：会话元数据（list_conversations）随登录初始数据推送（最后一条），一并消费
             expect_response(s_admin_cli, "admin_response")
 
             # admin 发公告

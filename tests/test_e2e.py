@@ -100,9 +100,11 @@ class HeadlessTestClient:
         返回 (login_ok, friends_json, groups_json, offline_msgs)
         阶段 J 修复：好友元数据/黑名单随登录初始数据推送，本方法一并消费，
         收齐好友列表+群组列表+好友元数据+黑名单后提前退出（缓冲不残留）。
+        阶段 K：会话元数据（list_conversations）为最后一条推送，短超时尾随消费。
         """
         result = {"login_ok": False, "friends": [], "groups": [], "offline": [],
-                  "friend_requests": [], "blocked": [], "friend_meta": []}
+                  "friend_requests": [], "blocked": [], "friend_meta": [],
+                  "conversations": []}
         got_friends = False
         got_groups = False
         got_meta = False
@@ -130,6 +132,8 @@ class HeadlessTestClient:
             elif t == "admin_response" and h.get("response_type") == "list_blocked":
                 result["blocked"] = json.loads(d.decode()) if d else []
                 got_blocked = True
+            elif t == "admin_response" and h.get("response_type") == "list_conversations":
+                result["conversations"] = json.loads(d.decode()) if d else []
             elif t == "list_groups":
                 result["groups"] = json.loads(d.decode()) if d else []
                 got_groups = True
@@ -137,6 +141,11 @@ class HeadlessTestClient:
                 result["friend_requests"].append((h, d))
             if got_friends and got_groups and got_meta and got_blocked:
                 break
+        # 阶段 K 尾随消费：list_conversations 在 list_blocked 之后推送
+        h, d = self.recv(timeout=0.1)
+        if (h is not None and h.get("type") == "admin_response"
+                and h.get("response_type") == "list_conversations"):
+            result["conversations"] = json.loads(d.decode()) if d else []
         return result
 
     def drain(self, timeout=0.5):

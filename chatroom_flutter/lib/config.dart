@@ -5,8 +5,8 @@ class AppConfig {
   /// 服务器地址
   static const String serverHost = '127.0.0.1';
 
-  /// 服务器端口
-  static const int serverPort = 8090;
+  /// 服务器端口（E2E 测试可覆盖，避免多 E2E 文件并发争用同一端口）
+  static int serverPort = 8090;
 
   /// SSL 证书路径（相对于项目根目录）
   static const String sslCertPath = '../SSL/tsetcn.crt';

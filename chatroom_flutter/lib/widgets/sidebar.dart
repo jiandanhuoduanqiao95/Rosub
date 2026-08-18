@@ -24,6 +24,12 @@ class Sidebar extends StatelessWidget {
   /// 阶段 J：好友分组（分组名 → 好友 key 列表；null = 扁平渲染，回归兼容）
   final Map<String, List<String>>? friendGroups;
 
+  /// 阶段 K1：会话置顶判定（null = 无置顶分区，回归兼容）
+  final bool Function(String key)? isPinned;
+
+  /// 阶段 K3：会话静音判定（null = 不显示静音标识，回归兼容）
+  final bool Function(String key)? isMuted;
+
   const Sidebar({
     super.key,
     required this.chatTargets,
@@ -37,15 +43,25 @@ class Sidebar extends StatelessWidget {
     this.onGroupLongPress,
     this.isOnline,
     this.friendGroups,
+    this.isPinned,
+    this.isMuted,
   });
 
   @override
   Widget build(BuildContext context) {
-    // 分组：好友 vs 群组
-    final systemTargets = chatTargets.where((t) => t.key == '服务器').toList();
+    // 阶段 K1：置顶分区（置顶会话固定在侧边栏最顶部）
+    final pinned = isPinned == null
+        ? <ChatTarget>[]
+        : chatTargets.where((t) => isPinned!(t.key)).toList();
+    final unpinned = pinned.isEmpty
+        ? chatTargets
+        : chatTargets.where((t) => !pinned.contains(t)).toList();
+
+    // 分组：好友 vs 群组（基于非置顶集合）
+    final systemTargets = unpinned.where((t) => t.key == '服务器').toList();
     final friends =
-        chatTargets.where((t) => !t.isGroup && t.key != '服务器').toList();
-    final groups = chatTargets.where((t) => t.isGroup).toList();
+        unpinned.where((t) => !t.isGroup && t.key != '服务器').toList();
+    final groups = unpinned.where((t) => t.isGroup).toList();
 
     return Container(
       width: 270,
@@ -100,12 +116,33 @@ class Sidebar extends StatelessWidget {
           Expanded(
             child: ListView(
               children: [
+                // 阶段 K1：置顶分区（最顶部）
+                if (pinned.isNotEmpty) ...[
+                  const _SectionHeader(title: '置顶'),
+                  ...pinned.map((p) => _ChatTile(
+                        target: p,
+                        isSelected: currentChat == p.key,
+                        unread: unreadOf(p.key),
+                        isOnline: isOnline,
+                        pinned: true,
+                        onTap: () => onSelectChat(p.key),
+                        onLongPress: p.isGroup
+                            ? (onGroupLongPress != null
+                                ? () => onGroupLongPress!(p)
+                                : null)
+                            : (onDeleteFriend != null
+                                ? () => onDeleteFriend!(p.key)
+                                : null),
+                        muted: isMuted != null && isMuted!(p.key),
+                      )),
+                ],
                 if (systemTargets.isNotEmpty) ...[
                   const _SectionHeader(title: '系统'),
                   ...systemTargets.map((s) => _ChatTile(
                         target: s,
                         isSelected: currentChat == s.key,
                         unread: unreadOf(s.key),
+                        muted: isMuted != null && isMuted!(s.key),
                         onTap: () => onSelectChat(s.key),
                       )),
                 ],
@@ -122,6 +159,7 @@ class Sidebar extends StatelessWidget {
                               isSelected: currentChat == f.key,
                               unread: unreadOf(f.key),
                               isOnline: isOnline,
+                              muted: isMuted != null && isMuted!(f.key),
                               onTap: () => onSelectChat(f.key),
                               onLongPress: onDeleteFriend != null
                                   ? () => onDeleteFriend!(f.key)
@@ -137,6 +175,7 @@ class Sidebar extends StatelessWidget {
                         isSelected: currentChat == f.key,
                         unread: unreadOf(f.key),
                         isOnline: isOnline,
+                        muted: isMuted != null && isMuted!(f.key),
                         onTap: () => onSelectChat(f.key),
                         onLongPress: onDeleteFriend != null
                             ? () => onDeleteFriend!(f.key)
@@ -150,13 +189,17 @@ class Sidebar extends StatelessWidget {
                         target: g,
                         isSelected: currentChat == g.key,
                         unread: unreadOf(g.key),
+                        muted: isMuted != null && isMuted!(g.key),
                         onTap: () => onSelectChat(g.key),
                         onLongPress: onGroupLongPress != null
                             ? () => onGroupLongPress!(g)
                             : null,
                       )),
                 ],
-                if (systemTargets.isEmpty && friends.isEmpty && groups.isEmpty)
+                if (pinned.isEmpty &&
+                    systemTargets.isEmpty &&
+                    friends.isEmpty &&
+                    groups.isEmpty)
                   Padding(
                     padding: const EdgeInsets.all(24),
                     child: Column(
@@ -201,6 +244,7 @@ class Sidebar extends StatelessWidget {
             isSelected: currentChat == f.key,
             unread: unreadOf(f.key),
             isOnline: isOnline,
+            muted: isMuted != null && isMuted!(f.key),
             onTap: () => onSelectChat(f.key),
             onLongPress:
                 onDeleteFriend != null ? () => onDeleteFriend!(f.key) : null,
@@ -239,6 +283,12 @@ class _ChatTile extends StatelessWidget {
   /// 阶段 J：在线状态判定（null = 不显示在线标记）
   final bool Function(String key)? isOnline;
 
+  /// 阶段 K1：是否为置顶会话（图钉图标）
+  final bool pinned;
+
+  /// 阶段 K3：是否静音（静音标识）
+  final bool muted;
+
   const _ChatTile({
     required this.target,
     required this.isSelected,
@@ -246,6 +296,8 @@ class _ChatTile extends StatelessWidget {
     required this.onTap,
     this.onLongPress,
     this.isOnline,
+    this.pinned = false,
+    this.muted = false,
   });
 
   @override
@@ -266,11 +318,13 @@ class _ChatTile extends StatelessWidget {
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
           selectedTileColor: Theme.of(context).colorScheme.primaryContainer,
           leading: Icon(
-            target.key == '服务器'
-                ? Icons.notifications_rounded
-                : target.isGroup
-                    ? Icons.group_rounded
-                    : Icons.person_rounded,
+            pinned
+                ? Icons.push_pin
+                : target.key == '服务器'
+                    ? Icons.notifications_rounded
+                    : target.isGroup
+                        ? Icons.group_rounded
+                        : Icons.person_rounded,
             color: isSelected
                 ? Theme.of(context).colorScheme.primary
                 : Colors.grey[600],
@@ -292,6 +346,16 @@ class _ChatTile extends StatelessWidget {
                     Icons.circle,
                     size: 10,
                     color: online ? Colors.green : Colors.grey,
+                  ),
+                ),
+              // 阶段 K3：静音会话显示静音标识（区分哪些用户被静音）
+              if (muted)
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: Icon(
+                    Icons.notifications_off_outlined,
+                    size: 14,
+                    color: Colors.grey[500],
                   ),
                 ),
               if (unread > 0)

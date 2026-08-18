@@ -27,6 +27,55 @@ class MessageHandler:
         self.group_handler = GroupHandler(server)
         self.admin_handler = AdminHandler(server)
 
+    def _validate_peer_key(self, username, peer_key, ssock):
+        """阶段 K（K1-K3）：校验会话 peer_key 归属，并归一化返回。
+
+        peer_key 为好友用户名或 'group_N'。合法返回 (peer_key, None)；
+        非法向 ssock 回发 error 并返回 (None, error_text)。
+        """
+        if not peer_key:
+            self.server.guarded_send(ssock, "error", "无效的会话标识")
+            return None, "无效的会话标识"
+        if peer_key.startswith("group_"):
+            gid_str = peer_key[6:]
+            if not gid_str.isdigit():
+                self.server.guarded_send(ssock, "error", f"无效的会话: {peer_key}")
+                return None, f"无效的会话: {peer_key}"
+            if not self.server.db.is_group_member(int(gid_str), username):
+                self.server.guarded_send(ssock, "error", f"您不在群组 {gid_str} 中")
+                return None, f"您不在群组 {gid_str} 中"
+            return peer_key, None
+        if not self.server.db.is_friend(username, peer_key):
+            self.server.guarded_send(ssock, "error", f"错误：{peer_key} 不是您的好友")
+            return None, f"错误：{peer_key} 不是您的好友"
+        return peer_key, None
+
+    def _broadcast_k_message(self, usernames, msg_type, content, extra_headers,
+                             exclude=None, log_context=""):
+        """阶段 K：向在线用户集合广播消息（跳过 exclude），异常隔离。"""
+        for member in usernames:
+            if member == exclude:
+                continue
+            with self.server.client_map_lock:
+                member_socket = self.server.client_map.get(member)
+            if not member_socket:
+                continue
+            try:
+                self.server.guarded_send(member_socket, msg_type, content,
+                             extra_headers=extra_headers)
+                logging.info(f"K5 广播 {msg_type}: -> {member}, {log_context}")
+            except Exception as e:
+                logging.error(f"K5 广播失败: {member}, 类型={msg_type}, 错误={e}")
+                with self.server.client_map_lock:
+                    self.server.client_map.pop(member, None)
+
+    def _reactions_for_headers(self, message_id):
+        """把 reactions 表聚合为 {emoji: [usernames]}（供历史/编辑等使用）。"""
+        by_emoji = {}
+        for r in self.server.db.get_reactions(message_id):
+            by_emoji.setdefault(r["emoji"], []).append(r["username"])
+        return by_emoji
+
     def send_initial_data(self, username, ssock):
         """发送初始好友和群组列表"""
         # 发送好友列表
@@ -53,6 +102,23 @@ class MessageHandler:
                      extra_headers={"response_type": "list_blocked"})
         logging.info(f"发送初始社交元数据给用户: {username}, 备注/分组={len(metas)}, 黑名单={len(blocked)}")
 
+        # 阶段 K（K1-K3）：会话元数据随登录初始数据推送（最后一条），
+        # 客户端同步消费后恢复置顶/静音/草稿/清空标记（无需登录后请求）。
+        conversations = self.server.db.get_conversations(username)
+        conversation_list = [
+            {
+                "peer_key": c["peer_key"],
+                "pinned": 1 if c["pinned"] else 0,
+                "muted": 1 if c["muted"] else 0,
+                "draft": c["draft"],
+                "cleared_at": c["cleared_at"],
+            }
+            for c in conversations
+        ]
+        self.server.guarded_send(ssock, "admin_response", json.dumps(conversation_list),
+                     extra_headers={"response_type": "list_conversations"})
+        logging.info(f"发送初始会话元数据给用户: {username}, 会话数={len(conversation_list)}")
+
     def load_offline_data(self, username, ssock):
         """加载用户的离线消息和文件请求"""
         messages = self.server.db.get_offline_messages(username)
@@ -69,6 +135,16 @@ class MessageHandler:
                                      "timestamp": str(msg_timestamp), "status": status}
                     if sender == username:
                         extra_headers["to"] = msg_receiver
+                    # 阶段 K（K5）：离线投递的引用元数据随 headers 推送；
+                    # 表情回应聚合随 headers 推送（跨登录持久化，P1-4）
+                    extras = self.server.db.get_offline_extras(message_id)
+                    if extras:
+                        for key in ("reply_to", "reply_preview"):
+                            if extras.get(key):
+                                extra_headers[key] = extras[key]
+                    reactions = self._reactions_for_headers(message_id)
+                    if reactions:
+                        extra_headers["reactions"] = json.dumps(reactions)
                     self.server.guarded_send(ssock, "chat", content.decode('utf-8'),
                                  extra_headers=extra_headers)
                 elif msg_type == "file":
@@ -103,21 +179,32 @@ class MessageHandler:
                                     message_text = content.decode('utf-8')
 
                         if group_id and self.server.db.is_group_member(group_id, username):
+                            # 离线行 message_id = "{orig}_{接收者}"，按接收者后缀剥离
+                            # 还原原始 id（成员名可含下划线，故不能用固定分段法；
+                            # 客户端 id 恒为 "{毫秒}_{随机数}"，UUID 亦无下划线，
+                            # endswith 剥离最末 "_接收者" 段即可无损还原）
+                            suffix = f"_{msg_receiver}"
+                            original_id = (message_id[:-len(suffix)]
+                                          if message_id.endswith(suffix)
+                                          else message_id)
+                            group_extra = {
+                                "from": sender,
+                                "group_id": str(group_id),
+                                "history": "true",
+                                "message_id": original_id,
+                                "timestamp": str(msg_timestamp),
+                                "status": status
+                            }
+                            # 阶段 K（K5）：群聊离线副本 JSON 中的引用元数据
+                            for key in ("reply_to", "reply_preview"):
+                                if message_data.get(key):
+                                    group_extra[key] = message_data[key]
+                            # 表情回应聚合随 headers 推送（跨登录持久化，P1-4）
+                            reactions = self._reactions_for_headers(original_id)
+                            if reactions:
+                                group_extra["reactions"] = json.dumps(reactions)
                             self.server.guarded_send(ssock, "group_chat", message_text,
-                                         extra_headers={
-                                             "from": sender,
-                                             "group_id": str(group_id),
-                                             "history": "true",
-                                             # 阶段 I 修复：离线行 message_id = "{orig}_{member}"，
-                                             # 原实现 split('_')[0] 只取时间戳前缀，把回显 id 截断，
-                                             # 客户端按原 id 去重失败 → 已送达的群聊消息在重连后
-                                             # 重复出现且误入补发队列。客户端 id 恒为
-                                             # "{毫秒}_{随机数}"（两段均数字），取前两段即可无损还原。
-                                             "message_id": "_".join(message_id.split('_')[:2])
-                                             if '_' in message_id else message_id,
-                                             "timestamp": str(msg_timestamp),
-                                             "status": status
-                                         })
+                                         extra_headers=group_extra)
                             logging.info(f"发送离线群聊消息: 发送者={sender}, 群组ID={group_id}, 消息ID={message_id}")
                         else:
                             logging.warning(
@@ -601,26 +688,28 @@ class MessageHandler:
                         before = self.server.db.get_message_history_timestamp(before_message_id)
                     if group_id:
                         gid = int(group_id)
-                        rows = self.server.db.get_message_history(
+                        rows = self.server.db.get_message_history_rows(
                             username, group_id=gid, before=before, limit=limit_int)
                     elif with_user:
-                        rows = self.server.db.get_message_history(
+                        rows = self.server.db.get_message_history_rows(
                             username, with_user=with_user, before=before, limit=limit_int)
                     else:
-                        rows = self.server.db.get_message_history(
+                        rows = self.server.db.get_message_history_rows(
                             username, before=before, limit=limit_int)
-                    # 回发 JSON 数组：每条含 sender/type/content/message_id/filename/timestamp/group_id/status
+                    # 阶段 K（K5）：history_response 携带 reply_to/reactions
                     batch = []
                     for r in rows:
-                        sender, receiver, mtype, content, mid, fname, ts, gid, mstatus = r
-                        try:
-                            text = content.decode('utf-8') if isinstance(content, bytes) else str(content)
-                        except Exception:
-                            text = ""
+                        reactions_by_emoji = {}
+                        for reaction in self.server.db.get_reactions(r["message_id"]):
+                            reactions_by_emoji.setdefault(reaction["emoji"], []).append(reaction["username"])
                         batch.append({
-                            "sender": sender, "type": mtype, "content": text,
-                            "message_id": mid, "filename": fname, "timestamp": ts,
-                            "group_id": gid, "status": mstatus or "sent",
+                            "sender": r["sender"], "type": r["message_type"],
+                            "content": r["content"],
+                            "message_id": r["message_id"], "filename": r["filename"],
+                            "timestamp": r["timestamp"],
+                            "group_id": r["group_id"], "status": r["status"],
+                            "reply_to": r["reply_to"],
+                            "reactions": reactions_by_emoji,
                         })
                     self.server.guarded_send(ssock, "history_response", json.dumps(batch),
                                  extra_headers={"to": with_user or "", "group_id": group_id or ""})
@@ -1320,6 +1409,274 @@ class MessageHandler:
                     else:
                         self.server.guarded_send(ssock, "error", f"删除好友 {target} 失败")
                         logging.error(f"删除好友失败: {username} <-> {target}")
+
+                elif msg_type == "pin":
+                    # 阶段 K1（P1-11 会话置顶）：conversations.pinned 同步
+                    peer_key = header.get("peer_key")
+                    valid_key, _ = self._validate_peer_key(username, peer_key, ssock)
+                    if not valid_key:
+                        continue
+                    if self.server.db.upsert_conversation(username, peer_key, pinned=True):
+                        self.server.guarded_send(ssock, "chat", f"已置顶会话 {peer_key}")
+                        logging.info(f"会话置顶: {username} -> {peer_key}")
+                    else:
+                        self.server.guarded_send(ssock, "error", "置顶失败")
+                        logging.error(f"会话置顶失败: {username} -> {peer_key}")
+
+                elif msg_type == "unpin":
+                    # 阶段 K1（P1-11）：取消置顶
+                    peer_key = header.get("peer_key")
+                    valid_key, _ = self._validate_peer_key(username, peer_key, ssock)
+                    if not valid_key:
+                        continue
+                    if self.server.db.upsert_conversation(username, peer_key, pinned=False):
+                        self.server.guarded_send(ssock, "chat", f"已取消置顶会话 {peer_key}")
+                        logging.info(f"取消置顶: {username} -> {peer_key}")
+                    else:
+                        self.server.guarded_send(ssock, "error", "取消置顶失败")
+                        logging.error(f"取消置顶失败: {username} -> {peer_key}")
+
+                elif msg_type == "mute":
+                    # 阶段 K3（P1-13 逐会话静音）：conversations.muted 同步
+                    peer_key = header.get("peer_key")
+                    muted = header.get("muted", "1") == "1"
+                    valid_key, _ = self._validate_peer_key(username, peer_key, ssock)
+                    if not valid_key:
+                        continue
+                    if self.server.db.upsert_conversation(username, peer_key, muted=muted):
+                        self.server.guarded_send(
+                            ssock, "chat",
+                            f"已静音会话 {peer_key}" if muted else f"已解除静音会话 {peer_key}")
+                        logging.info(f"会话静音={muted}: {username} -> {peer_key}")
+                    else:
+                        self.server.guarded_send(ssock, "error", "静音设置失败")
+                        logging.error(f"会话静音设置失败: {username} -> {peer_key}")
+
+                elif msg_type == "set_draft":
+                    # 阶段 K2（P1-12 逐会话草稿）：conversations.draft 同步
+                    # 草稿高频更新，成功静默无确认
+                    peer_key = header.get("peer_key")
+                    valid_key, _ = self._validate_peer_key(username, peer_key, ssock)
+                    if not valid_key:
+                        continue
+                    draft = data.decode("utf-8")
+                    if self.server.db.upsert_conversation(username, peer_key, draft=draft):
+                        logging.info(f"草稿已保存: {username} -> {peer_key}, 长度={len(draft)}")
+                    else:
+                        self.server.guarded_send(ssock, "error", "草稿保存失败")
+                        logging.error(f"草稿保存失败: {username} -> {peer_key}")
+
+                elif msg_type == "reply":
+                    # 阶段 K5（P1-2 引用回复）：带原文缩略，落库 reply_to
+                    reply_to = header.get("reply_to")
+                    text = data.decode("utf-8")
+                    if not text.strip():
+                        self.server.guarded_send(ssock, "error", "回复内容不能为空")
+                        logging.warning(f"引用回复失败: 用户={username}, 内容为空")
+                        continue
+                    quoted = self.server.db.get_history_message(reply_to) if reply_to else None
+                    if not quoted:
+                        self.server.guarded_send(ssock, "error", f"被引用的消息 {reply_to} 不存在")
+                        logging.warning(f"引用回复失败: 被引用消息 {reply_to} 不存在")
+                        continue
+                    group_id = header.get("group_id")
+                    if group_id:
+                        gid = int(group_id)
+                        if not self.server.db.is_group_member(gid, username):
+                            self.server.guarded_send(ssock, "error", f"您不在群组 {gid} 中")
+                            logging.warning(f"引用回复失败: {username} 不在群组 {gid}")
+                            continue
+                        if quoted.get("group_id") != gid:
+                            self.server.guarded_send(ssock, "error", "被引用的消息不属于该群组")
+                            logging.warning(f"引用回复失败: 消息 {reply_to} 不属于群组 {gid}")
+                            continue
+                        mid = header.get("message_id") or str(uuid.uuid4())
+                        preview = quoted["content"] if quoted["status"] != "recalled" else "[消息已撤回]"
+                        self.server.db.save_message_history(
+                            username, "", "group_chat", text.encode("utf-8"),
+                            group_id=gid, message_id=mid, reply_to=reply_to)
+                        members = self.server.db.get_group_members(gid)
+                        for member in members:
+                            if member == username:
+                                continue
+                            member_mid = f"{mid}_{member}"
+                            self.server.db.save_offline_message(
+                                username, member, "group_chat",
+                                json.dumps({"text": text, "group_id": gid,
+                                            "reply_to": reply_to,
+                                            "reply_preview": preview}).encode("utf-8"),
+                                message_id=member_mid)
+                        self._broadcast_k_message(
+                            members, "group_chat", text,
+                            {"from": username, "group_id": str(gid),
+                             "message_id": mid, "reply_to": reply_to,
+                             "reply_preview": preview},
+                            exclude=username, log_context=f"引用={reply_to}")
+                    else:
+                        target = header.get("to")
+                        if not self.server.db.is_friend(username, target):
+                            self.server.guarded_send(ssock, "error", f"错误：{target} 不是您的好友")
+                            logging.warning(f"引用回复失败: {username} -> {target}, 非好友")
+                            continue
+                        if username not in (quoted.get("sender"), quoted.get("receiver")):
+                            self.server.guarded_send(ssock, "error", "被引用的消息不属于该会话")
+                            logging.warning(f"引用回复失败: {username} 引用越权消息 {reply_to}")
+                            continue
+                        mid = header.get("message_id") or str(uuid.uuid4())
+                        preview = quoted["content"] if quoted["status"] != "recalled" else "[消息已撤回]"
+                        self.server.db.save_message_history(
+                            username, target, "chat", text.encode("utf-8"),
+                            message_id=mid, reply_to=reply_to)
+                        self.server.db.save_offline_message(
+                            username, target, "chat", text.encode("utf-8"),
+                            message_id=mid, reply_to=reply_to, reply_preview=preview)
+                        with self.server.client_map_lock:
+                            recipient_socket = self.server.client_map.get(target)
+                        if recipient_socket:
+                            try:
+                                self.server.guarded_send(recipient_socket, "chat", text,
+                                             extra_headers={"from": username, "message_id": mid,
+                                                            "reply_to": reply_to,
+                                                            "reply_preview": preview})
+                                logging.info(f"引用回复已转发: {username} -> {target}, 引用={reply_to}")
+                            except Exception as e:
+                                logging.error(f"引用回复转发失败: {target}, 错误={e}")
+                                with self.server.client_map_lock:
+                                    self.server.client_map.pop(target, None)
+                        logging.info(f"引用回复成功: {username} -> {target}, 消息ID={mid}")
+
+                elif msg_type == "forward":
+                    # 阶段 K5（P1-3 转发）：跨私聊/群聊转发 + 来源标注
+                    source_message_id = header.get("source_message_id")
+                    source = self.server.db.get_history_message(source_message_id) if source_message_id else None
+                    if not source:
+                        self.server.guarded_send(ssock, "error", f"源消息 {source_message_id} 不存在")
+                        logging.warning(f"转发失败: 源消息 {source_message_id} 不存在")
+                        continue
+                    if source["status"] == "recalled":
+                        self.server.guarded_send(ssock, "error", "消息已被撤回，无法转发")
+                        logging.warning(f"转发失败: 源消息 {source_message_id} 已撤回")
+                        continue
+                    if source["message_type"] == "file":
+                        self.server.guarded_send(ssock, "error", "文件消息暂不支持转发")
+                        logging.warning(f"转发失败: 源消息 {source_message_id} 为文件")
+                        continue
+                    # 源可见性：私聊源本人必须是双方之一；群源本人必须是成员
+                    if source.get("group_id") is not None:
+                        if not self.server.db.is_group_member(source["group_id"], username):
+                            self.server.guarded_send(ssock, "error", "您不可见该消息，无法转发")
+                            logging.warning(f"转发失败: {username} 不可见群消息 {source_message_id}")
+                            continue
+                    elif username not in (source.get("sender"), source.get("receiver")):
+                        self.server.guarded_send(ssock, "error", "您不可见该消息，无法转发")
+                        logging.warning(f"转发失败: {username} 不可见消息 {source_message_id}")
+                        continue
+                    group_id = header.get("group_id")
+                    if group_id:
+                        gid = int(group_id)
+                        if not self.server.db.is_group_member(gid, username):
+                            self.server.guarded_send(ssock, "error", f"您不在群组 {gid} 中")
+                            logging.warning(f"转发失败: {username} 不在群组 {gid}")
+                            continue
+                        mid = header.get("message_id") or str(uuid.uuid4())
+                        # 转发以转发人为第一手：消息归属转发者本人，无来源标注
+                        self.server.db.save_message_history(
+                            username, "", "group_chat",
+                            source["content"].encode("utf-8"),
+                            group_id=gid, message_id=mid)
+                        members = self.server.db.get_group_members(gid)
+                        for member in members:
+                            if member == username:
+                                continue
+                            member_mid = f"{mid}_{member}"
+                            self.server.db.save_offline_message(
+                                username, member, "group_chat",
+                                json.dumps({"text": source["content"], "group_id": gid}).encode("utf-8"),
+                                message_id=member_mid)
+                        self._broadcast_k_message(
+                            members, "group_chat", source["content"],
+                            {"from": username, "group_id": str(gid),
+                             "message_id": mid},
+                            exclude=username, log_context=f"源={source_message_id}")
+                    else:
+                        target = header.get("to")
+                        if not self.server.db.is_friend(username, target):
+                            self.server.guarded_send(ssock, "error", f"错误：{target} 不是您的好友")
+                            logging.warning(f"转发失败: {username} -> {target}, 非好友")
+                            continue
+                        mid = header.get("message_id") or str(uuid.uuid4())
+                        # 转发以转发人为第一手：消息归属转发者本人，无来源标注
+                        self.server.db.save_message_history(
+                            username, target, "chat",
+                            source["content"].encode("utf-8"),
+                            message_id=mid)
+                        self.server.db.save_offline_message(
+                            username, target, "chat",
+                            source["content"].encode("utf-8"),
+                            message_id=mid)
+                        with self.server.client_map_lock:
+                            recipient_socket = self.server.client_map.get(target)
+                        if recipient_socket:
+                            try:
+                                self.server.guarded_send(recipient_socket, "chat", source["content"],
+                                             extra_headers={"from": username, "message_id": mid})
+                                logging.info(f"转发已送达: {username} -> {target}, 源={source_message_id}")
+                            except Exception as e:
+                                logging.error(f"转发送达失败: {target}, 错误={e}")
+                                with self.server.client_map_lock:
+                                    self.server.client_map.pop(target, None)
+                        logging.info(f"转发成功: {username} -> {target}, 消息ID={mid}")
+
+                elif msg_type == "reaction":
+                    # 阶段 K5（P1-4 表情回应）：广播给会话各方，落库 reactions
+                    message_id = header.get("message_id")
+                    emoji = header.get("emoji")
+                    action = header.get("action", "add")
+                    if not emoji:
+                        self.server.guarded_send(ssock, "error", "表情不能为空")
+                        logging.warning(f"表情回应失败: {username}, emoji 为空")
+                        continue
+                    msg = self.server.db.get_history_message(message_id) if message_id else None
+                    if not msg:
+                        self.server.guarded_send(ssock, "error", f"消息 {message_id} 不存在")
+                        logging.warning(f"表情回应失败: 消息 {message_id} 不存在")
+                        continue
+                    if msg["group_id"] is not None:
+                        gid = msg["group_id"]
+                        if not self.server.db.is_group_member(gid, username):
+                            self.server.guarded_send(ssock, "error", f"您不在群组 {gid} 中")
+                            logging.warning(f"表情回应失败: {username} 不在群组 {gid}")
+                            continue
+                        members = self.server.db.get_group_members(gid)
+                        audiences = members
+                        group_id_header = str(gid)
+                    else:
+                        if username not in (msg.get("sender"), msg.get("receiver")):
+                            self.server.guarded_send(ssock, "error", "您不可见该消息，无法回应")
+                            logging.warning(f"表情回应失败: {username} 不可见消息 {message_id}")
+                            continue
+                        audiences = [msg.get("sender"), msg.get("receiver")]
+                        group_id_header = None
+                    # toggle：同 emoji 再次 add → 切换为 remove；换 emoji → 替换
+                    existing = self.server.db.get_reactions(message_id)
+                    mine = next((r for r in existing if r["username"] == username), None)
+                    effective_action = action
+                    if action == "add":
+                        if mine is not None and mine["emoji"] == emoji:
+                            self.server.db.remove_reaction(message_id, username)
+                            effective_action = "remove"
+                        else:
+                            self.server.db.set_reaction(message_id, username, emoji)
+                    else:
+                        self.server.db.remove_reaction(message_id, username)
+                    extra = {"from": username, "message_id": message_id,
+                             "emoji": emoji, "action": effective_action}
+                    if group_id_header:
+                        extra["group_id"] = group_id_header
+                    self._broadcast_k_message(
+                        audiences, "reaction", "", extra,
+                        log_context=f"消息ID={message_id}, emoji={emoji}, action={effective_action}")
+                    logging.info(f"表情回应: {username} 对 {message_id} {effective_action} {emoji}")
 
                 elif msg_type == "admin_command":
                     self.admin_handler.handle_admin_command(username, ssock, header, data)

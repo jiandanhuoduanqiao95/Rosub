@@ -95,7 +95,9 @@ class Database:
                     filename TEXT,
                     file_path TEXT,
                     status TEXT DEFAULT 'sent',
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    reply_to TEXT,
+                    reply_preview TEXT
                 )
             ''')
             cursor.execute('''
@@ -186,7 +188,8 @@ class Database:
                     file_path TEXT,
                     group_id INTEGER,
                     status TEXT DEFAULT 'sent',
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    reply_to TEXT
                 )
             ''')
             cursor.execute('''
@@ -210,6 +213,15 @@ class Database:
                     FOREIGN KEY (blocked) REFERENCES users(username)
                 )
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS reactions (
+                    message_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    emoji TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (message_id, username)
+                )
+            ''')
 
             # 迁移：为旧版 message_history 表添加 status 列
             try:
@@ -217,6 +229,21 @@ class Database:
             except sqlite3.OperationalError:
                 cursor.execute("ALTER TABLE message_history ADD COLUMN status TEXT DEFAULT 'sent'")
                 logging.info("message_history 表已迁移：新增 status 列")
+
+            # 迁移：message_history 表新增阶段 K 列（K5 引用回复）
+            try:
+                cursor.execute("SELECT reply_to FROM message_history LIMIT 1")
+            except sqlite3.OperationalError:
+                cursor.execute("ALTER TABLE message_history ADD COLUMN reply_to TEXT")
+                logging.info("message_history 表已迁移：新增 reply_to 列")
+
+            # 迁移：offline_messages 表新增阶段 K 列（K5 引用的离线投递元数据）
+            for col in ("reply_to", "reply_preview"):
+                try:
+                    cursor.execute(f"SELECT {col} FROM offline_messages LIMIT 1")
+                except sqlite3.OperationalError:
+                    cursor.execute(f"ALTER TABLE offline_messages ADD COLUMN {col} TEXT")
+                    logging.info(f"offline_messages 表已迁移：新增 {col} 列")
 
             # 迁移：为各表添加 file_path 列（阶段 G 大文件磁盘存储）
             for table in ("file_requests", "group_file_requests",
@@ -388,14 +415,19 @@ class Database:
             logging.error(f"管理员重置密码失败: {username}, {e}")
             return False
 
-    def save_offline_message(self, sender, receiver, message_type, content, filename=None, message_id=None, file_path=None):
+    def save_offline_message(self, sender, receiver, message_type, content,
+                             filename=None, message_id=None, file_path=None,
+                             reply_to=None, reply_preview=None):
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO offline_messages (message_id, sender, receiver, message_type, content, filename, file_path, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'sent')
-                ''', (message_id, sender, receiver, message_type, content, filename, file_path))
+                    INSERT INTO offline_messages
+                        (message_id, sender, receiver, message_type, content,
+                         filename, file_path, status, reply_to, reply_preview)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'sent', ?, ?)
+                ''', (message_id, sender, receiver, message_type, content,
+                      filename, file_path, reply_to, reply_preview))
                 conn.commit()
                 logging.info(f"已保存离线消息：{sender} -> {receiver}, 类型={message_type}, 消息ID={message_id}")
         except Exception as e:
@@ -1057,17 +1089,196 @@ class Database:
             conn.commit()
             return cursor.rowcount > 0
 
+    # ============================================================
+    # 阶段 K（K5 消息编辑/引用/转发/表情回应）数据层扩展
+    # ============================================================
+
+    def get_offline_extras(self, message_id):
+        """查询离线消息的 K5 引用元数据，供登录推送组装 headers。
+
+        返回 {reply_to, reply_preview}；不存在返回 None。
+        不改动 get_offline_messages 的既有元组形态。
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT reply_to, reply_preview "
+                "FROM offline_messages WHERE message_id = ?",
+                (message_id,))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "reply_to": row[0],
+            "reply_preview": row[1],
+        }
+
+    @staticmethod
+    def _history_row_dict(row):
+        """把 message_history 行（含 K 扩展列）转为 dict。"""
+        content = row[4]
+        try:
+            text = content.decode("utf-8") if isinstance(content, bytes) else str(content)
+        except Exception:
+            text = ""
+        return {
+            "sender": row[1],
+            "receiver": row[2],
+            "message_type": row[3],
+            "content": text,
+            "message_id": row[0],
+            "filename": row[5],
+            "timestamp": row[6],
+            "group_id": row[7],
+            "status": row[8] or "sent",
+            "reply_to": row[9],
+        }
+
+    _HISTORY_ROW_COLUMNS = (
+        "message_id, sender, receiver, message_type, content, filename, "
+        "timestamp, group_id, status, reply_to"
+    )
+
+    def get_history_message(self, message_id):
+        """按 message_id 查询单条历史消息；不存在返回 None。
+
+        返回 dict：{sender, receiver, message_type, content(str), filename,
+        group_id, status, reply_to}。
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT {self._HISTORY_ROW_COLUMNS} FROM message_history "
+                "WHERE message_id = ?",
+                (message_id,))
+            row = cursor.fetchone()
+        return self._history_row_dict(row) if row else None
+
+    def get_message_history_rows(self, user, with_user=None, group_id=None,
+                                 limit=50, before=None):
+        """分页拉取历史消息（dict 行，含 K 扩展字段），时间倒序（最新在前）。
+
+        范围/排序与既有 get_message_history 完全一致；供服务端
+        history_response 组装（携带 reply_to）。
+        """
+        columns = self._HISTORY_ROW_COLUMNS
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if group_id is not None:
+                if before is not None:
+                    ts, rid = before
+                    cursor.execute(f'''
+                        SELECT {columns} FROM message_history
+                        WHERE group_id = ?
+                          AND (timestamp < ? OR (timestamp = ? AND id < ?))
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ?
+                    ''', (group_id, ts, ts, rid, limit))
+                else:
+                    cursor.execute(f'''
+                        SELECT {columns} FROM message_history
+                        WHERE group_id = ?
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ? OFFSET 0
+                    ''', (group_id, limit))
+            elif with_user is not None:
+                if before is not None:
+                    ts, rid = before
+                    cursor.execute(f'''
+                        SELECT {columns} FROM message_history
+                        WHERE ((sender = ? AND receiver = ?)
+                           OR (sender = ? AND receiver = ?))
+                          AND (timestamp < ? OR (timestamp = ? AND id < ?))
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ?
+                    ''', (user, with_user, with_user, user, ts, ts, rid, limit))
+                else:
+                    cursor.execute(f'''
+                        SELECT {columns} FROM message_history
+                        WHERE (sender = ? AND receiver = ?)
+                           OR (sender = ? AND receiver = ?)
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ? OFFSET 0
+                    ''', (user, with_user, with_user, user, limit))
+            else:
+                if before is not None:
+                    ts, rid = before
+                    cursor.execute(f'''
+                        SELECT {columns} FROM message_history
+                        WHERE (sender = ? OR receiver = ?)
+                          AND (timestamp < ? OR (timestamp = ? AND id < ?))
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ?
+                    ''', (user, user, ts, ts, rid, limit))
+                else:
+                    cursor.execute(f'''
+                        SELECT {columns} FROM message_history
+                        WHERE sender = ? OR receiver = ?
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ? OFFSET 0
+                    ''', (user, user, limit))
+            rows = cursor.fetchall()
+        return [self._history_row_dict(r) for r in rows]
+
+    def set_reaction(self, message_id, username, emoji):
+        """设置用户对消息的表情回应（upsert：同用户换 emoji 替换）。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO reactions (message_id, username, emoji)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(message_id, username)
+                    DO UPDATE SET emoji = excluded.emoji
+                ''', (message_id, username, emoji))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"设置表情回应失败: {message_id}/{username}, {e}")
+            return False
+
+    def remove_reaction(self, message_id, username):
+        """移除用户对消息的表情回应；不存在返回 False（幂等）。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "DELETE FROM reactions WHERE message_id = ? AND username = ?",
+                    (message_id, username))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"移除表情回应失败: {message_id}/{username}, {e}")
+            return False
+
+    def get_reactions(self, message_id):
+        """查询消息的全部表情回应：[{username, emoji}]，按 created_at 升序。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT username, emoji FROM reactions "
+                "WHERE message_id = ? ORDER BY created_at ASC, rowid ASC",
+                (message_id,))
+            rows = cursor.fetchall()
+        return [{"username": r[0], "emoji": r[1]} for r in rows]
+
     def save_message_history(self, sender, receiver, message_type, content,
-                             filename=None, group_id=None, message_id=None, file_path=None):
-        """保存一条消息到 message_history 表（永久存储）"""
+                             filename=None, group_id=None, message_id=None,
+                             file_path=None, reply_to=None):
+        """保存一条消息到 message_history 表（永久存储）
+
+        阶段 K 扩展：reply_to（K5 引用回复，原消息 id）。
+        """
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT OR IGNORE INTO message_history
-                        (message_id, sender, receiver, message_type, content, filename, group_id, file_path)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (message_id, sender, receiver, message_type, content, filename, group_id, file_path))
+                        (message_id, sender, receiver, message_type, content,
+                         filename, group_id, file_path, reply_to)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (message_id, sender, receiver, message_type, content,
+                      filename, group_id, file_path, reply_to))
                 conn.commit()
                 if cursor.rowcount > 0:
                     logging.info(f"消息已保存到历史: 类型={message_type}, 消息ID={message_id}")

@@ -31,13 +31,17 @@ void main() {
   late List<bool> calls;
   late void Function(bool) originalImpl;
   late bool originalEnabled;
+  late void Function() originalPlaySoundImpl;
 
   setUp(() {
     resetState();
     calls = [];
     originalImpl = TaskbarNotifier.setUrgencyImpl;
     originalEnabled = TaskbarNotifier.enabled;
+    originalPlaySoundImpl = TaskbarNotifier.playSoundImpl;
     TaskbarNotifier.setUrgencyImpl = (urgent) => calls.add(urgent);
+    // 阶段 K3：测试环境注入空提示音，避免默认实现 spawn paplay/aplay
+    TaskbarNotifier.playSoundImpl = () {};
     TaskbarNotifier.enabled = true;
     state.setLoggedIn('alice', false);
   });
@@ -45,6 +49,7 @@ void main() {
   tearDown(() {
     TaskbarNotifier.setUrgencyImpl = originalImpl;
     TaskbarNotifier.enabled = originalEnabled;
+    TaskbarNotifier.playSoundImpl = originalPlaySoundImpl;
     resetState();
   });
 

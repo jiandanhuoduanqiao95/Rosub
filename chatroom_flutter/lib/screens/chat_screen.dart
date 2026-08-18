@@ -3,6 +3,8 @@
 /// 布局：左侧边栏（好友/群组列表）+ 右侧聊天区域
 /// 管理员可见额外"管理面板"按钮
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../models/chat_models.dart';
@@ -10,6 +12,7 @@ import '../services/ime_bridge.dart';
 import '../services/session_store.dart';
 import '../services/socket_service.dart';
 import '../services/state_manager.dart';
+import '../services/taskbar_notifier.dart';
 import '../widgets/chat_view.dart';
 import '../widgets/dialogs.dart';
 import '../widgets/raw_text_field.dart';
@@ -28,19 +31,59 @@ class _ChatScreenState extends State<ChatScreen> {
   final _state = AppState.instance;
   final _inputCtrl = TextEditingController();
 
+  /// 阶段 K2：草稿自动保存防抖（输入停顿后同步服务端）
+  Timer? _draftDebounce;
+
+  /// 阶段 K3（P-16 修订）：免打扰到期巡检（每 30s 检查一次，
+  /// 到期自动关闭免打扰开关并 SnackBar 提醒——声音通道随即恢复）
+  Timer? _dndExpiryTimer;
+
   @override
   void initState() {
     super.initState();
     _state.addListener(_onStateChanged);
+    _dndExpiryTimer = Timer.periodic(
+        const Duration(seconds: 30), (_) => _checkDndExpiry());
   }
 
   @override
   void dispose() {
+    _draftDebounce?.cancel();
+    _dndExpiryTimer?.cancel();
     _state.removeListener(_onStateChanged);
     _inputCtrl.dispose();
     // ChatScreen 退出时释放 IME 桥接焦点，但保留进程（后续登录界面可能需要）
     ImeBridgeManager.instance.releaseFocus();
     super.dispose();
+  }
+
+  /// 免打扰到期检查：到期 → 自动关闭开关 + 提醒用户
+  void _checkDndExpiry() {
+    if (TaskbarNotifier.checkDndExpiry()) {
+      _state.showNotice('免打扰时段已结束，已自动关闭免打扰');
+    }
+  }
+
+  /// 阶段 K2：输入变化 → 立即写本地草稿状态 + 防抖同步服务端
+  /// （修复：仅在切换会话/发送时才同步 → 输入后直接退出草稿丢失）
+  void _onInputChanged(String text) {
+    final key = _state.currentChat;
+    if (key == null) return;
+    _state.setConversationDraft(key, text);
+    _draftDebounce?.cancel();
+    _draftDebounce = Timer(const Duration(milliseconds: 800), () {
+      if (!_state.isLoggedIn) return;
+      widget.socketService.saveConversationDraft(key, text);
+    });
+  }
+
+  /// 立即同步当前输入为草稿（切换会话/发送/退出前调用），并取消防抖
+  void _flushDraft() {
+    final key = _state.currentChat;
+    if (key == null) return;
+    _draftDebounce?.cancel();
+    _draftDebounce = null;
+    widget.socketService.saveConversationDraft(key, _inputCtrl.text);
   }
 
   void _onStateChanged() {
@@ -80,7 +123,11 @@ class _ChatScreenState extends State<ChatScreen> {
       widget.socketService.sendChat(current, text);
     }
 
+    _draftDebounce?.cancel();
     _inputCtrl.clear();
+    // 阶段 K2：发送后清除草稿（本地状态经 onInputChanged 同步，服务端显式同步）
+    _state.setConversationDraft(current, '');
+    widget.socketService.saveConversationDraft(current, '');
   }
 
   void _sendFile() async {
@@ -181,6 +228,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _showFriendMenuDialog(String username) {
     // 阶段 J（P1-8/9）：长按好友 → 好友管理（资料/备注/分组/拉黑/删除）
+    // 阶段 K（P1-11/13）：置顶/静音入口 + 乐观状态更新
     showFriendManageDialog(
       context,
       username,
@@ -191,6 +239,20 @@ class _ChatScreenState extends State<ChatScreen> {
       onUnblock: () => widget.socketService.unblockUser(username),
       // 删除确认文本已展示在管理对话框中，直接删除
       onDelete: () => widget.socketService.deleteFriend(username),
+      pinned: _state.isPinned(username),
+      muted: _state.isMuted(username),
+      onTogglePin: (v) {
+        _state.setConversationPinned(username, v);
+        if (v) {
+          widget.socketService.pinConversation(username);
+        } else {
+          widget.socketService.unpinConversation(username);
+        }
+      },
+      onToggleMute: (v) {
+        _state.setConversationMuted(username, v);
+        widget.socketService.muteConversation(username, v);
+      },
     );
   }
 
@@ -273,15 +335,36 @@ class _ChatScreenState extends State<ChatScreen> {
     if (group == null) return;
     // 打开菜单即预取成员列表，使菜单中的人数实时更新
     widget.socketService.fetchGroupMembers(groupId);
-    showGroupMenuDialog(context, group, (g) {
-      showGroupInfoDialog(context, g);
-    }, (gid) {
-      widget.socketService.leaveGroup(gid);
-      _state.leaveGroup(gid);
-    });
+    showGroupMenuDialog(
+        context,
+        group,
+        (g) {
+          showGroupInfoDialog(context, g);
+        },
+        (gid) {
+          widget.socketService.leaveGroup(gid);
+          _state.leaveGroup(gid);
+        },
+        // 阶段 K（P1-11/13）：群组置顶/静音入口 + 乐观状态更新
+        pinned: _state.isPinned(target.key),
+        muted: _state.isMuted(target.key),
+        onTogglePin: (v) {
+          _state.setConversationPinned(target.key, v);
+          if (v) {
+            widget.socketService.pinConversation(target.key);
+          } else {
+            widget.socketService.unpinConversation(target.key);
+          }
+        },
+        onToggleMute: (v) {
+          _state.setConversationMuted(target.key, v);
+          widget.socketService.muteConversation(target.key, v);
+        });
   }
 
   void _logout() {
+    // 阶段 K2：退出前立即同步当前输入为草稿（防抖未触发时草稿不丢失）
+    _flushDraft();
     widget.socketService.disconnect();
     // 退出登录：清除 session（H3/H4 修复），否则登录页 _initSession
     // 会读取残留 session 立即自动登录，把用户拉回聊天页导致无法退出
@@ -313,6 +396,82 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     if (confirmed == true) {
       widget.socketService.recallMessage(messageId, current);
+    }
+  }
+
+  /// 阶段 K5（P1-2）：引用回复对话框
+  Future<void> _showReplyMessageDialog(String messageId) async {
+    final current = _state.currentChat;
+    if (current == null || current == '服务器') return;
+    final ctrl = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('引用回复'),
+        content: RawTextField(
+          controller: ctrl,
+          hintText: '输入回复内容',
+          showChineseInput: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('发送'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && ctrl.text.trim().isNotEmpty) {
+      widget.socketService.replyMessage(messageId, ctrl.text, current);
+    }
+  }
+
+  /// 阶段 K5（P1-3）：转发目标选择对话框（好友 + 群组）
+  Future<void> _showForwardTargetDialog(String messageId) async {
+    final targets = [
+      for (final f in _state.friends)
+        ChatTarget(key: f, displayName: _state.displayNameForChat(f)),
+      for (final g in _state.groups)
+        ChatTarget(key: g.chatKey, displayName: g.displayName, isGroup: true),
+    ];
+    if (targets.isEmpty) {
+      _state.showNotice('暂无可转发的好友或群组');
+      return;
+    }
+    final target = await showDialog<ChatTarget>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('转发到'),
+        content: SizedBox(
+          width: 280,
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              for (final t in targets)
+                ListTile(
+                  dense: true,
+                  leading: Icon(
+                      t.isGroup ? Icons.group_rounded : Icons.person_rounded),
+                  title: Text(t.displayName),
+                  onTap: () => Navigator.pop(ctx, t),
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+    if (target != null) {
+      widget.socketService.forwardMessage(messageId, target.key);
     }
   }
 
@@ -360,6 +519,13 @@ class _ChatScreenState extends State<ChatScreen> {
                   tooltip: '管理面板',
                   onPressed: _showAdminPanel,
                 ),
+
+              // 设置（阶段 K3：提示音/免打扰）
+              IconButton(
+                icon: const Icon(Icons.settings_rounded),
+                tooltip: '设置',
+                onPressed: () => showSettingsDialog(context),
+              ),
 
               // 个人资料（阶段 J：P0-2）
               IconButton(
@@ -426,7 +592,16 @@ class _ChatScreenState extends State<ChatScreen> {
                       chatTargets: _state.chatTargets,
                       currentChat: _state.currentChat,
                       onSelectChat: (key) {
+                        // 阶段 K2：切换会话前同步保存旧会话草稿（本地 + 服务端），
+                        // 再恢复新会话草稿到输入栏（先 selectChat，避免草稿回写
+                        // 到旧会话）
+                        final previous = _state.currentChat;
+                        if (previous != null && previous != key) {
+                          _state.setConversationDraft(previous, _inputCtrl.text);
+                          _flushDraft();
+                        }
                         _state.selectChat(key);
+                        _inputCtrl.text = _state.draftOf(key);
                         _maybeLoadInitialHistory(key);
                       },
                       onAddFriend: _showAddFriendDialog,
@@ -437,6 +612,8 @@ class _ChatScreenState extends State<ChatScreen> {
                       onGroupLongPress: _showGroupMenuDialog,
                       isOnline: _state.isOnline,
                       friendGroups: _state.friendsByGroup,
+                      isPinned: _state.isPinned,
+                      isMuted: _state.isMuted,
                     ),
 
                     // 分隔线
@@ -470,6 +647,24 @@ class _ChatScreenState extends State<ChatScreen> {
                               onSearchExit: _exitSearch,
                               onRetrySend: (messageId) => widget.socketService
                                   .retryPendingMessage(messageId),
+                              // 阶段 K2：输入变化 → 本地草稿状态 + 防抖自动保存
+                              onInputChanged: _onInputChanged,
+                              // 阶段 K5：消息操作（引用/转发/表情/仅我删除）
+                              onReplyMessage: _showReplyMessageDialog,
+                              onForwardMessage: _showForwardTargetDialog,
+                              onAddReaction: (messageId, emoji) {
+                                final key = _state.currentChat;
+                                if (key != null) {
+                                  widget.socketService
+                                      .addReaction(messageId, emoji, key);
+                                }
+                              },
+                              onDeleteMessage: (messageId) {
+                                final key = _state.currentChat;
+                                if (key != null) {
+                                  _state.removeMessageLocally(key, messageId);
+                                }
+                              },
                             )
                           : const Center(
                               child: Column(
