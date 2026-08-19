@@ -412,11 +412,12 @@ class TestLargeFileDiskStorage:
         # DB 行存在且 file_path 指向磁盘文件，content 为空占位
         row = harness.db.get_file_request("g4-disk-1")
         assert row is not None
-        sender, receiver, filename, filesize, content, file_path = row
+        sender, receiver, filename, filesize, content, file_path, status = row
         assert filename == "big.bin"
         assert file_path and os.path.exists(file_path), "文件应落盘"
         assert os.path.getsize(file_path) == len(payload)
         assert content == b""
+        assert status == "pending"
         assert file_path.startswith(os.path.join("files", "file_store")) or "file_store" in file_path
 
         # 接受后：接收方收到完整内容，文件转入历史区（offline/history 引用同一路径）

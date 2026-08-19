@@ -671,7 +671,10 @@ class _MessageBubble extends StatelessWidget {
                   children: [
                     if (isRecalled)
                       Text(
-                        '${message.sender}: [消息已撤回]',
+                        // 文件撤回：保留消息体并附加"已撤回"标志（不替换为"[消息已撤回]"）
+                        message.type == 'file'
+                            ? '${message.content} [已撤回]'
+                            : '${message.sender}: [消息已撤回]',
                         style: TextStyle(
                           color: Colors.grey[500],
                           fontStyle: FontStyle.italic,

@@ -1150,12 +1150,14 @@ class SocketService {
         if (isSystemSender) {
           if (sender == '[系统公告]') {
             // 管理员公告 → 进入系统消息会话
+            // status='sent'：实时到达的公告按未读计徽标（P-60 缺陷修复——
+            // 原实现 delivered 不计数，导致"公告到达只闪图标、无未读徽标"）
             final msg = ChatMessage(
               sender: sender,
               content: text,
               type: 'system',
               messageId: messageId,
-              status: 'delivered',
+              status: 'sent',
             );
             state.addMessage('服务器', msg);
             // 桌面通知（阶段 H2）：未聚焦窗口时通知系统公告

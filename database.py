@@ -124,6 +124,7 @@ class Database:
                     filesize INTEGER NOT NULL,
                     content BLOB NOT NULL,
                     file_path TEXT,
+                    status TEXT DEFAULT 'pending',
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (sender) REFERENCES users(username),
                     FOREIGN KEY (receiver) REFERENCES users(username)
@@ -158,6 +159,7 @@ class Database:
                     filesize INTEGER NOT NULL,
                     content BLOB NOT NULL,
                     file_path TEXT,
+                    status TEXT DEFAULT 'pending',
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (group_id) REFERENCES groups(id),
                     FOREIGN KEY (sender) REFERENCES users(username)
@@ -253,6 +255,25 @@ class Database:
                 except sqlite3.OperationalError:
                     cursor.execute(f"ALTER TABLE {table} ADD COLUMN file_path TEXT")
                     logging.info(f"{table} 表已迁移：新增 file_path 列")
+
+            # 迁移：group_file_requests 表新增 status 列（P-59 缺陷修复：
+            # 群组文件撤回后保留请求行并标记 recalled，成员再接受时提示"对方已撤回"）
+            try:
+                cursor.execute("SELECT status FROM group_file_requests LIMIT 1")
+            except sqlite3.OperationalError:
+                cursor.execute(
+                    "ALTER TABLE group_file_requests ADD COLUMN status TEXT DEFAULT 'pending'")
+                logging.info("group_file_requests 表已迁移：新增 status 列")
+
+            # 迁移：file_requests 表新增 status 列（P-61 缺陷修复：
+            # 个人文件撤回同群组——保留请求行标记 recalled，接收方再接受时
+            # 提示"对方已撤回"，而非"文件请求不存在"）
+            try:
+                cursor.execute("SELECT status FROM file_requests LIMIT 1")
+            except sqlite3.OperationalError:
+                cursor.execute(
+                    "ALTER TABLE file_requests ADD COLUMN status TEXT DEFAULT 'pending'")
+                logging.info("file_requests 表已迁移：新增 status 列")
 
             # 迁移：users 表新增资料列（阶段 J：P0-2 用户资料）
             for col in ("nickname", "avatar", "signature"):
@@ -437,10 +458,14 @@ class Database:
         """获取用户的聊天消息（未读 + 最近已读历史）。
 
         返回 status='sent'（未读）的消息；status='delivered'（已读历史）的
-        chat 消息也返回（作为最近消息保留，更早的通过 fetch_history 拉取）。
-        已读的 file 消息不重复下发：否则每次登录/重连都会重发并覆写
-        received_files 中的文件。
-        返回元组包含 timestamp 字段（最后一列）。
+        chat / file / group_chat 消息也返回（作为最近消息保留，更早的通过
+        fetch_history 拉取）。
+
+        阶段 K 缺陷修复（P-47）：实时送达成功的私聊/文件消息由服务端标记
+        delivered（见 server_message_handler），此处仍返回 delivered 行——
+        保留阶段 G 大文件"离线补发/重新登录可再取"的既有行为；因状态为
+        delivered 而非 sent，客户端不会计为未读（未读徽标仅由 sent 驱动），
+        从而"已查看消息重登后复发未读"的缺陷被消除。
         """
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -448,7 +473,7 @@ class Database:
                 SELECT sender, message_type, content, filename, message_id, status, receiver, timestamp, file_path
                 FROM offline_messages
                 WHERE (receiver = ? OR (sender = ? AND receiver != ?))
-                  AND (status = 'sent' OR (status = 'delivered' AND message_type != 'file'))
+                  AND (status = 'sent' OR status = 'delivered')
                 ORDER BY timestamp ASC
                 LIMIT 500
             ''', (receiver, receiver, receiver))
@@ -526,7 +551,7 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT sender, receiver, filename, filesize, content, file_path
+                SELECT sender, receiver, filename, filesize, content, file_path, status
                 FROM file_requests
                 WHERE message_id = ?
             ''', (message_id,))
@@ -538,9 +563,36 @@ class Database:
             cursor.execute('''
                 SELECT sender, filename, filesize, message_id
                 FROM file_requests
-                WHERE receiver = ?
+                WHERE receiver = ? AND status != 'recalled'
             ''', (receiver,))
             return cursor.fetchall()
+
+    def mark_file_request_recalled(self, message_id):
+        """阶段 K 缺陷修复（P-61）：撤回个人文件请求——保留请求行并标记
+        recalled（供接收方接受时提示"对方已撤回"），同时删除磁盘文件。
+        返回 True 表示请求行存在且标记成功；不存在返回 False。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT file_path FROM file_requests WHERE message_id = ?",
+                    (message_id,))
+                row = cursor.fetchone()
+                cursor.execute('''
+                    UPDATE file_requests SET status = 'recalled'
+                    WHERE message_id = ?
+                ''', (message_id,))
+                conn.commit()
+                if cursor.rowcount > 0:
+                    self._delete_disk_file(row[0] if row else None)
+                    logging.info(f"文件请求已标记撤回：消息ID={message_id}")
+                    return True
+                else:
+                    logging.error(f"文件请求标记撤回失败：消息ID={message_id} 不存在")
+                    return False
+        except sqlite3.Error as e:
+            logging.error(f"文件请求标记撤回失败: {e}")
+            return False
 
     def delete_file_request(self, message_id):
         try:
@@ -585,7 +637,7 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT group_id, sender, filename, filesize, content, file_path
+                SELECT group_id, sender, filename, filesize, content, file_path, status
                 FROM group_file_requests
                 WHERE message_id = ?
             ''', (message_id,))
@@ -597,11 +649,38 @@ class Database:
             cursor.execute('''
                 SELECT sender, filename, filesize, message_id
                 FROM group_file_requests
-                WHERE group_id = ? AND message_id NOT IN (
+                WHERE group_id = ? AND status != 'recalled' AND message_id NOT IN (
                     SELECT message_id FROM group_file_responses WHERE username = ?
                 )
             ''', (group_id, username))
             return cursor.fetchall()
+
+    def mark_group_file_request_recalled(self, message_id):
+        """阶段 K 缺陷修复（P-59）：撤回群组文件请求——保留请求行并标记
+        recalled（供成员接受时提示"对方已撤回"），同时删除磁盘文件。
+        返回 True 表示请求行存在且标记成功；不存在返回 False。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT file_path FROM group_file_requests WHERE message_id = ?",
+                    (message_id,))
+                row = cursor.fetchone()
+                cursor.execute('''
+                    UPDATE group_file_requests SET status = 'recalled'
+                    WHERE message_id = ?
+                ''', (message_id,))
+                conn.commit()
+                if cursor.rowcount > 0:
+                    self._delete_disk_file(row[0] if row else None)
+                    logging.info(f"群组文件请求已标记撤回：消息ID={message_id}")
+                    return True
+                else:
+                    logging.error(f"群组文件请求标记撤回失败：消息ID={message_id} 不存在")
+                    return False
+        except sqlite3.Error as e:
+            logging.error(f"群组文件请求标记撤回失败: {e}")
+            return False
 
     def delete_group_file_request(self, message_id):
         try:
@@ -615,12 +694,16 @@ class Database:
                     DELETE FROM group_file_requests
                     WHERE message_id = ?
                 ''', (message_id,))
+                requests_deleted = cursor.rowcount
                 cursor.execute('''
                     DELETE FROM group_file_responses
                     WHERE message_id = ?
                 ''', (message_id,))
                 conn.commit()
-                if cursor.rowcount > 0:
+                # rowcount 取 group_file_requests 的删除数（P-59 缺陷修复：
+                # 原实现误取最后一条 DELETE 的 rowcount，无响应记录时恒为 0，
+                # 导致撤回群组文件请求误报失败）
+                if requests_deleted > 0:
                     self._delete_disk_file(row[0] if row else None)
                     logging.info(f"群组文件请求已删除：消息ID={message_id}")
                     return True

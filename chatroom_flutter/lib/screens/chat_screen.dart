@@ -66,9 +66,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// 阶段 K2：输入变化 → 立即写本地草稿状态 + 防抖同步服务端
   /// （修复：仅在切换会话/发送时才同步 → 输入后直接退出草稿丢失）
+  /// 系统消息会话（'服务器'）只读：不写草稿元数据、不同步服务端，
+  /// 否则 set_draft {peer_key='服务器'} 会被服务端按非好友拒绝，
+  /// 弹出"错误：服务器 不是您的好友"（P-46 缺陷修复）
   void _onInputChanged(String text) {
     final key = _state.currentChat;
-    if (key == null) return;
+    if (key == null || key == '服务器') return;
     _state.setConversationDraft(key, text);
     _draftDebounce?.cancel();
     _draftDebounce = Timer(const Duration(milliseconds: 800), () {
@@ -78,9 +81,10 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   /// 立即同步当前输入为草稿（切换会话/发送/退出前调用），并取消防抖
+  /// 系统消息会话（'服务器'）只读：不触发草稿同步（P-46 缺陷修复）
   void _flushDraft() {
     final key = _state.currentChat;
-    if (key == null) return;
+    if (key == null || key == '服务器') return;
     _draftDebounce?.cancel();
     _draftDebounce = null;
     widget.socketService.saveConversationDraft(key, _inputCtrl.text);
@@ -595,8 +599,11 @@ class _ChatScreenState extends State<ChatScreen> {
                         // 阶段 K2：切换会话前同步保存旧会话草稿（本地 + 服务端），
                         // 再恢复新会话草稿到输入栏（先 selectChat，避免草稿回写
                         // 到旧会话）
+                        // 系统消息会话（'服务器'）只读：不写本地草稿元数据（P-46 缺陷修复）
                         final previous = _state.currentChat;
-                        if (previous != null && previous != key) {
+                        if (previous != null &&
+                            previous != key &&
+                            previous != '服务器') {
                           _state.setConversationDraft(previous, _inputCtrl.text);
                           _flushDraft();
                         }

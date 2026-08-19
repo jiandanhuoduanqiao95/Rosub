@@ -204,7 +204,13 @@ class GroupHandler:
                 self.server.guarded_send(ssock, "error", f"群组文件请求 {message_id} 不存在")
                 logging.warning(f"群组文件响应失败: 消息ID={message_id} 不存在")
                 return
-            group_id_db, sender, filename, filesize, file_data, file_path = file_request
+            group_id_db, sender, filename, filesize, file_data, file_path, status = file_request
+            if status == 'recalled':
+                # 阶段 K 缺陷修复（P-59）：文件已被发送者撤回——提示"对方已撤回"，
+                # 而非"文件不存在"
+                self.server.guarded_send(ssock, "error", "对方已撤回该文件，无法接收")
+                logging.info(f"群组文件响应失败: 消息ID={message_id} 已被撤回，用户={username}")
+                return
             if int(group_id) != group_id_db:
                 self.server.guarded_send(ssock, "error", "无效的群组ID")
                 logging.warning(f"群组文件响应失败: 用户 {username} 提供无效的群组ID {group_id}")

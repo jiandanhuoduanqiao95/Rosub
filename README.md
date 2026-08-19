@@ -14,7 +14,7 @@
   - tkinter 图形界面 —— 保留作为功能参照（`client/gui/`）
 - **协议**: 自定义二进制协议（4 字节头长度 + JSON 头 + 消息体，v1.0.0 已冻结）
 - **认证**: bcrypt 密码哈希 + 管理员二次密钥
-- **测试**: pytest 522 个（pytest-xdist 并行）+ Flutter widget 测试 595 个 + Dart 协议 42 个
+- **测试**: pytest 612 个（pytest-xdist 并行）+ Flutter widget 测试 773 个 + Dart 协议 42 个
 
 ---
 
@@ -88,7 +88,7 @@ chatroom/
 │   ├── lib/protocol.dart              #   编解码 + MessageReader
 │   └── test/protocol_test.dart        #   15 个单元测试
 ├── protocol.py                        # Python 协议层（v1.0.0，已冻结）
-├── database.py                        # SQLite 数据库层（11 张表）
+├── database.py                        # SQLite 数据库层（12 张表）
 ├── config.py                          # 配置加载模块
 ├── config.yaml                        # 全局配置文件
 ├── validation.py                      # 用户名/密码格式验证
@@ -159,7 +159,7 @@ chatroom/
 | 身份 | 好友备注/分组 | 备注名显示于侧边栏；分组分区渲染；登录自动同步（J4） |
 | 身份 | 黑名单 | 拦截消息/文件/好友请求；跨登录保持；解除恢复（J4） |
 | 身份 | 好友请求验证消息 + 用户搜索 | 搜索用户名发请求；可附验证消息；发送请求时可预填备注名（J4） |
-| 测试 | 自动化测试 | pytest 522 个 + Flutter 595 个 + Dart 42 个 |
+| 测试 | 自动化测试 | pytest 612 个 + Flutter 773 个 + Dart 42 个 |
 
 ### 下一步开发
 
@@ -291,14 +291,14 @@ chatroom/
 ## 测试体系
 
 ```bash
-./run_tests.sh --all          # 全部 522 个测试（pytest-xdist 并行 ~40s）
+./run_tests.sh --all          # 全部 612 个测试（pytest-xdist 并行 ~60s）
 ./run_tests.sh --quick        # 快速测试（跳过 E2E/异步/状态机）
 ./run_tests.sh --db           # 仅数据库（含阶段 F 扩展）
 ./run_tests.sh --e2e          # 仅端到端（含异步 E2E）
 ./run_tests.sh --no-parallel  # 串行执行
 ```
 
-> 注：下表为阶段 F 快照（283 个）；最新计数 522 个（Python）+ 42 个（Dart）+ 595 个（Flutter）= 1159 项，
+> 注：下表为阶段 F 快照（283 个）；最新计数 612 个（Python）+ 42 个（Dart）+ 773 个（Flutter）= 1427 项，
 > 逐文件明细见 `TESTING_GUIDE_FLUTTER.md` §3。
 
 | 层 | 文件 | 数量 | 覆盖内容 |
@@ -316,7 +316,7 @@ chatroom/
 | 守护测试 | `test_socket_guard.py` | 8 | pytest-socket 纯逻辑不触网 |
 | 后端集成 | `test_backend_integration.py` | 7 | 运行时路径验证 |
 
-Flutter 测试（595 个）：
+Flutter 测试（773 个）：
 
 ```bash
 cd chatroom_flutter

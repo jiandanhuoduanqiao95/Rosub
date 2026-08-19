@@ -528,6 +528,9 @@ class MessageHandler:
                         try:
                             self.server.guarded_send(recipient_socket, "chat", message,
                                          extra_headers={"from": username, "message_id": message_id})
+                            # 阶段 K 缺陷修复（P-47）：实时送达成功即标记 delivered，
+                            # 否则下次登录该消息仍按 sent 推送 → 已查看消息复发未读徽标
+                            self.server.db.update_message_status(message_id, 'delivered')
                             logging.info(f"消息已转发: {username} -> {target}, 消息ID={message_id}")
                         except Exception as e:
                             logging.error(f"发送消息失败: {username} -> {target}, 消息ID={message_id}, 错误={e}")
@@ -588,7 +591,13 @@ class MessageHandler:
                         self.server.guarded_send(ssock, "error", f"文件请求 {message_id} 不存在")
                         logging.warning(f"文件响应失败: 消息ID={message_id} 不存在")
                         continue
-                    sender, receiver, filename, filesize, file_data, file_path = file_request
+                    sender, receiver, filename, filesize, file_data, file_path, status = file_request
+                    if status == 'recalled':
+                        # 阶段 K 缺陷修复（P-61）：文件已被发送者撤回——提示"对方已撤回"，
+                        # 而非"文件请求不存在"
+                        self.server.guarded_send(ssock, "error", "对方已撤回该文件，无法接收")
+                        logging.info(f"文件响应失败: 消息ID={message_id} 已被撤回，用户={username}")
+                        continue
                     if receiver != username:
                         self.server.guarded_send(ssock, "error", "无权限响应此文件请求")
                         logging.warning(f"文件响应失败: 用户 {username} 无权限响应消息ID={message_id}")
@@ -610,6 +619,9 @@ class MessageHandler:
                                 else:
                                     self.server.guarded_send(self.server.client_map[receiver], "file", file_data,
                                                  extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id})
+                                # 阶段 K 缺陷修复（P-47）：文件实时送达成功即标记 delivered，
+                                # 否则下次登录该文件按 sent 重推 → 文件消息复发未读/重复展示
+                                self.server.db.update_message_status(message_id, 'delivered')
                                 logging.info(f"文件已传输: {sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}")
                             except Exception as e:
                                 logging.error(f"传输文件失败: {sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
@@ -1207,13 +1219,19 @@ class MessageHandler:
 
                     elif file_request:
 
-                        sender, receiver, filename, filesize, content, file_path = file_request
+                        sender, receiver, filename, filesize, content, file_path, status = file_request
 
                         if sender != username:
                             self.server.guarded_send(ssock, "error", "只能撤回自己的文件请求")
 
                             logging.warning(f"撤回文件请求失败: 用户 {username} 尝试撤回非自己的文件请求 {message_id}")
 
+                            continue
+
+                        if status == 'recalled':
+                            # 已撤回：幂等成功（与"目标不存在静默成功"一致）
+                            self.server.guarded_send(ssock, "recall", "",
+                                         extra_headers={"message_id": message_id})
                             continue
 
                         with self.server.db._get_connection() as conn:
@@ -1247,7 +1265,7 @@ class MessageHandler:
 
                             continue
 
-                        if self.server.db.delete_file_request(message_id):
+                        if self.server.db.mark_file_request_recalled(message_id):
 
                             with self.server.client_map_lock:
 
@@ -1290,13 +1308,19 @@ class MessageHandler:
 
                     elif group_file_request:
 
-                        group_id, sender, filename, filesize, content, file_path = group_file_request
+                        group_id, sender, filename, filesize, content, file_path, status = group_file_request
 
                         if sender != username:
                             self.server.guarded_send(ssock, "error", "只能撤回自己的文件请求")
 
                             logging.warning(f"撤回群组文件请求失败: 用户 {username} 尝试撤回非自己的文件请求 {message_id}")
 
+                            continue
+
+                        if status == 'recalled':
+                            # 已撤回：幂等成功（与"目标不存在静默成功"一致）
+                            self.server.guarded_send(ssock, "recall", "",
+                                         extra_headers={"message_id": message_id})
                             continue
 
                         with self.server.db._get_connection() as conn:
@@ -1330,7 +1354,7 @@ class MessageHandler:
 
                             continue
 
-                        if self.server.db.delete_group_file_request(message_id):
+                        if self.server.db.mark_group_file_request_recalled(message_id):
 
                             self.group_handler.notify_group_members(
 

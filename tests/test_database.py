@@ -705,12 +705,13 @@ class TestFileRequests:
 
         info = db.get_file_request("file-req-1")
         assert info is not None
-        sender, receiver, filename, filesize, content, file_path = info
+        sender, receiver, filename, filesize, content, file_path, status = info
         assert sender == "alice"
         assert receiver == "bob"
         assert filename == "doc.txt"
         assert content == file_content
         assert file_path is None
+        assert status == "pending"
 
     def test_get_pending_file_requests(self, db):
         """

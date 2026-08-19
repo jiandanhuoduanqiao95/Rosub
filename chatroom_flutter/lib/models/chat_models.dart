@@ -65,7 +65,11 @@ class ChatMessage {
 
   /// 显示用的消息文本
   String get displayText {
-    if (isRecalled) return '$sender: [消息已撤回]';
+    if (isRecalled) {
+      // 文件撤回：保留消息体并附加"已撤回"标志（不替换为"[消息已撤回]"）
+      if (type == 'file') return '$sender: $content [已撤回]';
+      return '$sender: [消息已撤回]';
+    }
     if (type == 'system') return content;
     if (filename != null) return '$sender: [文件] $filename';
     return '$sender: $content';

@@ -170,7 +170,7 @@ class TestRecallExtended:
             f"重复撤回不应崩溃，收到: {h2}"
 
     def test_recall_file_request(self, harness):
-        """2 分钟内撤回自己的文件请求 → 请求删除 + 接收方收到通知。"""
+        """2 分钟内撤回自己的文件请求 → 不报错，请求行标记 recalled + 接收方收到通知。"""
         alice = harness.client()
         alice.login("alice", "password123", consume=False)
         alice.drain(timeout=1)
@@ -183,7 +183,9 @@ class TestRecallExtended:
         alice.send("recall", "", message_id=mid, to="bob")
         h, _ = alice.recv(timeout=2)
         assert h is not None and h.get("type") == "recall"
-        assert harness.db.get_file_request(mid) is None
+        # 撤回不删除请求行，而是标记 recalled（接收方再接受时提示"对方已撤回"）
+        row = harness.db.get_file_request(mid)
+        assert row is not None and row[6] == "recalled"
 
     def test_recall_other_user_blocked(self, harness):
         """非发送者尝试撤回他人消息应被拒绝。"""
