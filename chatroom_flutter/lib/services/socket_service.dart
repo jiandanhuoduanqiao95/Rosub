@@ -16,11 +16,28 @@ import 'package:dart_protocol/protocol.dart';
 
 import '../config.dart';
 import '../models/chat_models.dart';
+import 'message_cache.dart';
 import 'taskbar_notifier.dart';
 import 'state_manager.dart';
 
 class SocketService {
   final AppState state = AppState.instance;
+
+  // ---- 阶段 L1（P0-7，2026-08-20 用户决策）：设备类别标识（按平台）----
+  // 登录时以 device_id 头发送，服务端据此区分会话：
+  //   不同类别（如手机/桌面）→ 并存，互不踢出；
+  //   同类别（如两台桌面）→ 新登录踢出旧会话（G1 语义按类别保留）。
+  // 平台常量取值，任何实例一致 → 无随机、无持久化、无竞态
+  // （勿改回"随机生成 + shared_preferences 持久化"：同机多实例启动时
+  // 均读到空存储、登录时各自生成不同 id，会导致同类互踢失效——实测缺陷）。
+  String get deviceId {
+    if (Platform.isLinux) return 'linux';
+    if (Platform.isAndroid) return 'android';
+    if (Platform.isIOS) return 'ios';
+    if (Platform.isWindows) return 'windows';
+    if (Platform.isMacOS) return 'macos';
+    return 'default';
+  }
 
   SecureSocket? _socket;
   MessageReader? _reader;
@@ -161,7 +178,9 @@ class SocketService {
       if (decoded is! Map<String, dynamic>) return const {};
       return {
         for (final e in decoded.entries)
-          e.key: (e.value as List<dynamic>? ?? const []).map((u) => u.toString()).toList(),
+          e.key: (e.value as List<dynamic>? ?? const [])
+              .map((u) => u.toString())
+              .toList(),
       };
     } catch (_) {
       return const {};
@@ -394,6 +413,9 @@ class SocketService {
       return '凭据缺失';
     }
     final extraHeaders = <String, String>{'password': _savedPassword!};
+    // 阶段 L1：重连登录同样携带设备类别，避免会话漂移为 default
+    // （否则会与 tkinter 等 default 类别会话互相误踢）
+    extraHeaders['device_id'] = deviceId;
     if (_savedAdminSecret != null && _savedAdminSecret!.isNotEmpty) {
       extraHeaders['admin_secret'] = _savedAdminSecret!;
     }
@@ -541,6 +563,8 @@ class SocketService {
     if (_socket == null) return '未连接到服务器';
 
     final extraHeaders = <String, String>{'password': password};
+    // 阶段 L1（P0-7）：登录携带设备标识，服务端据此区分会话（多设备并存）
+    extraHeaders['device_id'] = deviceId;
     if (adminSecret != null && adminSecret.isNotEmpty) {
       extraHeaders['admin_secret'] = adminSecret;
     }
@@ -569,6 +593,10 @@ class SocketService {
     // （拉黑状态重登后丢失、备注/分组不同步）。
     await _receiveInitialData();
 
+    // 阶段 L3（P0-4）：登录后合并本地缓存历史（去重 + 时间排序），
+    // 启动先渲染本地、再与服务端增量同步；服务端不可用时历史仍可读
+    await MessageCache.restoreAll();
+
     // 启动后台消息监听（消费初始数据中推送的 list_friends_meta / list_blocked）
     _startListening();
 
@@ -592,6 +620,8 @@ class SocketService {
     if (_socket == null) return '未连接到服务器';
 
     final extraHeaders = <String, String>{'password': password};
+    // 阶段 L1（P0-7）：注册同样携带设备标识，保证注册后同设备可稳定重登
+    extraHeaders['device_id'] = deviceId;
     if (adminSecret != null && adminSecret.isNotEmpty) {
       extraHeaders['admin_secret'] = adminSecret;
     }
@@ -747,7 +777,8 @@ class SocketService {
                   status: msgStatus,
                   replyTo: replyTo,
                   replyPreview: replyPreview,
-                  reactions: _parseReactionsHeader(header['reactions'] as String?),
+                  reactions:
+                      _parseReactionsHeader(header['reactions'] as String?),
                 ),
               );
             }
@@ -769,8 +800,7 @@ class SocketService {
               status: 'sent',
               replyTo: replyTo,
               replyPreview: replyPreview,
-              reactions:
-                  _parseReactionsHeader(header['reactions'] as String?),
+              reactions: _parseReactionsHeader(header['reactions'] as String?),
             );
             state.addMessage(chatKey, live);
             _notifyIncoming(live, chatKey);
@@ -805,8 +835,7 @@ class SocketService {
             // 不丢弃（见 'chat' 分支说明），添加气泡并提醒
             final filename = header['filename'] as String? ?? 'file';
             final to = header['to'] as String?;
-            final chatKey =
-                (from == state.username && to != null) ? to : from;
+            final chatKey = (from == state.username && to != null) ? to : from;
             final live = ChatMessage(
               sender: from,
               content: '[收到文件] $filename',
@@ -839,7 +868,8 @@ class SocketService {
                 groupId: groupId != null ? int.tryParse(groupId) : null,
                 replyTo: replyTo,
                 replyPreview: replyPreview,
-                reactions: _parseReactionsHeader(header['reactions'] as String?),
+                reactions:
+                    _parseReactionsHeader(header['reactions'] as String?),
               ),
             );
           } else if (from != null) {
@@ -857,8 +887,7 @@ class SocketService {
               groupId: groupId != null ? int.tryParse(groupId) : null,
               replyTo: replyTo,
               replyPreview: replyPreview,
-              reactions:
-                  _parseReactionsHeader(header['reactions'] as String?),
+              reactions: _parseReactionsHeader(header['reactions'] as String?),
             );
             state.addMessage(chatKey, live);
             _notifyIncoming(live, chatKey);

@@ -2,6 +2,7 @@ import socket
 import ssl
 import os
 import sys
+import time
 import threading
 import logging
 
@@ -26,11 +27,40 @@ class Server:
         # 正在被大文件直传转发（recv_and_forward 写入）的 socket 集合：
         # 转发期间禁止向这些连接写入任何其他数据（心跳 pong/kick/推送都会污染 SSL 流）
         self.active_forward_socks = set()
+        # 大文件直传的**发送方**连接（recv_and_forward 读取期间）：
+        # 心跳守护跳过该集合，避免长文件传输被误判为超时断开
+        self.direct_transfer_sources = set()
         # 大文件传输专用通道（阶段 G4b 修复-问题2）：登录时带 transfer=1 的
         # 连接注册到此处，不进入 client_map、不踢主会话。
         # 文件数据在主连接之外收发，聊天消息在主连接上畅通无阻——
         # 发送方传输期间发的文字消息不再被发送队列/接收方抑制阻塞。
         self.transfer_sockets = {}
+        # 会话最后活动时间戳（sock -> float）：心跳守护（阶段 L1 补充）依据。
+        # 客户端每 30s 发送 ping，正常会话活动时间戳持续刷新；
+        # 断网/进程异常等"无 FIN 断开"场景下连接半开，守护线程据此强制下线，
+        # 避免幽灵会话导致对方一直显示在线。
+        self.session_activity = {}
+        # 在途发送引用计数（sock -> int）与待关闭集合：长发送（文件推送/
+        # 直传转发）期间 socket 的 fd 不得被关闭，否则 fd 复用竞态会把
+        # SSL 字节写进数据库文件（P-07 缺陷修复，见 guarded_send 说明）。
+        self.sock_refs = {}
+        self.sock_pending_close = set()
+        # 已完成 SSL 握手但尚未注册进 client_map / transfer_sockets 的
+        # 连接（登录/注册流程中）：guarded_send 活性校验对其放行，
+        # 保证"密码错误"等认证前错误响应能送达；finally 中移除。
+        self.pending_socks = set()
+
+    def _is_live_sock(self, sock):
+        """该 socket 是否仍是活跃会话（发送前校验，避免写入已关闭的 fd）。
+
+        P-07 缺陷修复：主会话在 client_map，传输通道在 transfer_sockets，
+        认证握手中的连接在 pending_socks。已下线/被踢出的 socket 不再
+        活跃 → guarded_send 跳过，杜绝"发送到已关闭 fd"（fd 复用竞态
+        会把 TLS 字节写进数据库文件）。
+        """
+        return (sock in self.pending_socks
+                or any(v is sock for v in self.client_map.values())
+                or any(v is sock for v in self.transfer_sockets.values()))
 
     def guarded_send(self, sock, msg_type, content, extra_headers=None, chunk_size=None):
         """向客户端发送消息；若该连接正在接收大文件直传转发，则抑制写入。
@@ -38,31 +68,243 @@ class Server:
         大文件直传时服务器把接收方 socket 当作纯文件通道，任何其他数据
         （ping/pong、kick 通知、聊天推送等）都会插入文件字节流导致 SSL 记录
         错乱（BAD_LENGTH）与文件损坏。
+
+        P-07 缺陷修复（fd 复用竞态）：活性校验 + sendall 全程持锁——
+        旧实现解锁后 sendall，与关闭操作（踢出/看门狗/线程 finally）竞态：
+        关闭释放 fd → sqlite 打开数据库文件复用该 fd → sendall 把 SSL 字节
+        写进数据库文件（"file is not a database"）→ 后续 presence 广播的
+        is_blocked 抛错被吞 → 对方一直显示在线（重登才恢复）。
         """
         with self.client_map_lock:
             if sock in self.active_forward_socks:
                 logging.info(f"抑制发送到转发中的连接: 类型={msg_type}")
                 return
-        if chunk_size is not None:
-            send_message(sock, msg_type, content, extra_headers=extra_headers, chunk_size=chunk_size)
-        else:
-            send_message(sock, msg_type, content, extra_headers=extra_headers)
+            if not self._is_live_sock(sock):
+                logging.info(f"跳过发送到已下线连接: 类型={msg_type}")
+                return
+            if chunk_size is not None:
+                send_message(sock, msg_type, content, extra_headers=extra_headers, chunk_size=chunk_size)
+            else:
+                send_message(sock, msg_type, content, extra_headers=extra_headers)
+
+    def acquire_send_sock(self, sock):
+        """长发送（文件推送/直传转发）前引用 socket。
+
+        返回 True 表示 socket 仍活跃且已被引用：引用期间任何关闭操作
+        （close_sock）会延迟到 release_send_sock 之后真正关闭 fd，
+        保证长发送不落在被复用为数据库文件的 fd 上（P-07 fd 复用竞态）。
+        """
+        with self.client_map_lock:
+            if not self._is_live_sock(sock):
+                return False
+            self.sock_refs[sock] = self.sock_refs.get(sock, 0) + 1
+            return True
+
+    def release_send_sock(self, sock):
+        """长发送结束后释放引用；若期间被标记待关闭则立即真正关闭。"""
+        with self.client_map_lock:
+            refs = self.sock_refs.get(sock, 0) - 1
+            if refs > 0:
+                self.sock_refs[sock] = refs
+                return
+            self.sock_refs.pop(sock, None)
+            if sock in self.sock_pending_close:
+                self.sock_pending_close.discard(sock)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    def close_sock(self, sock):
+        """关闭会话 socket（内部取锁）：存在在途发送时延迟到引用清零。
+
+        与 guarded_send 的锁内发送互斥：发送要么先于关闭完成（真实
+        socket），要么被活性校验跳过——任何 sendall 都不会落到已关闭
+        且被数据库文件复用的 fd 上（P-07 fd 复用竞态修复）。
+        """
+        with self.client_map_lock:
+            if self.sock_refs.get(sock, 0) > 0:
+                self.sock_pending_close.add(sock)
+            else:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    # ============================================================
+    # 阶段 L（P0-7）：多会话并存 —— client_map 双键化 (username, device_id)
+    # ============================================================
+
+    def sessions_of(self, username):
+        """返回某用户名所有在线会话的 socket 列表（按 (username, device_id) 聚合）。
+
+        阶段 L1：同一账号可在多个设备同时在线，每个设备一个主会话。
+        """
+        with self.client_map_lock:
+            return [sock for (u, _d), sock in self.client_map.items() if u == username]
+
+    def has_any_session(self, username):
+        """该用户名是否有任一在线会话（presence 按用户名聚合的依据）。"""
+        with self.client_map_lock:
+            return any(u == username for (u, _d) in self.client_map)
+
+    def session_count(self, username):
+        """该用户名当前在线会话数。"""
+        with self.client_map_lock:
+            return sum(1 for (u, _d) in self.client_map if u == username)
+
+    def device_id_of(self, sock):
+        """返回某主会话 socket 对应的设备 id（阶段 L 多端前置）。
+
+        用于在文件接受/拒绝等操作中记录响应设备，供其他设备提示
+        "该文件已在XXX被接受/拒绝"。socket 不在主会话映射时回退 default。
+        """
+        with self.client_map_lock:
+            for (u, d), s in self.client_map.items():
+                if s is sock:
+                    return d
+        return "default"
+
+    def remove_session(self, username, device_id, sock):
+        """精确移除 (username, device_id) 会话映射；仅当仍指向 sock 时移除。
+
+        防止旧会话线程退出时误删同用户新会话（阶段 G1 不变式在多会话下的推广）。
+        """
+        with self.client_map_lock:
+            if self.client_map.get((username, device_id)) is sock:
+                self.client_map.pop((username, device_id), None)
+
+    def discard_socket(self, sock):
+        """按 socket 身份移除其所在会话（异常路径清理，不误伤同用户其他会话）。
+
+        P-07 补漏：若移除的是某用户名最后一个在线会话，须广播 presence 离线——
+        发送失败路径（broadcast_to_user / 群文件推送 / 文件响应推送 / 公告）会
+        经此把会话静默移出 client_map，此前不广播离线导致对方一直显示在线，
+        只有重新登录（快照重建）才转离线。
+        """
+        with self.client_map_lock:
+            dead = [k for k, v in self.client_map.items() if v is sock]
+            for k in dead:
+                self.client_map.pop(k, None)
+            self.session_activity.pop(sock, None)
+        for (u, _d) in dead:
+            try:
+                if not self.has_any_session(u):
+                    self.broadcast_presence(u, False)
+            except Exception as e:
+                logging.warning(f"discard_socket presence 下线广播失败: 用户={u}, 错误={e}")
+
+    # ============================================================
+    # 心跳超时守护（阶段 L1 补充，P-07 幽灵会话修复）
+    # ============================================================
+    # 客户端每 30s 发送 ping；正常会话 last_activity 持续刷新。
+    # 断网 / 进程异常 / 网络故障等"无 FIN 断开"会使连接半开，服务端
+    # 永远感知不到断开 → 对方一直显示在线（P-07）。守护线程定期扫描，
+    # 对"无活动超过 timeout 且非大文件传输中"的会话强制 shutdown，
+    # 其线程 finally 正常清理并广播 presence 离线。
+
+    HEARTBEAT_TIMEOUT = 120          # 无活动秒数阈值（客户端 30s ping，余量 4 周期）
+    WATCHDOG_INTERVAL = 30           # 守护扫描周期（秒）
+
+    def touch_activity(self, sock):
+        """刷新会话最后活动时间（收到任何消息时调用）。"""
+        self.session_activity[sock] = time.time()
+
+    def watchdog_scan(self, now=None, timeout=HEARTBEAT_TIMEOUT):
+        """单次超时扫描：对超时且非传输中的会话强制下线，返回被下线 socket 列表。
+
+        可独立调用（测试直接驱动）；start_connection_watchdog 周期性调用。
+        大文件直传的接收方（active_forward_socks）与发送方
+        （direct_transfer_sources）均跳过——传输期间 ping 被抑制，
+        不能被误判为超时（阶段 G4b 修复过的坑）。
+
+        P-07 缺陷修复：仅 shutdown（唤醒阻塞在 recv 的会话线程）不 close——
+        close 会释放 fd 触发 fd 复用竞态（见 guarded_send）；会话线程的
+        finally 负责在锁内精确移除映射并关闭 socket。
+        """
+        now = now if now is not None else time.time()
+        with self.client_map_lock:
+            socks = (list(self.client_map.values())
+                     + list(self.transfer_sockets.values()))
+        killed = []
+        for sock in socks:
+            if (sock in self.active_forward_socks
+                    or sock in self.direct_transfer_sources):
+                continue
+            last = self.session_activity.get(sock, now)
+            if now - last < timeout:
+                continue
+            killed.append(sock)
+            logging.warning(
+                f"心跳超时，强制下线会话: 无活动 {now - last:.0f}s（阈值 {timeout}s）")
+            try:
+                # shutdown 唤醒阻塞在 recv 的会话线程（close 不能打断阻塞读），
+                # 其 finally 会清理 client_map / transfer_sockets 并广播 presence 离线
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        # 清理已死会话的活动记录
+        with self.client_map_lock:
+            live = (set(self.client_map.values())
+                    | set(self.transfer_sockets.values()))
+        stale = [s for s in self.session_activity if s not in live]
+        for s in stale:
+            self.session_activity.pop(s, None)
+        return killed
+
+    def start_connection_watchdog(self, interval=None, timeout=None):
+        """启动心跳守护线程（build_listen 调用；可覆盖间隔/阈值便于测试）。"""
+        interval = interval if interval is not None else self.WATCHDOG_INTERVAL
+        timeout = timeout if timeout is not None else self.HEARTBEAT_TIMEOUT
+
+        def _watch():
+            while True:
+                time.sleep(interval)
+                try:
+                    self.watchdog_scan(timeout=timeout)
+                except Exception as e:
+                    logging.error(f"心跳守护扫描异常: {e}")
+
+        self.watchdog_thread = threading.Thread(target=_watch, daemon=True)
+        self.watchdog_thread.start()
+        logging.info(f"心跳守护已启动: 间隔={interval}s, 超时={timeout}s")
+
+    def broadcast_to_user(self, username, msg_type, content, extra_headers=None):
+        """向某用户名所有在线会话推送消息（会话级推送，阶段 L1）。
+
+        逐会话发送并异常隔离；任一发送失败即移除该会话映射（不误伤同用户
+        其他会话）。返回成功送达的会话数（0 = 用户离线）。
+        """
+        if extra_headers is None:
+            extra_headers = {}
+        delivered = 0
+        with self.client_map_lock:
+            socks = [sock for (u, _d), sock in self.client_map.items() if u == username]
+        for sock in socks:
+            try:
+                self.guarded_send(sock, msg_type, content, extra_headers=extra_headers)
+                delivered += 1
+            except Exception as e:
+                logging.warning(f"会话级推送失败: 用户={username}, 类型={msg_type}, 错误={e}")
+                self.discard_socket(sock)
+        return delivered
 
     def broadcast_presence(self, username, online):
-        """向其他在线用户广播在线状态（阶段 J：P0-3）。
+        """向其他在线用户广播在线状态（阶段 J：P0-3；阶段 L1 按用户名聚合）。
 
-        黑名单双向隐藏：subject 与 viewer 任一方向存在拉黑关系 → 不广播
-        （被拉黑者不可见拉黑者在线状态，反之亦然）。
+        presence 按用户名而非设备聚合：任一设备在线即在线；向某目标用户推送
+        一次即可（其所有会话都会收到——broadcast_to_user）。
+        黑名单双向隐藏：subject 与 viewer 任一方向存在拉黑关系 → 不广播。
         """
         online_flag = "1" if online else "0"
         with self.client_map_lock:
-            targets = [(u, s) for u, s in self.client_map.items() if u != username]
-        for u, sock in targets:
+            other_usernames = sorted({u for (u, _d) in self.client_map if u != username})
+        for u in other_usernames:
             try:
                 if self.db.is_blocked(u, username) or self.db.is_blocked(username, u):
                     continue
-                self.guarded_send(sock, "presence", "",
-                                  extra_headers={"from": username, "online": online_flag})
+                self.broadcast_to_user(u, "presence", "",
+                                       extra_headers={"from": username, "online": online_flag})
             except Exception as e:
                 logging.warning(f"presence 广播失败: {username} -> {u}, 错误={e}")
 
@@ -73,8 +315,8 @@ class Server:
         在收到好友/群组列表前会持续消费消息。
         """
         with self.client_map_lock:
-            others = [(u, s) for u, s in self.client_map.items() if u != username]
-        for u, sock in others:
+            others = sorted({u for (u, _d) in self.client_map if u != username})
+        for u in others:
             try:
                 if self.db.is_blocked(username, u) or self.db.is_blocked(u, username):
                     continue
@@ -99,6 +341,9 @@ class Server:
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((self.host, self.port))
         server_socket.listen(100)
+        # 心跳守护：清理"无 FIN 断开"的幽灵会话（断网/进程异常），
+        # 避免对方一直显示在线（阶段 L1，P-07 修复）
+        self.start_connection_watchdog()
         logging.info(f"服务器启动，监听 {self.host}:{self.port}")
         while True:
             try:

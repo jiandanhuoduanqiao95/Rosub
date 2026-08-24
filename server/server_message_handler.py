@@ -52,22 +52,17 @@ class MessageHandler:
 
     def _broadcast_k_message(self, usernames, msg_type, content, extra_headers,
                              exclude=None, log_context=""):
-        """阶段 K：向在线用户集合广播消息（跳过 exclude），异常隔离。"""
+        """阶段 K：向在线用户集合广播消息（跳过 exclude），异常隔离。
+
+        阶段 L1：每成员推送到其所有在线会话（会话级推送）。
+        """
         for member in usernames:
             if member == exclude:
                 continue
-            with self.server.client_map_lock:
-                member_socket = self.server.client_map.get(member)
-            if not member_socket:
-                continue
-            try:
-                self.server.guarded_send(member_socket, msg_type, content,
-                             extra_headers=extra_headers)
+            delivered = self.server.broadcast_to_user(
+                member, msg_type, content, extra_headers=extra_headers)
+            if delivered:
                 logging.info(f"K5 广播 {msg_type}: -> {member}, {log_context}")
-            except Exception as e:
-                logging.error(f"K5 广播失败: {member}, 类型={msg_type}, 错误={e}")
-                with self.server.client_map_lock:
-                    self.server.client_map.pop(member, None)
 
     def _reactions_for_headers(self, message_id):
         """把 reactions 表聚合为 {emoji: [usernames]}（供历史/编辑等使用）。"""
@@ -323,10 +318,13 @@ class MessageHandler:
                 logging.warning(f"大文件直传失败: {username} -> {target}, 非好友")
                 return True
             # 转发目标：优先接收方的传输通道（transfer socket，聊天主连接
-            # 不被占用）；旧客户端无传输通道时回退到主连接（需抑制写入）。
+            # 不被占用）；旧客户端无传输通道时回退到主会话（需抑制写入）。
+            # 阶段 L1：主会话可多个（多设备并存），回退时取任一同名会话。
             with self.server.client_map_lock:
                 transfer_recipient = self.server.transfer_sockets.get(target)
-                main_recipient = self.server.client_map.get(target)
+                main_sessions = [sock for (u, _d), sock in
+                                 self.server.client_map.items() if u == target]
+            main_recipient = main_sessions[0] if main_sessions else None
             recipient_socket = transfer_recipient or main_recipient
             if not recipient_socket:
                 if length > 0:
@@ -337,6 +335,19 @@ class MessageHandler:
             use_main_fallback = transfer_recipient is None
             consumed = 0
             forward_failed = False
+            # P-07 修复：长转发前引用接收方 socket——期间任何关闭操作
+            # （管理员强制下线等）延迟到转发结束后，杜绝 fd 复用竞态
+            # （SSL 字节写进被 sqlite 复用的数据库文件 fd）
+            if not self.server.acquire_send_sock(recipient_socket):
+                if length > 0:
+                    recv_body(ssock, length)
+                self.server.guarded_send(ssock, "error", f"用户 {target} 离线，无法传输大文件")
+                logging.warning(f"大文件直传失败: {username} -> {target}, 目标已离线")
+                return True
+            # 心跳守护保护：传输期间发送方持续读取文件体（可能超过超时阈值），
+            # 标记为"直传源"跳过超时扫描，避免长文件传输被误判断开
+            with self.server.client_map_lock:
+                self.server.direct_transfer_sources.add(ssock)
             try:
                 if use_main_fallback:
                     # 主连接回退：标记接收方为"转发中"，期间抑制一切写入
@@ -363,11 +374,17 @@ class MessageHandler:
                 logging.error(f"大文件直传中断: {username} -> {target}, "
                               f"消息ID={message_id}, 错误={e}")
             finally:
+                with self.server.client_map_lock:
+                    self.server.direct_transfer_sources.discard(ssock)
+                self.server.release_send_sock(recipient_socket)
                 if use_main_fallback:
                     # 转发结束：解除抑制；若接收方仍是最新会话，补推转发期间积压的离线消息
                     with self.server.client_map_lock:
                         self.server.active_forward_socks.discard(recipient_socket)
-                        still_current = self.server.client_map.get(target) is recipient_socket
+                        still_current = any(
+                            sock is recipient_socket
+                            for (u, _d), sock in self.server.client_map.items()
+                            if u == target)
                     if still_current:
                         try:
                             self.load_offline_data(target, recipient_socket)
@@ -451,17 +468,13 @@ class MessageHandler:
             logging.warning(f"文件发送失败: {username} -> {target}, 被对方拉黑")
             return True
         self.server.db.save_file_request(username, target, filename, effective_size, file_data, message_id, file_path=file_path)
-        with self.server.client_map_lock:
-            recipient_socket = self.server.client_map.get(target)
-        if recipient_socket:
-            try:
-                self.server.guarded_send(recipient_socket, "file_request", "",
-                             extra_headers={"from": username, "filename": filename, "filesize": effective_size, "message_id": message_id})
-                logging.info(f"文件请求已发送: {username} -> {target}, 文件名={filename}, 消息ID={message_id}")
-            except Exception as e:
-                logging.error(f"发送文件请求失败: {username} -> {target}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
-                with self.server.client_map_lock:
-                    self.server.client_map.pop(target, None)
+        # 阶段 L1：会话级推送——文件请求到达目标用户所有在线会话
+        delivered = self.server.broadcast_to_user(
+            target, "file_request", "",
+            extra_headers={"from": username, "filename": filename,
+                           "filesize": effective_size, "message_id": message_id})
+        if delivered:
+            logging.info(f"文件请求已发送: {username} -> {target}, 文件名={filename}, 消息ID={message_id}")
         else:
             self.server.guarded_send(ssock, "chat", f"用户 {target} 离线，文件请求已保存")
             logging.info(f"用户 {target} 离线，文件请求已保存: 文件名={filename}, 消息ID={message_id}")
@@ -475,6 +488,8 @@ class MessageHandler:
             if not header:
                 logging.info(f"客户端 {username} 断开连接")
                 break
+            # 心跳守护：收到任何消息即刷新会话活动时间
+            self.server.touch_activity(ssock)
             msg_type = header.get("type")
             length = header.get('length', 0)
             logging.info(f"收到消息: 用户={username}, 类型={msg_type}, 头信息={header}")
@@ -491,6 +506,7 @@ class MessageHandler:
             if data is None:
                 logging.info(f"客户端 {username} 断开连接（消息体读取中断）")
                 break
+            self.server.touch_activity(ssock)
 
             try:
                 if msg_type == "ping":
@@ -522,20 +538,15 @@ class MessageHandler:
                     self.server.db.save_offline_message(username, target, "chat", message.encode('utf-8'), message_id=message_id)
                     # 同步写入永久消息历史
                     self.server.db.save_message_history(username, target, "chat", message.encode('utf-8'), message_id=message_id)
-                    with self.server.client_map_lock:
-                        recipient_socket = self.server.client_map.get(target)
-                    if recipient_socket:
-                        try:
-                            self.server.guarded_send(recipient_socket, "chat", message,
-                                         extra_headers={"from": username, "message_id": message_id})
-                            # 阶段 K 缺陷修复（P-47）：实时送达成功即标记 delivered，
-                            # 否则下次登录该消息仍按 sent 推送 → 已查看消息复发未读徽标
-                            self.server.db.update_message_status(message_id, 'delivered')
-                            logging.info(f"消息已转发: {username} -> {target}, 消息ID={message_id}")
-                        except Exception as e:
-                            logging.error(f"发送消息失败: {username} -> {target}, 消息ID={message_id}, 错误={e}")
-                            with self.server.client_map_lock:
-                                self.server.client_map.pop(target, None)
+                    # 阶段 L1：会话级推送——私聊到达目标用户所有在线会话
+                    delivered = self.server.broadcast_to_user(
+                        target, "chat", message,
+                        extra_headers={"from": username, "message_id": message_id})
+                    if delivered:
+                        # 阶段 K 缺陷修复（P-47）：实时送达成功即标记 delivered，
+                        # 否则下次登录该消息仍按 sent 推送 → 已查看消息复发未读徽标
+                        self.server.db.update_message_status(message_id, 'delivered')
+                        logging.info(f"消息已转发: {username} -> {target}, 消息ID={message_id}")
                     else:
                         self.server.guarded_send(ssock, "chat", f"用户 {target} 离线，消息已保存")
                         logging.info(f"用户 {target} 离线，消息已保存: 消息ID={message_id}")
@@ -573,7 +584,9 @@ class MessageHandler:
                         continue
                     with self.server.client_map_lock:
                         transfer_recipient = self.server.transfer_sockets.get(target)
-                        main_recipient = self.server.client_map.get(target)
+                        main_sessions = [sock for (u, _d), sock in
+                                         self.server.client_map.items() if u == target]
+                    main_recipient = main_sessions[0] if main_sessions else None
                     if not transfer_recipient and not main_recipient:
                         self.server.guarded_send(ssock, "error", f"用户 {target} 离线，无法传输大文件")
                         logging.warning(f"大文件探测失败: {username} -> {target}, 目标离线")
@@ -586,6 +599,18 @@ class MessageHandler:
                     message_id = header.get("message_id")
                     response = header.get("response")
                     target = header.get("to")
+                    # 阶段 L 多端前置：该用户在其它设备已接受/拒绝过此文件 →
+                    # 提示"该文件已在XXX被接受/拒绝"，而非"文件请求不存在"
+                    prior = self.server.db.get_file_resolution(message_id, username)
+                    if prior:
+                        prior_action, prior_device = prior
+                        action_text = "接受" if prior_action == "accept" else "拒绝"
+                        device_name = prior_device or "default"
+                        self.server.guarded_send(
+                            ssock, "error", f"该文件已在{device_name}被{action_text}")
+                        logging.info(f"文件响应重复: 用户={username}, 消息ID={message_id}, "
+                                     f"已在设备 {device_name} 被{action_text}")
+                        continue
                     file_request = self.server.db.get_file_request(message_id)
                     if not file_request:
                         self.server.guarded_send(ssock, "error", f"文件请求 {message_id} 不存在")
@@ -602,6 +627,11 @@ class MessageHandler:
                         self.server.guarded_send(ssock, "error", "无权限响应此文件请求")
                         logging.warning(f"文件响应失败: 用户 {username} 无权限响应消息ID={message_id}")
                         continue
+                    # 阶段 L 多端前置：在文件落库/推送前先记录响应设备——
+                    # 避免其他设备在推送完成前并发响应时读到旧状态误判"不存在"
+                    self.server.db.record_file_resolution(
+                        message_id, username, response,
+                        self.server.device_id_of(ssock))
                     if response == "accept":
                         # 大文件：把待处理文件转入历史区（原子 rename），DB 存路径
                         history_path = (self.server.db.promote_file_to_history(file_path, message_id)
@@ -611,22 +641,36 @@ class MessageHandler:
                         self.server.db.save_offline_message(sender, receiver, "file", file_data, filename=filename, message_id=message_id, file_path=history_path)
                         # 同步写入永久消息历史
                         self.server.db.save_message_history(sender, receiver, "file", file_data, filename=filename, message_id=message_id, file_path=history_path)
-                        if self.server.client_map.get(receiver):
+                        # 阶段 L1：文件送达接收者所有在线会话（会话级推送）
+                        receiver_sessions = self.server.sessions_of(receiver)
+                        file_headers = {"from": sender, "filename": filename,
+                                        "filesize": filesize, "message_id": message_id}
+                        file_delivered = 0
+                        for r_sock in receiver_sessions:
+                            # P-07 修复：长文件推送前引用接收方 socket——
+                            # 推送期间接收方会话被关闭时 fd 不被释放（延迟关闭），
+                            # 杜绝 SSL 字节写进被 sqlite 复用 fd 的竞态
+                            if history_path and not self.server.acquire_send_sock(r_sock):
+                                continue
                             try:
                                 if history_path:
-                                    send_file_message(self.server.client_map[receiver], "file", history_path,
-                                                      extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id})
+                                    send_file_message(r_sock, "file", history_path,
+                                                      extra_headers=file_headers)
                                 else:
-                                    self.server.guarded_send(self.server.client_map[receiver], "file", file_data,
-                                                 extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id})
-                                # 阶段 K 缺陷修复（P-47）：文件实时送达成功即标记 delivered，
-                                # 否则下次登录该文件按 sent 重推 → 文件消息复发未读/重复展示
-                                self.server.db.update_message_status(message_id, 'delivered')
-                                logging.info(f"文件已传输: {sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}")
+                                    self.server.guarded_send(r_sock, "file", file_data,
+                                                             extra_headers=file_headers)
+                                file_delivered += 1
                             except Exception as e:
                                 logging.error(f"传输文件失败: {sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
-                                with self.server.client_map_lock:
-                                    self.server.client_map.pop(receiver, None)
+                                self.server.discard_socket(r_sock)
+                            finally:
+                                if history_path:
+                                    self.server.release_send_sock(r_sock)
+                        if file_delivered:
+                            # 阶段 K 缺陷修复（P-47）：文件实时送达成功即标记 delivered，
+                            # 否则下次登录该文件按 sent 重推 → 文件消息复发未读/重复展示
+                            self.server.db.update_message_status(message_id, 'delivered')
+                            logging.info(f"文件已传输: {sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}")
                         self.server.db.delete_file_request(message_id)
                         logging.info(f"文件请求已删除: 消息ID={message_id}")
                     else:
@@ -652,20 +696,15 @@ class MessageHandler:
                     # 阶段 J：好友请求可携带验证消息（P1-10）
                     request_message = header.get("message")
                     if self.server.db.add_friend_request(username, target, request_message):
-                        with self.server.client_map_lock:
-                            recipient_socket = self.server.client_map.get(target)
-                        if recipient_socket:
-                            try:
-                                extra_headers = {"from": username}
-                                if request_message:
-                                    extra_headers["message"] = request_message
-                                self.server.guarded_send(recipient_socket, "friend_request", f"来自 {username} 的好友请求",
-                                             extra_headers=extra_headers)
-                                logging.info(f"好友请求已发送: {username} -> {target}")
-                            except Exception as e:
-                                logging.error(f"发送好友请求通知失败: {username} -> {target}, 错误={e}")
-                                with self.server.client_map_lock:
-                                    self.server.client_map.pop(target, None)
+                        extra_headers = {"from": username}
+                        if request_message:
+                            extra_headers["message"] = request_message
+                        # 阶段 L1：好友请求到达目标所有在线会话
+                        delivered = self.server.broadcast_to_user(
+                            target, "friend_request", f"来自 {username} 的好友请求",
+                            extra_headers=extra_headers)
+                        if delivered:
+                            logging.info(f"好友请求已发送: {username} -> {target}")
                         self.server.guarded_send(ssock, "chat", f"好友请求已发送给 {target}")
                         logging.info(f"好友请求发送：{username} -> {target}")
                     else:
@@ -906,17 +945,10 @@ class MessageHandler:
                         continue
                     self.server.db.accept_friend_request(requester, username)
                     self.server.guarded_send(ssock, "chat", f"已接受 {requester} 的好友请求")
-                    with self.server.client_map_lock:
-                        requester_socket = self.server.client_map.get(requester)
-                    if requester_socket:
-                        try:
-                            self.server.guarded_send(requester_socket, "chat", f"{username} 已接受您的好友请求")
-                            logging.info(f"通知请求者: {username} 接受好友请求")
-                        except Exception as e:
-                            logging.error(f"通知请求者失败: {username} 接受好友请求, 错误={e}")
-                            with self.server.client_map_lock:
-                                self.server.client_map.pop(requester, None)
-                    else:
+                    # 阶段 L1：接受通知到达请求者所有在线会话；请求者离线则存离线通知
+                    delivered = self.server.broadcast_to_user(
+                        requester, "chat", f"{username} 已接受您的好友请求")
+                    if not delivered:
                         # 请求方离线：保存离线通知，上线后可见
                         self.server.db.save_offline_message(
                             username, requester, "chat",
@@ -1087,18 +1119,17 @@ class MessageHandler:
 
                             )
 
-                            # 为离线群成员保存撤回占位符
+                            # 为离线群成员保存撤回占位符（阶段 L1：无任何会话在线才算离线）
                             members = self.server.db.get_group_members(group_id)
                             for member in members:
                                 if member == username:
                                     continue
-                                with self.server.client_map_lock:
-                                    if member not in self.server.client_map:
-                                        recall_content = json.dumps({"group_id": group_id, "text": f"{username} 撤回了一条消息"})
-                                        self.server.db.save_offline_message(
-                                            username, member, "group_chat", recall_content.encode('utf-8'),
-                                            message_id=str(uuid.uuid4()))
-                                        logging.info(f"离线群成员 {member} 的撤回占位符已保存")
+                                if not self.server.has_any_session(member):
+                                    recall_content = json.dumps({"group_id": group_id, "text": f"{username} 撤回了一条消息"})
+                                    self.server.db.save_offline_message(
+                                        username, member, "group_chat", recall_content.encode('utf-8'),
+                                        message_id=str(uuid.uuid4()))
+                                    logging.info(f"离线群成员 {member} 的撤回占位符已保存")
 
                             logging.info(f"群组消息撤回成功: 用户={username}, 群组ID={group_id}, 消息ID={message_id}")
 
@@ -1170,28 +1201,12 @@ class MessageHandler:
                             # 同步更新 message_history 的状态
                             self.server.db.update_message_history_status(message_id, 'recalled')
 
-                            with self.server.client_map_lock:
-
-                                recipient_socket = self.server.client_map.get(receiver)
-
-                            if recipient_socket:
-
-                                try:
-
-                                    self.server.guarded_send(recipient_socket, "recall", "",
-
-                                                 extra_headers={"from": username, "message_id": message_id})
-
-                                    logging.info(f"通知接收方消息撤回: {message_id}, 接收方={receiver}")
-
-                                except Exception as e:
-
-                                    logging.error(f"通知接收方消息撤回失败: {message_id}, 错误={e}")
-
-                                    with self.server.client_map_lock:
-
-                                        self.server.client_map.pop(receiver, None)
-
+                            # 阶段 L1：撤回通知到达接收方所有在线会话
+                            delivered = self.server.broadcast_to_user(
+                                receiver, "recall", "",
+                                extra_headers={"from": username, "message_id": message_id})
+                            if delivered:
+                                logging.info(f"通知接收方消息撤回: {message_id}, 接收方={receiver}")
                             else:
                                 # 接收方离线：保存撤回占位符通知，上线后可见
                                 self.server.db.save_offline_message(
@@ -1267,27 +1282,10 @@ class MessageHandler:
 
                         if self.server.db.mark_file_request_recalled(message_id):
 
-                            with self.server.client_map_lock:
-
-                                recipient_socket = self.server.client_map.get(receiver)
-
-                            if recipient_socket:
-
-                                try:
-
-                                    self.server.guarded_send(recipient_socket, "chat",
-
-                                                 f"用户 {username} 撤回了文件请求: {filename} ({message_id})")
-
-                                    logging.info(f"通知接收方文件请求撤回: {message_id}, 接收方={receiver}")
-
-                                except Exception as e:
-
-                                    logging.error(f"通知接收方文件请求撤回失败: {message_id}, 错误={e}")
-
-                                    with self.server.client_map_lock:
-
-                                        self.server.client_map.pop(receiver, None)
+                            # 阶段 L1：撤回通知到达接收方所有在线会话
+                            self.server.broadcast_to_user(
+                                receiver, "chat",
+                                f"用户 {username} 撤回了文件请求: {filename} ({message_id})")
 
                             logging.info(f"私聊文件请求撤回成功: {username} 撤回了 {message_id}")
 
@@ -1412,17 +1410,12 @@ class MessageHandler:
                         continue
                     if self.server.db.remove_friend(username, target):
                         self.server.guarded_send(ssock, "chat", f"已删除好友 {target}")
-                        with self.server.client_map_lock:
-                            target_socket = self.server.client_map.get(target)
-                        if target_socket:
-                            try:
-                                self.server.guarded_send(target_socket, "delete_friend", "",
-                                             extra_headers={"from": username})
-                                logging.info(f"通知被删方: {target} 被 {username} 删除好友")
-                            except Exception as e:
-                                logging.error(f"通知被删方失败: {target}, 错误={e}")
-                                with self.server.client_map_lock:
-                                    self.server.client_map.pop(target, None)
+                        # 阶段 L1：删除通知到达被删方所有在线会话
+                        delivered = self.server.broadcast_to_user(
+                            target, "delete_friend", "",
+                            extra_headers={"from": username})
+                        if delivered:
+                            logging.info(f"通知被删方: {target} 被 {username} 删除好友")
                         else:
                             self.server.db.save_offline_message(
                                 username, target, "chat",
@@ -1554,19 +1547,12 @@ class MessageHandler:
                         self.server.db.save_offline_message(
                             username, target, "chat", text.encode("utf-8"),
                             message_id=mid, reply_to=reply_to, reply_preview=preview)
-                        with self.server.client_map_lock:
-                            recipient_socket = self.server.client_map.get(target)
-                        if recipient_socket:
-                            try:
-                                self.server.guarded_send(recipient_socket, "chat", text,
-                                             extra_headers={"from": username, "message_id": mid,
-                                                            "reply_to": reply_to,
-                                                            "reply_preview": preview})
-                                logging.info(f"引用回复已转发: {username} -> {target}, 引用={reply_to}")
-                            except Exception as e:
-                                logging.error(f"引用回复转发失败: {target}, 错误={e}")
-                                with self.server.client_map_lock:
-                                    self.server.client_map.pop(target, None)
+                        # 阶段 L1：引用回复到达目标所有在线会话
+                        self.server.broadcast_to_user(
+                            target, "chat", text,
+                            extra_headers={"from": username, "message_id": mid,
+                                           "reply_to": reply_to,
+                                           "reply_preview": preview})
                         logging.info(f"引用回复成功: {username} -> {target}, 消息ID={mid}")
 
                 elif msg_type == "forward":
@@ -1638,17 +1624,10 @@ class MessageHandler:
                             username, target, "chat",
                             source["content"].encode("utf-8"),
                             message_id=mid)
-                        with self.server.client_map_lock:
-                            recipient_socket = self.server.client_map.get(target)
-                        if recipient_socket:
-                            try:
-                                self.server.guarded_send(recipient_socket, "chat", source["content"],
-                                             extra_headers={"from": username, "message_id": mid})
-                                logging.info(f"转发已送达: {username} -> {target}, 源={source_message_id}")
-                            except Exception as e:
-                                logging.error(f"转发送达失败: {target}, 错误={e}")
-                                with self.server.client_map_lock:
-                                    self.server.client_map.pop(target, None)
+                        # 阶段 L1：转发到达目标所有在线会话
+                        self.server.broadcast_to_user(
+                            target, "chat", source["content"],
+                            extra_headers={"from": username, "message_id": mid})
                         logging.info(f"转发成功: {username} -> {target}, 消息ID={mid}")
 
                 elif msg_type == "reaction":

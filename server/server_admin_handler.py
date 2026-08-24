@@ -19,8 +19,8 @@ class AdminHandler:
         command = header.get("action")
         if command == "list_users":
             users = self.server.db.get_all_users()
-            with self.server.client_map_lock:
-                users_list = [[user, user in self.server.client_map, bool(is_admin)] for user, is_admin in users]
+            # has_any_session 内部取锁（非重入锁，此处不得再持锁）
+            users_list = [[user, self.server.has_any_session(user), bool(is_admin)] for user, is_admin in users]
             self.server.guarded_send(ssock, "admin_response", json.dumps(users_list), extra_headers={"response_type": "list_users"})
             logging.info(f"列出所有用户: 用户={username}")
         elif command == "delete_user":
@@ -31,30 +31,25 @@ class AdminHandler:
                 return
             if self.server.db.delete_user(target_user):
                 users = self.server.db.get_all_users()
-                with self.server.client_map_lock:
-                    users_list = [[user, user in self.server.client_map, bool(is_admin)] for user, is_admin in users]
+                # has_any_session 内部取锁（非重入锁，此处不得再持锁）
+                users_list = [[user, self.server.has_any_session(user), bool(is_admin)] for user, is_admin in users]
                 self.server.guarded_send(ssock, "admin_response", json.dumps(users_list),
                              extra_headers={"response_type": "list_users", "action_result": f"删除用户 {target_user} 成功"})
                 logging.info(f"管理员 {username} 删除用户: {target_user}")
                 # 通知被删除的用户（如果在线）——锁外发送（guarded_send 需取锁）
-                target_socket = None
-                with self.server.client_map_lock:
-                    target_socket = self.server.client_map.get(target_user)
-                if target_socket:
+                # 阶段 L1：强制下线该用户所有在线会话
+                for target_socket in self.server.sessions_of(target_user):
                     try:
                         self.server.guarded_send(target_socket, "error", "您的账户已被管理员删除")
                         logging.info(f"通知用户 {target_user} 账户被删除")
                     except Exception as e:
                         logging.error(f"通知用户 {target_user} 失败: {e}")
-                    # shutdown 唤醒阻塞在 recv 的目标线程（close 不能打断阻塞读），
-                    # 由 handle_client 的 finally 清理 client_map 并广播 presence 下线
+                    # shutdown 唤醒阻塞在 recv 的目标线程（P-07 修复：不 close——
+                    # close 释放 fd 与并发发送竞态会把 SSL 字节写进数据库文件），
+                    # 由 handle_client 的 finally 在锁内清理并关闭
                     try:
                         target_socket.shutdown(socket.SHUT_RDWR)
                     except OSError:
-                        pass
-                    try:
-                        target_socket.close()
-                    except Exception:
                         pass
             else:
                 self.server.guarded_send(ssock, "error", f"删除用户 {target_user} 失败")
@@ -65,10 +60,10 @@ class AdminHandler:
             all_users = self.server.db.get_all_users()
             all_usernames = [u[0] for u in all_users]
             online_users = set()
-            invalid_clients = []
+            # 阶段 L1：遍历所有在线会话（多设备并存），按用户名聚合在线集合
             with self.server.client_map_lock:
-                targets = list(self.server.client_map.items())
-            for user, sock in targets:
+                sessions = list(self.server.client_map.items())
+            for (user, _device), sock in sessions:
                 try:
                     self.server.guarded_send(sock, "chat", announcement_msg,
                                  extra_headers={"from": "[系统公告]"})
@@ -76,11 +71,7 @@ class AdminHandler:
                     logging.info(f"向用户 {user} 发送公告")
                 except Exception as e:
                     logging.error(f"向用户 {user} 发送公告失败: {e}")
-                    invalid_clients.append(user)
-            if invalid_clients:
-                with self.server.client_map_lock:
-                    for user in invalid_clients:
-                        self.server.client_map.pop(user, None)
+                    self.server.discard_socket(sock)
             # 对离线用户保存离线公告消息，上线后可见
             import uuid as _uuid
             for username in all_usernames:
@@ -119,14 +110,12 @@ class AdminHandler:
                              extra_headers={"response_type": "reset_password"})
                 logging.info(f"管理员 {username} 重置用户 {target_user} 密码成功")
                 # 通知在线目标用户并强制下线：密码已失效的旧会话立即关闭，
-                # 防止其继续以旧凭据收发消息（阶段 J 修复）。shutdown 唤醒
-                # 阻塞在 recv 的目标线程（close 不能打断阻塞读），由
-                # handle_client 的 finally 清理 client_map / transfer_sockets
-                # 并广播 presence 下线。
-                target_socket = None
-                with self.server.client_map_lock:
-                    target_socket = self.server.client_map.get(target_user)
-                if target_socket:
+                    # 防止其继续以旧凭据收发消息（阶段 J 修复）。shutdown 唤醒
+                    # 阻塞在 recv 的目标线程（P-07 修复：不 close——close 释放
+                    # fd 与并发发送竞态会把 SSL 字节写进数据库文件），由
+                    # handle_client 的 finally 清理 client_map / transfer_sockets
+                    # 并广播 presence 下线。阶段 L1：强制下线该用户所有在线会话。
+                for target_socket in self.server.sessions_of(target_user):
                     try:
                         self.server.guarded_send(target_socket, "chat",
                                      "您的密码已被管理员重置，请重新登录",
@@ -138,11 +127,7 @@ class AdminHandler:
                         target_socket.shutdown(socket.SHUT_RDWR)
                     except OSError:
                         pass
-                    try:
-                        target_socket.close()
-                        logging.info(f"强制下线用户 {target_user}（密码已被管理员重置）")
-                    except Exception as e:
-                        logging.warning(f"关闭用户 {target_user} 连接失败: {e}")
+                    logging.info(f"强制下线用户 {target_user}（密码已被管理员重置）")
             else:
                 self.server.guarded_send(ssock, "error", f"重置用户 {target_user} 密码失败")
                 logging.error(f"管理员 {username} 重置用户 {target_user} 密码失败")

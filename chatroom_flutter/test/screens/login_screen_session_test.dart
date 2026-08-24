@@ -14,6 +14,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -91,6 +92,9 @@ void main() {
   setUp(() {
     testerSurfaceSize = const Size(800, 1000);
     SharedPreferences.setMockInitialValues({});
+    // 阶段 L2：SessionStore 密码存钥匙串，测试注入内存 mock（旧明文预置仍走
+    // 兼容迁移路径——钥匙串为空时回退 shared_preferences 明文）
+    FlutterSecureStorage.setMockInitialValues({});
   });
 
   group('H3 Session 回填（记住我，不自动登录）', () {
@@ -109,12 +113,11 @@ void main() {
       await pumpApp(tester);
 
       expect(fieldText(tester, const ValueKey('username_field')), 'alice');
-      expect(fieldText(tester, const ValueKey('password_field')),
-          'password123');
+      expect(
+          fieldText(tester, const ValueKey('password_field')), 'password123');
     });
 
-    testWidgets('管理员 session → 只回填用户名/密码，密钥不回填、管理员模式不自动开启',
-        (tester) async {
+    testWidgets('管理员 session → 只回填用户名/密码，密钥不回填、管理员模式不自动开启', (tester) async {
       SharedPreferences.setMockInitialValues({
         'session_username': 'admin2',
         'session_password': 'adminpass123',
@@ -124,8 +127,8 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
 
       expect(fieldText(tester, const ValueKey('username_field')), 'admin2');
-      expect(fieldText(tester, const ValueKey('password_field')),
-          'adminpass123');
+      expect(
+          fieldText(tester, const ValueKey('password_field')), 'adminpass123');
       // 安全：密钥不落盘 → 管理员模式不自动开启，密钥字段不存在
       expect(find.byKey(const ValueKey('admin_secret_field')), findsNothing);
     });

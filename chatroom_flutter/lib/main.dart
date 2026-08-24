@@ -8,10 +8,13 @@ import 'package:flutter/material.dart';
 import 'screens/login_screen.dart';
 import 'services/focus_tracker.dart';
 import 'services/ime_bridge.dart';
+import 'services/message_cache.dart';
 import 'services/taskbar_notifier.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // 阶段 L3（P0-4）：初始化本地消息缓存（启动秒开 + 离线可读）；失败不阻塞启动
+  MessageCache.init().then((_) {}, onError: (_) {});
   runApp(const ChatroomApp());
 }
 

@@ -1,18 +1,20 @@
 // ============================================================
-// session_store.dart 单元测试（阶段 H3 —— Session 持久化）
+// session_store.dart 单元测试（阶段 H3 —— Session 持久化 + 阶段 L2 钥匙串）
 // ============================================================
-// 契约（已实现）：
+// 契约（阶段 L2，P1-23 修订）：
 //   StoredSession{ username, password }
-//   SessionStore（shared_preferences 实现）：
-//     - 存储键：session_username / session_password
-//     - save(session)   ：写入用户名/密码；**不写** session_admin_secret，
-//                         并清除旧版本残留的管理员密钥键（安全：密钥不落盘）
-//     - load()          ：完整数据返回 StoredSession；键缺失/损坏返回 null
-//     - clear()         ：删除全部键
+//   SessionStore（flutter_secure_storage 实现）：
+//     - 存储键：session_username / session_password（**系统钥匙串内**）
+//     - save(session)   ：写入钥匙串；**不写** session_admin_secret，
+//                         并清除旧版本残留的管理员密钥键与旧明文（安全）
+//     - load()          ：优先读钥匙串；钥匙串为空回退旧 shared_preferences
+//                         明文并迁移清除；完整数据返回 StoredSession；否则 null
+//     - clear()         ：删除钥匙串键 + 旧明文残留
 //     - 覆盖保存：再次 save 替换旧值
-//   安全约定：管理员密钥永不写入 shared_preferences。
+//   安全约定：管理员密钥永不写入任何持久化；密码不落盘 shared_preferences。
 // ============================================================
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -23,6 +25,7 @@ void main() {
 
   setUp(() {
     SharedPreferences.setMockInitialValues({});
+    FlutterSecureStorage.setMockInitialValues({});
   });
 
   group('SessionStore（H3 持久化）', () {
@@ -80,16 +83,20 @@ void main() {
       expect(await SessionStore.load(), isNull);
     });
 
-    test('存储键名固定：session_username / session_password（无密钥键）',
-        () async {
+    test('【L2 安全】存储键只存在于钥匙串：save 后 shared_preferences 无明文键', () async {
       await SessionStore.save(const StoredSession(
         username: 'alice',
         password: 'password123',
       ));
       final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getString('session_username'), 'alice');
-      expect(prefs.getString('session_password'), 'password123');
+      // L2 契约：明文键必须被清除（密码/用户名只存在于系统钥匙串）
+      expect(prefs.getString('session_username'), isNull);
+      expect(prefs.getString('session_password'), isNull);
       expect(prefs.getString('session_admin_secret'), isNull);
+      // 往返仍一致（钥匙串持有）
+      final s = await SessionStore.load();
+      expect(s!.username, 'alice');
+      expect(s.password, 'password123');
     });
 
     test('中文/emoji/特殊字符密码往返无损', () async {

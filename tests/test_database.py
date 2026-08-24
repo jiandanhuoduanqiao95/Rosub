@@ -85,7 +85,8 @@ class TestDatabaseInit:
         expected = {
             "users", "offline_messages", "friends", "file_requests",
             "groups", "group_members", "group_file_requests", "group_file_responses",
-            "message_history", "conversations", "blocked_users", "reactions"
+            "message_history", "conversations", "blocked_users", "reactions",
+            "file_request_resolutions"
         }
         assert tables == expected, f"缺少表: {expected - tables}"
 

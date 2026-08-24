@@ -767,8 +767,9 @@ class TestLargeFileDirectTransfer:
         harness.db.add_friend_request("carol", "bob")
         harness.db.accept_friend_request("carol", "bob")
 
-        # 模拟：bob 的连接正在被大文件转发占用
-        bob_sock = harness.server.client_map["bob"]
+        # 模拟：bob 的连接正在被大文件转发占用（阶段 L1：client_map 双键化，
+        # 取 bob 的任一在线会话 socket）
+        bob_sock = harness.server.sessions_of("bob")[0]
         with harness.server.client_map_lock:
             harness.server.active_forward_socks.add(bob_sock)
 
@@ -810,8 +811,8 @@ class TestLargeFileDirectTransfer:
         harness.db.add_friend_request("carol", "bob")
         harness.db.accept_friend_request("carol", "bob")
 
-        # 转发中：carol 的 chat 被抑制入离线
-        bob_sock = harness.server.client_map["bob"]
+        # 转发中：carol 的 chat 被抑制入离线（阶段 L1：取 bob 任一在线会话 socket）
+        bob_sock = harness.server.sessions_of("bob")[0]
         with harness.server.client_map_lock:
             harness.server.active_forward_socks.add(bob_sock)
         carol.send("chat", "suppressed during fwd", to="bob")

@@ -270,19 +270,32 @@ class Client:
             result["conversations"] = json.loads(d.decode()) if d else []
         return result
 
-    def login(self, username, password, admin_secret=None, consume=True):
+    def login(self, username, password, admin_secret=None, consume=True,
+              device_id=None, transfer=None):
+        """登录；阶段 L（P0-7）新增可选 device_id / transfer 头。
+
+        device_id：标识登录设备（多会话并存），缺省时服务端使用默认设备 id；
+        transfer='1'：注册大文件传输专用通道（阶段 G4b）。均为向后兼容可选参数。
+        """
         extra = {"password": password}
         if admin_secret:
             extra["admin_secret"] = admin_secret
+        if device_id:
+            extra["device_id"] = device_id
+        if transfer:
+            extra["transfer"] = transfer
         self.send("login", username, **extra)
         if consume:
             return self.recv_initial()
         return None
 
-    def register(self, username, password, admin_secret=None, consume=True):
+    def register(self, username, password, admin_secret=None, consume=True,
+                 device_id=None):
         extra = {"password": password}
         if admin_secret:
             extra["admin_secret"] = admin_secret
+        if device_id:
+            extra["device_id"] = device_id
         self.send("register", username, **extra)
         if consume:
             return self.recv_initial()

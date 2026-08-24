@@ -179,6 +179,16 @@ class Database:
                 )
             ''')
             cursor.execute('''
+                CREATE TABLE IF NOT EXISTS file_request_resolutions (
+                    message_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    action TEXT NOT NULL,      -- 'accept' or 'reject'
+                    device_id TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (message_id, username)
+                )
+            ''')
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS message_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     message_id TEXT UNIQUE NOT NULL,
@@ -566,6 +576,37 @@ class Database:
                 WHERE receiver = ? AND status != 'recalled'
             ''', (receiver,))
             return cursor.fetchall()
+
+    def record_file_resolution(self, message_id, username, action, device_id):
+        """记录某用户对文件请求（私聊/群组）的响应及所用设备（阶段 L 多端前置）。
+
+        某设备接受/拒绝后，其他设备再响应同一请求时据此提示
+        "该文件已在XXX被接受/拒绝"，而非"文件请求不存在"。幂等：同
+        (message_id, username) 重复记录覆盖为最新一次。
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO file_request_resolutions
+                        (message_id, username, action, device_id)
+                    VALUES (?, ?, ?, ?)
+                ''', (message_id, username, action, device_id))
+                conn.commit()
+                return True
+        except sqlite3.Error as e:
+            logging.error(f"记录文件响应失败: {e}")
+            return False
+
+    def get_file_resolution(self, message_id, username):
+        """查询某用户对文件请求的既有响应，返回 (action, device_id) 或 None。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT action, device_id FROM file_request_resolutions
+                WHERE message_id = ? AND username = ?
+            ''', (message_id, username))
+            return cursor.fetchone()
 
     def mark_file_request_recalled(self, message_id):
         """阶段 K 缺陷修复（P-61）：撤回个人文件请求——保留请求行并标记
@@ -1553,6 +1594,13 @@ class Database:
                     WHERE timestamp <= datetime('now', '-' || ? || ' days')
                 ''', (expire_days,))
                 group_deleted = cursor.rowcount
+
+                # 清理过期的文件响应记录（阶段 L 多端前置：某设备接受/拒绝
+                # 后的提示依据，7 天后连同请求一并清理）
+                cursor.execute('''
+                    DELETE FROM file_request_resolutions
+                    WHERE timestamp <= datetime('now', '-' || ? || ' days')
+                ''', (expire_days,))
 
                 conn.commit()
                 for p in private_paths + group_paths:

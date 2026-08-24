@@ -8,6 +8,7 @@ import 'dart:collection';
 import 'package:flutter/foundation.dart';
 
 import '../models/chat_models.dart';
+import 'message_cache.dart';
 
 class AppState extends ChangeNotifier {
   AppState._();
@@ -540,6 +541,8 @@ class AppState extends ChangeNotifier {
     _currentChat = null;
     _noticeQueue.clear();
     _log('已断开连接');
+    // 阶段 L3：退出登录清空本地缓存（防跨账号数据泄漏）
+    MessageCache.clear();
     notifyListeners();
   }
 
@@ -653,6 +656,8 @@ class AppState extends ChangeNotifier {
     // 空 messageId 不做去重：不同消息不得因空 id 被合并丢失
     if (msg.messageId.isNotEmpty && _messageMap.containsKey(msg.messageId)) {
       _messageMap[msg.messageId]!.status = msg.status;
+      // 阶段 L3：去重更新同样落盘（状态演进 sent→delivered 持久化）
+      MessageCache.persist(chatKey, _messageMap[msg.messageId]!);
       notifyListeners();
       return;
     }
@@ -661,6 +666,8 @@ class AppState extends ChangeNotifier {
     if (msg.messageId.isNotEmpty) {
       _messageMap[msg.messageId] = msg;
     }
+    // 阶段 L3：任何到达/发出的消息落盘（本地缓存，离线可读 + 启动秒开）
+    MessageCache.persist(chatKey, msg);
     // 未读计数：仅 status=sent（真正的未读消息），且非自己发送，且非当前会话（阶段 E）
     // 已读历史（delivered）和上滑加载的历史不计未读
     if (msg.status == 'sent' &&
@@ -683,6 +690,8 @@ class AppState extends ChangeNotifier {
       list.add(msg);
       _messageMap[msg.messageId] = msg;
       inserted++;
+      // 阶段 L3：历史消息同样落盘（增量同步合并的持久化基础）
+      MessageCache.persist(chatKey, msg);
     }
     // 按 timestamp 升序排序（旧消息在前，新消息在后）
     if (inserted > 0) {

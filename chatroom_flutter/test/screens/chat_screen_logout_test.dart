@@ -9,6 +9,7 @@
 // ============================================================
 
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -45,7 +46,11 @@ Future<void> pumpChat(WidgetTester tester, MockSocketService socket) async {
 }
 
 void main() {
-  setUp(resetState);
+  setUp(() {
+    resetState();
+    // 阶段 L2：SessionStore.clear() 先删钥匙串再清旧明文，注入内存 mock
+    FlutterSecureStorage.setMockInitialValues({});
+  });
 
   group('退出登录清除 session（H3 记住我语义）', () {
     testWidgets('点击退出 → disconnect + session 全部清除', (tester) async {
@@ -83,8 +88,8 @@ void main() {
       // 已回到登录页，session 已清除 → 字段为空
       expect(find.text('登录'), findsWidgets);
       expect(find.textContaining('自动登录'), findsNothing);
-      final usernameField = tester.widget<RawTextField>(
-          find.byKey(const ValueKey('username_field')));
+      final usernameField = tester
+          .widget<RawTextField>(find.byKey(const ValueKey('username_field')));
       expect(usernameField.controller.text, '');
     });
 

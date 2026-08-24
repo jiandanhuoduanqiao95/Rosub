@@ -19,16 +19,12 @@ class GroupHandler:
                 if group_id:
                     self.server.guarded_send(ssock, "chat", f"群组 {group_name} 创建成功，ID: {group_id}")
                     logging.info(f"用户 {username} 创建群组: {group_name}, ID={group_id}")
-                    # 通知客户端刷新群组列表
+                    # 通知客户端刷新群组列表（阶段 L1：该用户名所有在线会话）
                     self.notify_group_members(group_id, "chat", f"{username} 创建了群组 {group_name}", from_user="系统")
-                    with self.server.client_map_lock:
-                        if username in self.server.client_map:
-                            # 发送全部群组列表，而非仅新创建的群组
-                            groups = self.server.db.get_user_groups(username)
-                            list_sock = self.server.client_map[username]
-                    if list_sock:
-                        self.server.guarded_send(list_sock, "list_groups",
-                                     json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
+                    self.server.broadcast_to_user(
+                        username, "list_groups",
+                        json.dumps([{"id": g[0], "group_name": g[1]}
+                                    for g in self.server.db.get_user_groups(username)]))
                 else:
                     self.server.guarded_send(ssock, "error", "群组创建失败，可能已存在")
                     logging.error(f"用户 {username} 创建群组失败: {group_name}")
@@ -50,14 +46,11 @@ class GroupHandler:
                     self.server.db.join_group(group_id, username)
                     self.server.guarded_send(ssock, "chat", f"已加入群组 {group_id}")
                     logging.info(f"用户 {username} 加入群组: {group_id}")
-                    # 通知客户端刷新群组列表
-                    list_sock = None
-                    with self.server.client_map_lock:
-                        if username in self.server.client_map:
-                            groups = self.server.db.get_user_groups(username)
-                            list_sock = self.server.client_map[username]
-                    if list_sock:
-                        self.server.guarded_send(list_sock, "list_groups", json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
+                    # 通知客户端刷新群组列表（阶段 L1：该用户名所有在线会话）
+                    self.server.broadcast_to_user(
+                        username, "list_groups",
+                        json.dumps([{"id": g[0], "group_name": g[1]}
+                                    for g in self.server.db.get_user_groups(username)]))
                 else:
                     self.server.guarded_send(ssock, "error", "您已在群组中")
                     logging.warning(f"用户 {username} 尝试重复加入群组: {group_id}")
@@ -199,6 +192,18 @@ class GroupHandler:
             message_id = header.get("message_id")
             response = header.get("response")
             group_id = header.get("group_id")
+            # 阶段 L 多端前置：该成员在其它设备已接受/拒绝过此群组文件 →
+            # 提示"该文件已在XXX被接受/拒绝"，而非"群组文件请求不存在"
+            prior = self.server.db.get_file_resolution(message_id, username)
+            if prior:
+                prior_action, prior_device = prior
+                action_text = "接受" if prior_action == "accept" else "拒绝"
+                device_name = prior_device or "default"
+                self.server.guarded_send(
+                    ssock, "error", f"该文件已在{device_name}被{action_text}")
+                logging.info(f"群组文件响应重复: 用户={username}, 消息ID={message_id}, "
+                             f"已在设备 {device_name} 被{action_text}")
+                return
             file_request = self.server.db.get_group_file_request(message_id)
             if not file_request:
                 self.server.guarded_send(ssock, "error", f"群组文件请求 {message_id} 不存在")
@@ -220,6 +225,10 @@ class GroupHandler:
                 logging.warning(f"群组文件响应失败: 用户 {username} 不在群组 {group_id} 中")
                 return
             self.server.db.save_group_file_response(message_id, group_id, username, response)
+            # 阶段 L 多端前置：记录响应设备，供该成员其他设备提示"该文件已在XXX被接受/拒绝"
+            self.server.db.record_file_resolution(
+                message_id, username, response,
+                self.server.device_id_of(ssock))
             if response == "accept":
                 # 大文件：把待处理文件转入历史区（原子 rename），DB 存路径
                 history_path = (self.server.db.promote_file_to_history(file_path, message_id)
@@ -228,19 +237,29 @@ class GroupHandler:
                     file_data = b''
                 self.server.db.save_offline_message(sender, username, "file", file_data, filename=filename, message_id=message_id, file_path=history_path)
                 self.server.db.save_message_history(sender, username, "file", file_data, filename=filename, message_id=message_id, file_path=history_path)
-                if self.server.client_map.get(username):
+                # 阶段 L1：群文件送达接受者所有在线会话
+                file_headers = {"from": sender, "filename": filename,
+                                "filesize": filesize, "message_id": message_id}
+                for u_sock in self.server.sessions_of(username):
+                    # P-07 修复：长文件推送前引用接收方 socket——
+                    # 推送期间接收方会话被关闭时 fd 不被释放（延迟关闭），
+                    # 杜绝 SSL 字节写进被 sqlite 复用 fd 的竞态
+                    if history_path and not self.server.acquire_send_sock(u_sock):
+                        continue
                     try:
                         if history_path:
-                            send_file_message(self.server.client_map[username], "file", history_path,
-                                              extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id})
+                            send_file_message(u_sock, "file", history_path,
+                                              extra_headers=file_headers)
                         else:
-                            self.server.guarded_send(self.server.client_map[username], "file", file_data,
-                                         extra_headers={"from": sender, "filename": filename, "filesize": filesize, "message_id": message_id})
+                            self.server.guarded_send(u_sock, "file", file_data,
+                                                     extra_headers=file_headers)
                         logging.info(f"群组文件已传输: {sender} -> {username}, 文件名={filename}, 消息ID={message_id}")
                     except Exception as e:
                         logging.error(f"传输群组文件失败: {sender} -> {username}, 文件名={filename}, 消息ID={message_id}, 错误={e}")
-                        with self.server.client_map_lock:
-                            self.server.client_map.pop(username, None)
+                        self.server.discard_socket(u_sock)
+                    finally:
+                        if history_path:
+                            self.server.release_send_sock(u_sock)
             if self.server.db.all_members_responded(message_id, group_id):
                 self.server.db.delete_group_file_request(message_id)
                 logging.info(f"群组文件请求已删除: 消息ID={message_id}, 所有成员已响应")
@@ -263,20 +282,15 @@ class GroupHandler:
                 if member == from_user and msg_type in ("group_file_request", "group_chat"):
                     logging.info(f"跳过向发送者 {from_user} 发送 {msg_type}: 群组ID={group_id}")
                     continue
-                with self.server.client_map_lock:
-                    member_socket = self.server.client_map.get(member)
-                if member_socket:
-                    try:
-                        self.server.guarded_send(member_socket, msg_type, message,
-                                     extra_headers={"from": from_user, "group_id": str(group_id), **extra_headers})
-                        logging.info(f"向 {member} 发送群组消息: 类型={msg_type}, 群组ID={group_id}")
-                        # 在线成员已实时收到，标记 offline_messages 为 delivered 避免下次登录误计未读
-                        msg_id = extra_headers.get("message_id")
-                        if msg_id:
-                            self.server.db.update_message_status(f"{msg_id}_{member}", 'delivered')
-                    except Exception as e:
-                        logging.error(f"向 {member} 发送群组消息失败: {e}")
-                        with self.server.client_map_lock:
-                            self.server.client_map.pop(member, None)
+                # 阶段 L1：群消息到达成员所有在线会话（会话级推送）
+                delivered = self.server.broadcast_to_user(
+                    member, msg_type, message,
+                    extra_headers={"from": from_user, "group_id": str(group_id), **extra_headers})
+                if delivered:
+                    logging.info(f"向 {member} 发送群组消息: 类型={msg_type}, 群组ID={group_id}")
+                    # 在线成员已实时收到，标记 offline_messages 为 delivered 避免下次登录误计未读
+                    msg_id = extra_headers.get("message_id")
+                    if msg_id:
+                        self.server.db.update_message_status(f"{msg_id}_{member}", 'delivered')
         except Exception as e:
             logging.error(f"通知群组 {group_id} 成员失败: {e}")
