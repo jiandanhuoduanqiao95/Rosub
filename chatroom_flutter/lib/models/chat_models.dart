@@ -261,11 +261,23 @@ class Group {
   final int id;
   final String name;
   final List<String> members;
+  // 阶段 M1/M3：群主标识 / 群头像 / 新成员历史可见性（list_groups 推送扩展）
+  final String owner;
+  final String avatar;
+  final bool historyVisible;
+  final int historyLimit;
+  // 阶段 M：群成员数（群组搜索结果 group_search_response 携带）
+  final int memberCount;
 
   Group({
     required this.id,
     required this.name,
     this.members = const [],
+    this.owner = '',
+    this.avatar = '',
+    this.historyVisible = true,
+    this.historyLimit = 50,
+    this.memberCount = 0,
   });
 
   /// 聊天窗口中使用的 key
@@ -273,6 +285,9 @@ class Group {
 
   /// 显示用名称
   String get displayName => '$name (ID:$id)';
+
+  /// 当前用户是否为该群群主（阶段 M1）
+  bool isOwner(String username) => owner.isNotEmpty && owner == username;
 
   factory Group.fromJson(Map<String, dynamic> json) {
     // 防御性解析：服务端字段类型漂移（数字/字符串混用）时优雅降级，不抛异常
@@ -285,10 +300,122 @@ class Group {
     final members = rawMembers is List
         ? rawMembers.map((e) => e.toString()).toList()
         : <String>[];
+    // 阶段 M1/M3：治理字段（缺省兼容旧服务端推送）
+    final rawOwner = json['created_by'];
+    final owner = rawOwner is String ? rawOwner : (rawOwner?.toString() ?? '');
+    final rawAvatar = json['avatar'];
+    final avatar = rawAvatar is String ? rawAvatar : (rawAvatar?.toString() ?? '');
+    final rawVisible = json['history_visible'];
+    bool historyVisible = true;
+    if (rawVisible is int) {
+      historyVisible = rawVisible != 0;
+    } else if (rawVisible is String) {
+      historyVisible = rawVisible != '0';
+    }
+    final rawLimit = json['history_limit'];
+    final historyLimit = rawLimit is int
+        ? rawLimit
+        : (int.tryParse(rawLimit?.toString() ?? '') ?? 50);
+    final rawMemberCount = json['member_count'];
+    final memberCount = rawMemberCount is int
+        ? rawMemberCount
+        : (int.tryParse(rawMemberCount?.toString() ?? '') ?? 0);
     return Group(
       id: id,
       name: name,
       members: members,
+      owner: owner,
+      avatar: avatar,
+      historyVisible: historyVisible,
+      historyLimit: historyLimit,
+      memberCount: memberCount,
+    );
+  }
+}
+
+/// 群邀请（阶段 M2：P1-17 邀请制，group_invite 推送）
+class GroupInvite {
+  final int groupId;
+  final String groupName;
+  final String inviter;
+
+  const GroupInvite({
+    required this.groupId,
+    this.groupName = '',
+    this.inviter = '',
+  });
+
+  factory GroupInvite.fromJson(Map<String, dynamic> json) {
+    final rawId = json['group_id'] ?? json['groupId'];
+    final groupId =
+        rawId is int ? rawId : (int.tryParse(rawId?.toString() ?? '') ?? 0);
+    final rawName = json['group_name'] ?? json['groupName'];
+    final groupName = rawName is String ? rawName : (rawName?.toString() ?? '');
+    final rawInviter = json['from'] ?? json['inviter'];
+    final inviter =
+        rawInviter is String ? rawInviter : (rawInviter?.toString() ?? '');
+    return GroupInvite(
+      groupId: groupId,
+      groupName: groupName,
+      inviter: inviter,
+    );
+  }
+}
+
+/// 文件收发记录（阶段 M8：P1-7 文件收发管理页，file_list_response 推送）
+class FileRecord {
+  final String filename;
+  final int filesize;
+  final String sender;
+  final String receiver;
+  final String messageId;
+  final DateTime timestamp;
+  final int? groupId;
+  final String status;
+
+  const FileRecord({
+    required this.filename,
+    required this.filesize,
+    required this.sender,
+    required this.receiver,
+    required this.messageId,
+    required this.timestamp,
+    this.groupId,
+    this.status = 'sent',
+  });
+
+  bool get isGroupFile => groupId != null;
+
+  factory FileRecord.fromJson(Map<String, dynamic> json) {
+    final rawSize = json['filesize'];
+    final filesize = rawSize is int
+        ? rawSize
+        : (int.tryParse(rawSize?.toString() ?? '') ?? 0);
+    final rawTs = json['timestamp'];
+    DateTime timestamp;
+    if (rawTs is String) {
+      timestamp = DateTime.tryParse(rawTs.replaceFirst(' ', 'T')) ??
+          DateTime.now();
+    } else if (rawTs is DateTime) {
+      timestamp = rawTs;
+    } else {
+      timestamp = DateTime.now();
+    }
+    final rawGroupId = json['group_id'] ?? json['groupId'];
+    final groupId = rawGroupId is int
+        ? rawGroupId
+        : (rawGroupId == null
+            ? null
+            : (int.tryParse(rawGroupId.toString()) ?? 0));
+    return FileRecord(
+      filename: (json['filename'] as String?) ?? '',
+      filesize: filesize,
+      sender: (json['sender'] as String?) ?? '',
+      receiver: (json['receiver'] as String?) ?? '',
+      messageId: (json['message_id'] as String?) ?? '',
+      timestamp: timestamp,
+      groupId: groupId,
+      status: (json['status'] as String?) ?? 'sent',
     );
   }
 }

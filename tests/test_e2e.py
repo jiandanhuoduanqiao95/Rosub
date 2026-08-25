@@ -424,9 +424,8 @@ class TestE2EGroupScenarios:
         groups = json.loads(d.decode())
         group_id = str(groups[0]["id"])
 
-        # bob 加入
-        bob.send("join_group", group_id)
-        bob.drain(timeout=1.0)  # 消费加入响应和通知
+        # bob 加入（阶段 M：join_group 改为申请制，测试前置直接落库）
+        srv.server.db.join_group(int(group_id), "bob")
 
         # alice 发群聊（先清管道）
         alice.drain(timeout=0.5)

@@ -277,9 +277,8 @@ class TestAsyncE2EGroup:
         groups = json.loads(d.decode())
         gid = str(groups[0]["id"])
 
-        # bob 加入
-        await bob.send("join_group", gid)
-        await bob.drain(1.0)
+        # bob 加入（阶段 M：join_group 改为申请制，测试前置直接落库）
+        tcp_server.db.join_group(int(gid), "ben")
 
         # alice 发群聊，bob 并发收到
         mid = str(uuid.uuid4())

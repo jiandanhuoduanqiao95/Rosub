@@ -212,8 +212,7 @@ class TestSessionLevelPush:
         dev1.send("create_group", "multidev")
         dev1.drain(timeout=0.8)
         gid = harness.db.get_user_groups("alice")[0][0]
-        bob.send("join_group", str(gid))
-        bob.drain(timeout=0.8)
+        harness.db.join_group(gid, "bob")
 
         # alice 第二设备上线后 bob 发群聊
         dev2 = _alice_dev2(harness)
@@ -655,8 +654,7 @@ class TestMultiDeviceFileResolve:
         alice.send("create_group", "L1resgroup")
         alice.drain(timeout=0.8)
         gid = harness.db.get_user_groups("alice")[0][0]
-        bob1.send("join_group", str(gid))
-        bob1.drain(timeout=0.8)
+        harness.db.join_group(gid, "bob")
 
         # bob 第二设备上线
         bob2 = _login(harness, "bob", "password456", device_id=DEV2)

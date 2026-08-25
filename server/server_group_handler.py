@@ -3,9 +3,53 @@ import logging
 from protocol import send_message, send_file_message
 import uuid
 
+
+def group_id_from_body(data):
+    """解析消息体中的群组 ID（int）；非法返回 None。"""
+    try:
+        return int(data.decode("utf-8").strip())
+    except (ValueError, TypeError):
+        return None
+
+
 class GroupHandler:
     def __init__(self, server):
         self.server = server
+
+    def _request_join(self, group_id, username, ssock, message=None):
+        """入群申请（P1-17 申请制）：非成员 + 无 pending → 建申请并通知群主。
+
+        join_group（旧客户端消息类型）与 request_join_group 共用本流程：
+        输入群组 ID 加入必须经群主审批，不再直接加入。
+        message 为可选验证消息（P-11 用户反馈：申请可附验证消息）。
+        """
+        if group_id is None:
+            self.server.guarded_send(ssock, "error", "无效的群组ID")
+            return
+        info = self.server.db.get_group_info(group_id)
+        if not info:
+            self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+            return
+        if self.server.db.is_group_member(group_id, username):
+            self.server.guarded_send(ssock, "error", "您已在群组中")
+            return
+        if not self.server.db.request_join_group(group_id, username, message):
+            self.server.guarded_send(ssock, "error", "入群申请已发送，请等待群主审批")
+            return
+        self.server.guarded_send(ssock, "chat", "已发送入群申请，请等待群主审批")
+        logging.info(f"入群申请: {username} -> 群组 {group_id}, "
+                     f"验证消息={message or ''}")
+        # 通知群主（在线实时 / 离线保存），携带验证消息
+        notice = f"{username} 请求加入群组 {info['group_name']}（ID:{group_id}）"
+        if message:
+            notice += f"：{message}"
+        if self.server.broadcast_to_user(info["created_by"], "chat", notice,
+                                         extra_headers={"from": "系统"}):
+            logging.info(f"已通知群主: {info['created_by']}")
+        else:
+            self.server.db.save_offline_message(
+                "系统", info["created_by"], "chat", notice.encode("utf-8"),
+                message_id=str(uuid.uuid4()))
 
     def handle_group_message(self, username, ssock, msg_type, header, data):
         if msg_type == "create_group":
@@ -22,9 +66,7 @@ class GroupHandler:
                     # 通知客户端刷新群组列表（阶段 L1：该用户名所有在线会话）
                     self.notify_group_members(group_id, "chat", f"{username} 创建了群组 {group_name}", from_user="系统")
                     self.server.broadcast_to_user(
-                        username, "list_groups",
-                        json.dumps([{"id": g[0], "group_name": g[1]}
-                                    for g in self.server.db.get_user_groups(username)]))
+                        username, "list_groups", self.server.group_list_json(username))
                 else:
                     self.server.guarded_send(ssock, "error", "群组创建失败，可能已存在")
                     logging.error(f"用户 {username} 创建群组失败: {group_name}")
@@ -33,33 +75,50 @@ class GroupHandler:
                 logging.error(f"用户 {username} 创建群组失败: {str(e)}")
 
         elif msg_type == "join_group":
+            # 阶段 M（P1-17 用户决策修订）：输入群组 ID 加入改为**申请制**——
+            # 创建入群申请并通知群主审批，不再直接加入（与 request_join_group
+            # 同语义；旧客户端消息类型向后兼容复用同一审批流）
+            self._request_join(group_id_from_body(data), username, ssock,
+                               message=header.get("message"))
+
+        elif msg_type == "request_join_group":
+            self._request_join(group_id_from_body(data), username, ssock,
+                               message=header.get("message"))
+
+        elif msg_type == "search_groups":
+            # 阶段 M（群组搜索入口）：按群名模糊搜索，排除自己已加入的群
+            keyword = (header.get("keyword") or "").strip()
+            if not keyword:
+                self.server.guarded_send(ssock, "error", "搜索关键字不能为空")
+                logging.warning(f"群组搜索失败: 用户={username}, 缺少关键字")
+                return
+            results = self.server.db.search_groups(keyword, username=username)
+            self.server.guarded_send(ssock, "group_search_response",
+                                     json.dumps(results))
+            logging.info(f"群组搜索: 用户={username}, 关键字={keyword}, "
+                         f"返回={len(results)}条")
+
+        elif msg_type == "list_join_requests":
+            # 阶段 M（P1-17）：群主拉取待审批入群申请列表
             try:
-                group_id = int(data.decode("utf-8").strip())
-                with self.server.db._get_connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute('SELECT 1 FROM groups WHERE id = ?', (group_id,))
-                    if not cursor.fetchone():
-                        self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
-                        logging.error(f"用户 {username} 尝试加入不存在的群组: {group_id}")
-                        return
-                if not self.server.db.is_group_member(group_id, username):
-                    self.server.db.join_group(group_id, username)
-                    self.server.guarded_send(ssock, "chat", f"已加入群组 {group_id}")
-                    logging.info(f"用户 {username} 加入群组: {group_id}")
-                    # 通知客户端刷新群组列表（阶段 L1：该用户名所有在线会话）
-                    self.server.broadcast_to_user(
-                        username, "list_groups",
-                        json.dumps([{"id": g[0], "group_name": g[1]}
-                                    for g in self.server.db.get_user_groups(username)]))
-                else:
-                    self.server.guarded_send(ssock, "error", "您已在群组中")
-                    logging.warning(f"用户 {username} 尝试重复加入群组: {group_id}")
-            except ValueError:
+                group_id = int(header.get("group_id"))
+            except (ValueError, TypeError):
                 self.server.guarded_send(ssock, "error", "无效的群组ID")
-                logging.error(f"用户 {username} 提供无效的群组ID: {data.decode('utf-8')}")
-            except Exception as e:
-                self.server.guarded_send(ssock, "error", f"加入群组失败: {str(e)}")
-                logging.error(f"用户 {username} 加入群组失败: {str(e)}")
+                return
+            info = self.server.db.get_group_info(group_id)
+            if not info:
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                return
+            if info["created_by"] != username:
+                self.server.guarded_send(ssock, "error", "只有群主可以查看入群申请")
+                return
+            requests = self.server.db.get_pending_group_join_requests_detail(group_id)
+            self.server.guarded_send(ssock, "admin_response", json.dumps([
+                {"username": u, "message": m} for u, m in requests
+            ]), extra_headers={"response_type": "list_join_requests",
+                               "group_id": str(group_id)})
+            logging.info(f"待审批入群申请查询: 群主={username}, 群组={group_id}, "
+                         f"待审批={len(requests)}人")
 
         if msg_type == "leave_group":
             try:
@@ -159,8 +218,8 @@ class GroupHandler:
                 logging.error(f"用户 {username} 发送群组消息失败: {str(e)}")
 
         elif msg_type == "list_groups":
-            groups = self.server.db.get_user_groups(username)
-            self.server.guarded_send(ssock, "list_groups", json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
+            self.server.guarded_send(ssock, "list_groups",
+                                     self.server.group_list_json(username))
             logging.info(f"发送群组列表给用户: {username}")
 
         elif msg_type == "list_group_members":
@@ -238,8 +297,12 @@ class GroupHandler:
                 self.server.db.save_offline_message(sender, username, "file", file_data, filename=filename, message_id=message_id, file_path=history_path)
                 self.server.db.save_message_history(sender, username, "file", file_data, filename=filename, message_id=message_id, file_path=history_path)
                 # 阶段 L1：群文件送达接受者所有在线会话
+                # 阶段 M8（P1-5）：推送携带 sha256（接收方校验依据）
+                group_extras = self.server.db.get_group_file_request_extras(message_id)
+                group_sha256 = (group_extras or {}).get("sha256", "")
                 file_headers = {"from": sender, "filename": filename,
-                                "filesize": filesize, "message_id": message_id}
+                                "filesize": filesize, "message_id": message_id,
+                                "sha256": group_sha256}
                 for u_sock in self.server.sessions_of(username):
                     # P-07 修复：长文件推送前引用接收方 socket——
                     # 推送期间接收方会话被关闭时 fd 不被释放（延迟关闭），
@@ -265,6 +328,345 @@ class GroupHandler:
                 logging.info(f"群组文件请求已删除: 消息ID={message_id}, 所有成员已响应")
             else:
                 logging.info(f"群组文件请求未删除: 消息ID={message_id}, 仍有成员未响应")
+
+        # ============================================================
+        # 阶段 M1（P1-16 群主权限）
+        # ============================================================
+
+        elif msg_type == "kick_member":
+            try:
+                group_id = int(header.get("group_id"))
+                target = (header.get("target") or "").strip()
+            except (ValueError, TypeError):
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                return
+            info = self.server.db.get_group_info(group_id)
+            if not info:
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                return
+            if info["created_by"] != username:
+                self.server.guarded_send(ssock, "error", "只有群主可以移出成员")
+                return
+            if target == username:
+                self.server.guarded_send(ssock, "error", "不能移出自己")
+                return
+            if info["created_by"] == target:
+                self.server.guarded_send(ssock, "error", "不能移出群主")
+                return
+            if not self.server.db.is_group_member(group_id, target):
+                self.server.guarded_send(ssock, "error", f"用户 {target} 不在群组中")
+                return
+            if self.server.db.kick_group_member(group_id, username, target):
+                self.server.guarded_send(ssock, "chat", f"已将 {target} 移出群组")
+                logging.info(f"群主 {username} 将 {target} 移出群组 {group_id}")
+                # 被踢者通知（在线实时 / 离线保存）+ 群列表刷新
+                notice = f"您已被群主移出群组 {info['group_name']}"
+                if self.server.broadcast_to_user(target, "chat", notice,
+                                                 extra_headers={"from": "系统"}):
+                    logging.info(f"已通知被移出成员: {target}")
+                else:
+                    self.server.db.save_offline_message(
+                        "系统", target, "chat", notice.encode("utf-8"),
+                        message_id=str(uuid.uuid4()))
+                self.server.broadcast_to_user(target, "list_groups",
+                                              self.server.group_list_json(target))
+                # 其余成员通知（被踢者已不在成员表，天然排除）
+                self.notify_group_members(group_id, "chat",
+                                          f"{target} 已被移出群组", from_user="系统")
+            else:
+                self.server.guarded_send(ssock, "error", "移出成员失败")
+
+        elif msg_type == "transfer_owner":
+            try:
+                group_id = int(header.get("group_id"))
+                target = (header.get("target") or "").strip()
+            except (ValueError, TypeError):
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                return
+            info = self.server.db.get_group_info(group_id)
+            if not info:
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                return
+            if info["created_by"] != username:
+                self.server.guarded_send(ssock, "error", "只有群主可以转让群主")
+                return
+            if target == username:
+                self.server.guarded_send(ssock, "error", "不能转让给自己")
+                return
+            if not self.server.db.is_group_member(group_id, target):
+                self.server.guarded_send(ssock, "error", f"用户 {target} 不在群组中")
+                return
+            if self.server.db.transfer_group_owner(group_id, username, target):
+                self.server.guarded_send(ssock, "chat", f"已将群主转让给 {target}")
+                logging.info(f"群主已转让: {username} -> {target}, 群组={group_id}")
+                # 新群主通知（在线实时 / 离线保存）
+                notice = f"您已成为群组 {info['group_name']} 的群主"
+                if self.server.broadcast_to_user(target, "chat", notice,
+                                                 extra_headers={"from": "系统"}):
+                    logging.info(f"已通知新群主: {target}")
+                else:
+                    self.server.db.save_offline_message(
+                        "系统", target, "chat", notice.encode("utf-8"),
+                        message_id=str(uuid.uuid4()))
+                # 其余成员通知（排除操作者与新群主）
+                for member in self.server.db.get_group_members(group_id):
+                    if member in (username, target):
+                        continue
+                    self.server.broadcast_to_user(
+                        member, "chat", f"群主已变更为 {target}",
+                        extra_headers={"from": "系统"})
+                # 全体成员列表刷新（客户端据此更新群主标识）
+                for member in self.server.db.get_group_members(group_id):
+                    self.server.broadcast_to_user(
+                        member, "list_groups", self.server.group_list_json(member))
+            else:
+                self.server.guarded_send(ssock, "error", "转让群主失败")
+
+        elif msg_type == "rename_group":
+            try:
+                group_id = int(header.get("group_id"))
+            except (ValueError, TypeError):
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                return
+            new_name = (header.get("name") or "").strip()
+            info = self.server.db.get_group_info(group_id)
+            if not info:
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                return
+            if info["created_by"] != username:
+                self.server.guarded_send(ssock, "error", "只有群主可以修改群组名称")
+                return
+            if not new_name:
+                self.server.guarded_send(ssock, "error", "群组名称不能为空")
+                return
+            if self.server.db.rename_group(group_id, username, new_name):
+                self.server.guarded_send(ssock, "chat", f"群组已改名为 {new_name}")
+                logging.info(f"群组改名: {group_id} -> {new_name}, 操作者={username}")
+                self.server.broadcast_to_user(
+                    username, "list_groups", self.server.group_list_json(username))
+                # 其余成员逐个：通知 + 列表刷新
+                for member in self.server.db.get_group_members(group_id):
+                    if member == username:
+                        continue
+                    self.server.broadcast_to_user(
+                        member, "chat", f"群组已改名为 {new_name}",
+                        extra_headers={"from": "系统"})
+                    self.server.broadcast_to_user(
+                        member, "list_groups", self.server.group_list_json(member))
+            else:
+                self.server.guarded_send(ssock, "error", "群组名称已存在或修改失败")
+
+        elif msg_type == "set_group_avatar":
+            try:
+                group_id = int(header.get("group_id"))
+            except (ValueError, TypeError):
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                return
+            avatar = header.get("avatar") or ""
+            info = self.server.db.get_group_info(group_id)
+            if not info:
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                return
+            if info["created_by"] != username:
+                self.server.guarded_send(ssock, "error", "只有群主可以设置群头像")
+                return
+            if self.server.db.set_group_avatar(group_id, username, avatar):
+                self.server.guarded_send(ssock, "chat", "群头像已更新")
+                logging.info(f"群头像已更新: 群组={group_id}, 操作者={username}")
+                # 全体成员列表刷新（携带 avatar）
+                for member in self.server.db.get_group_members(group_id):
+                    self.server.broadcast_to_user(
+                        member, "list_groups", self.server.group_list_json(member))
+            else:
+                self.server.guarded_send(ssock, "error", "设置群头像失败")
+
+        # ============================================================
+        # 阶段 M3（P1-18 新成员历史可见性）
+        # ============================================================
+
+        elif msg_type == "set_group_history_visible":
+            try:
+                group_id = int(header.get("group_id"))
+                visible = header.get("visible", "1")
+                limit = int(header.get("limit", "50") or "50")
+            except (ValueError, TypeError):
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                return
+            info = self.server.db.get_group_info(group_id)
+            if not info:
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                return
+            if info["created_by"] != username:
+                self.server.guarded_send(ssock, "error", "只有群主可以设置历史可见性")
+                return
+            if visible not in ("0", "1"):
+                self.server.guarded_send(ssock, "error", "无效的历史可见性设置")
+                return
+            if self.server.db.set_group_history_visibility(
+                    group_id, username, visible == "1", limit):
+                state_text = "开启" if visible == "1" else "关闭"
+                self.server.guarded_send(
+                    ssock, "chat",
+                    f"已设置群组历史可见性：{state_text}（新成员可见最近 {limit} 条）")
+                logging.info(f"群组历史可见性已设置: 群组={group_id}, "
+                             f"visible={visible}, limit={limit}")
+                # 全体成员 list_groups 刷新（携带 history_visible/history_limit，
+                # 客户端开关状态据此同步——否则开关一直显示旧值，缺陷修复）
+                for member in self.server.db.get_group_members(group_id):
+                    self.server.broadcast_to_user(
+                        member, "list_groups", self.server.group_list_json(member))
+            else:
+                self.server.guarded_send(ssock, "error", "设置历史可见性失败")
+
+        # ============================================================
+        # 阶段 M2（P1-17 入群审批/邀请制）
+        # ============================================================
+
+        elif msg_type == "approve_join_request":
+            try:
+                group_id = int(header.get("group_id"))
+                target = (header.get("target") or "").strip()
+            except (ValueError, TypeError):
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                return
+            info = self.server.db.get_group_info(group_id)
+            if not info:
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                return
+            if info["created_by"] != username:
+                self.server.guarded_send(ssock, "error", "只有群主可以审批入群申请")
+                return
+            if not self.server.db.has_pending_group_join_request(group_id, target):
+                self.server.guarded_send(ssock, "error", f"没有来自 {target} 的入群申请")
+                return
+            if self.server.db.approve_join_request(group_id, username, target):
+                self.server.guarded_send(ssock, "chat", f"已批准 {target} 加入群组")
+                logging.info(f"入群申请已批准: {target} -> 群组 {group_id}")
+                # 被批准者通知（在线实时 / 离线保存）+ 群列表刷新
+                notice = f"您已加入群组 {info['group_name']}（ID:{group_id}）"
+                if self.server.broadcast_to_user(target, "chat", notice,
+                                                 extra_headers={"from": "系统"}):
+                    logging.info(f"已通知被批准者: {target}")
+                else:
+                    self.server.db.save_offline_message(
+                        "系统", target, "chat", notice.encode("utf-8"),
+                        message_id=str(uuid.uuid4()))
+                self.server.broadcast_to_user(target, "list_groups",
+                                              self.server.group_list_json(target))
+                # 其余成员通知（排除操作者与被批准者）
+                for member in self.server.db.get_group_members(group_id):
+                    if member in (username, target):
+                        continue
+                    self.server.broadcast_to_user(
+                        member, "chat", f"{target} 已加入群组",
+                        extra_headers={"from": "系统"})
+            else:
+                self.server.guarded_send(ssock, "error", "批准入群申请失败")
+
+        elif msg_type == "reject_join_request":
+            try:
+                group_id = int(header.get("group_id"))
+                target = (header.get("target") or "").strip()
+            except (ValueError, TypeError):
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                return
+            info = self.server.db.get_group_info(group_id)
+            if not info:
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                return
+            if info["created_by"] != username:
+                self.server.guarded_send(ssock, "error", "只有群主可以拒绝入群申请")
+                return
+            if not self.server.db.has_pending_group_join_request(group_id, target):
+                self.server.guarded_send(ssock, "error", f"没有来自 {target} 的入群申请")
+                return
+            if self.server.db.reject_join_request(group_id, username, target):
+                self.server.guarded_send(ssock, "chat", f"已拒绝 {target} 的入群申请")
+                logging.info(f"入群申请已拒绝: {target} -> 群组 {group_id}")
+                notice = "您的入群申请已被拒绝"
+                if self.server.broadcast_to_user(target, "chat", notice,
+                                                 extra_headers={"from": "系统"}):
+                    logging.info(f"已通知被拒者: {target}")
+                else:
+                    self.server.db.save_offline_message(
+                        "系统", target, "chat", notice.encode("utf-8"),
+                        message_id=str(uuid.uuid4()))
+            else:
+                self.server.guarded_send(ssock, "error", "拒绝入群申请失败")
+
+        elif msg_type == "invite_group_member":
+            try:
+                group_id = int(header.get("group_id"))
+                target = (header.get("target") or "").strip()
+            except (ValueError, TypeError):
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                return
+            info = self.server.db.get_group_info(group_id)
+            if not info:
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                return
+            if not self.server.db.is_group_member(group_id, username):
+                self.server.guarded_send(ssock, "error", "您不在此群组中")
+                return
+            if not self.server.db.user_exists(target):
+                self.server.guarded_send(ssock, "error", f"用户 {target} 不存在")
+                return
+            if self.server.db.is_group_member(group_id, target):
+                self.server.guarded_send(ssock, "error", "该用户已在群组中")
+                return
+            if not self.server.db.invite_group_member(group_id, username, target):
+                self.server.guarded_send(ssock, "error", "已向该用户发送过邀请")
+                return
+            self.server.guarded_send(ssock, "chat", f"已邀请 {target} 加入群组")
+            logging.info(f"群邀请: {username} 邀请 {target} 加入群组 {group_id}")
+            # 被邀请者：在线实时推送 group_invite（含群名）；
+            # 离线不存文本通知——邀请持久化于 group_invitations 表，
+            # 登录时由 load_offline_data 补发 group_invite（P-11 用户反馈：
+            # 邀请像好友申请一样保留入口，离线可接收）
+            invite_headers = {"from": username, "group_id": str(group_id),
+                              "group_name": info["group_name"]}
+            self.server.broadcast_to_user(target, "group_invite", "",
+                                          extra_headers=invite_headers)
+
+        elif msg_type == "accept_group_invite":
+            try:
+                group_id = int(header.get("group_id"))
+            except (ValueError, TypeError):
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                return
+            info = self.server.db.get_group_info(group_id)
+            if not info:
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                return
+            if not self.server.db.accept_group_invite(group_id, username):
+                self.server.guarded_send(ssock, "error", "没有来自该群组的邀请")
+                return
+            self.server.guarded_send(ssock, "chat", f"已加入群组 {info['group_name']}")
+            logging.info(f"群邀请已接受: {username} 加入群组 {group_id}")
+            self.server.broadcast_to_user(username, "list_groups",
+                                          self.server.group_list_json(username))
+            # 其余成员通知（排除接受者）
+            for member in self.server.db.get_group_members(group_id):
+                if member == username:
+                    continue
+                self.server.broadcast_to_user(
+                    member, "chat", f"{username} 已加入群组",
+                    extra_headers={"from": "系统"})
+
+        elif msg_type == "decline_group_invite":
+            try:
+                group_id = int(header.get("group_id"))
+            except (ValueError, TypeError):
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                return
+            if not self.server.db.get_group_info(group_id):
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                return
+            if not self.server.db.decline_group_invite(group_id, username):
+                self.server.guarded_send(ssock, "error", "没有来自该群组的邀请")
+                return
+            self.server.guarded_send(ssock, "chat", "已拒绝邀请")
+            logging.info(f"群邀请已拒绝: {username} 拒绝群组 {group_id}")
 
     def notify_group_members(self, group_id, msg_type, message, from_user="系统", extra_headers=None):
         if extra_headers is None:

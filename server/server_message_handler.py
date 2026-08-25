@@ -2,11 +2,12 @@ import logging
 import json
 import uuid
 import os
+import hashlib
 import bcrypt
 from datetime import datetime, timedelta, UTC
 from protocol import (send_message, recv_message, recv_header_only, recv_body,
                       recv_body_to_file, recv_and_forward, send_file_message,
-                      send_message_header_only, _ForwardError)
+                      send_message_header_only, recvall, _ForwardError)
 from server.server_group_handler import GroupHandler
 from server.server_admin_handler import AdminHandler
 from validation import validate_password
@@ -20,6 +21,34 @@ DEFAULT_MAX_FILE_SIZE = 5368709120
 
 # 大文件直传阈值（字节），默认 300MB：超过则服务器不存储、双方在线时边收边转发
 DEFAULT_LARGE_FILE_THRESHOLD = 314572800
+
+
+def recv_body_to_file_append(sock, file_path, length, chunk_size=1024*1024*4):
+    """读取消息体追加写入磁盘文件（阶段 M8 断点续传：不覆盖已有部分）。
+
+    返回实际写入字节数；连接提前关闭返回已写入量（< length）。
+    """
+    written = 0
+    with open(file_path, 'ab') as f:
+        while written < length:
+            packet = recvall(sock, min(chunk_size, length - written))
+            if not packet:
+                break
+            f.write(packet)
+            written += len(packet)
+    return written
+
+
+def _sha256_of_file(file_path, chunk_size=1024*1024*4):
+    """计算磁盘文件的 SHA-256（阶段 M8：小文件完整性校验）。"""
+    digest = hashlib.sha256()
+    with open(file_path, 'rb') as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
 
 class MessageHandler:
     def __init__(self, server):
@@ -79,10 +108,10 @@ class MessageHandler:
         self.server.guarded_send(ssock, "admin_response", json.dumps(users_list), extra_headers={"response_type": "list_friends"})
         logging.info(f"发送初始好友列表给用户: {username}, 好友数={len(users_list)}")
 
-        # 发送群组列表
-        groups = self.server.db.get_user_groups(username)
-        self.server.guarded_send(ssock, "list_groups", json.dumps([{"id": g[0], "group_name": g[1]} for g in groups]))
-        logging.info(f"发送初始群组列表给用户: {username}, 群组数={len(groups)}")
+        # 发送群组列表（阶段 M1 扩展：携带 created_by/avatar，向后兼容）
+        self.server.guarded_send(ssock, "list_groups",
+                                 self.server.group_list_json(username))
+        logging.info(f"发送初始群组列表给用户: {username}, 群组数={len(self.server.db.get_user_groups(username))}")
 
         # 阶段 J 修复（拉黑状态不可逆）：好友备注/分组与黑名单随登录初始数据
         # 一并推送。客户端 Dart SecureSocket 存在连续 add+flush 批次静默丢失
@@ -262,6 +291,22 @@ class MessageHandler:
             except Exception as e:
                 logging.error(f"发送待处理好友请求失败: 请求者={requester}, 接收者={username}, 错误={e}")
 
+        # 加载待处理群邀请（阶段 M：P-11 用户反馈——邀请像好友申请一样
+        # 保留入口，离线用户登录后补发 group_invite，而非仅文本通知）
+        pending_invites = self.server.db.get_pending_group_invitations(username)
+        logging.info(f"用户 {username} 的待处理群邀请: {len(pending_invites)} 条")
+        for group_id, group_name, inviter in pending_invites:
+            try:
+                self.server.guarded_send(
+                    ssock, "group_invite", "",
+                    extra_headers={"from": inviter, "group_id": str(group_id),
+                                   "group_name": group_name})
+                logging.info(f"发送待处理群邀请: 群组={group_id}, 邀请人={inviter}, "
+                             f"接收者={username}")
+            except Exception as e:
+                logging.error(f"发送待处理群邀请失败: 群组={group_id}, "
+                              f"接收者={username}, 错误={e}")
+
     def _handle_file_message(self, username, ssock, header, length):
         """处理 file 消息：大文件（> 阈值）在线直传不落盘；小文件落盘暂存。
 
@@ -274,6 +319,14 @@ class MessageHandler:
             return True
         message_id = header.get("message_id", str(uuid.uuid4()))
         filename = header.get("filename", "received_file")
+        # 阶段 M8（P1-5）：发送方携带的文件 SHA-256（可选，接收方校验依据）
+        sha256_header = header.get("sha256") or ""
+        # 阶段 M8（P1-6 断点续传）：offset > 0 表示在已有部分文件上追加
+        offset_str = header.get("offset", "")
+        try:
+            resume_offset = int(offset_str) if offset_str else 0
+        except (TypeError, ValueError):
+            resume_offset = 0
         # 文件大小限制（阶段 G4）：filesize 头缺失或非法时按消息体实际长度判定
         try:
             effective_size = int(header.get("filesize", ""))
@@ -355,10 +408,12 @@ class MessageHandler:
                     with self.server.client_map_lock:
                         self.server.active_forward_socks.add(recipient_socket)
                 # 先向接收方发送 file 消息头（length = 实际消息体长度），再边收边转发 body
+                # 阶段 M8（P1-5）：sha256 头透传（直传不落盘无法校验，由接收方校验）
                 send_message_header_only(
                     recipient_socket, "file", length,
                     extra_headers={"from": username, "filename": filename,
-                                   "filesize": effective_size, "message_id": message_id})
+                                   "filesize": effective_size, "message_id": message_id,
+                                   "sha256": sha256_header})
                 consumed = recv_and_forward(ssock, recipient_socket, length)
             except _ForwardError as fe:
                 # 目标转发失败（接收方掉线）：只消费尚未读取的剩余 body
@@ -420,11 +475,37 @@ class MessageHandler:
         file_data = b''
         if length > 0:
             file_path = os.path.join(self.server.db._pending_dir(), os.path.basename(message_id))
-            written = recv_body_to_file(ssock, file_path, length)
-            if written < length:
-                self.server.guarded_send(ssock, "error", "文件接收不完整")
-                logging.error(f"文件接收不完整: 消息ID={message_id}, {written}/{length}")
-                return False
+            # 阶段 M8（P1-6 断点续传）：offset > 0 时在已有部分文件上追加
+            # （磁盘已有大小必须与 offset 一致，否则拒绝并保留原数据）
+            if resume_offset > 0:
+                if (os.path.exists(file_path)
+                        and os.path.getsize(file_path) == resume_offset):
+                    written = recv_body_to_file_append(ssock, file_path, length)
+                    if written < length:
+                        self.server.guarded_send(ssock, "error", "文件接收不完整")
+                        logging.error(f"文件接收不完整: 消息ID={message_id}, {written}/{length}")
+                        return False
+                else:
+                    if length > 0:
+                        recv_body(ssock, length)
+                    self.server.guarded_send(ssock, "error", "续传偏移不匹配")
+                    logging.warning(f"续传偏移不匹配: 消息ID={message_id}, "
+                                    f"offset={resume_offset}")
+                    return True
+            else:
+                written = recv_body_to_file(ssock, file_path, length)
+                if written < length:
+                    self.server.guarded_send(ssock, "error", "文件接收不完整")
+                    logging.error(f"文件接收不完整: 消息ID={message_id}, {written}/{length}")
+                    return False
+            # 阶段 M8（P1-5 文件完整性校验）：头带 sha256 且与内容不符 → 拒绝并删除
+            if sha256_header and os.path.exists(file_path):
+                actual_sha = _sha256_of_file(file_path)
+                if actual_sha != sha256_header:
+                    self.server.db._delete_disk_file(file_path)
+                    self.server.guarded_send(ssock, "error", "文件校验失败（SHA-256 不匹配）")
+                    logging.warning(f"文件 SHA-256 校验失败: 消息ID={message_id}")
+                    return True
         # 支持两种群组前缀：中文「群组 」和 Flutter 客户端「group_」
         is_group = target.startswith("群组 ") or target.startswith("group_")
         if is_group:
@@ -444,11 +525,12 @@ class MessageHandler:
                     self.server.guarded_send(ssock, "error", "您不在此群组中")
                     logging.warning(f"文件发送失败: 用户 {username} 不在群组 {group_id} 中")
                     return True
-                self.server.db.save_group_file_request(group_id, username, filename, effective_size, file_data, message_id, file_path=file_path)
+                self.server.db.save_group_file_request(group_id, username, filename, effective_size, file_data, message_id, file_path=file_path, sha256=sha256_header or None)
                 self.group_handler.notify_group_members(
                     group_id, "group_file_request", "",
                     from_user=username,
-                    extra_headers={"filename": filename, "filesize": effective_size, "message_id": message_id}
+                    extra_headers={"filename": filename, "filesize": effective_size,
+                                   "message_id": message_id, "sha256": sha256_header}
                 )
                 logging.info(f"群组文件请求已保存: 群组ID={group_id}, 文件名={filename}, 消息ID={message_id}")
             except ValueError:
@@ -467,12 +549,13 @@ class MessageHandler:
             self.server.guarded_send(ssock, "error", "对方已将您拉黑，无法发送文件")
             logging.warning(f"文件发送失败: {username} -> {target}, 被对方拉黑")
             return True
-        self.server.db.save_file_request(username, target, filename, effective_size, file_data, message_id, file_path=file_path)
+        self.server.db.save_file_request(username, target, filename, effective_size, file_data, message_id, file_path=file_path, sha256=sha256_header or None)
         # 阶段 L1：会话级推送——文件请求到达目标用户所有在线会话
         delivered = self.server.broadcast_to_user(
             target, "file_request", "",
             extra_headers={"from": username, "filename": filename,
-                           "filesize": effective_size, "message_id": message_id})
+                           "filesize": effective_size, "message_id": message_id,
+                           "sha256": sha256_header})
         if delivered:
             logging.info(f"文件请求已发送: {username} -> {target}, 文件名={filename}, 消息ID={message_id}")
         else:
@@ -643,8 +726,12 @@ class MessageHandler:
                         self.server.db.save_message_history(sender, receiver, "file", file_data, filename=filename, message_id=message_id, file_path=history_path)
                         # 阶段 L1：文件送达接收者所有在线会话（会话级推送）
                         receiver_sessions = self.server.sessions_of(receiver)
+                        # 阶段 M8（P1-5）：推送携带 sha256（接收方校验依据）
+                        file_extras = self.server.db.get_file_request_extras(message_id)
+                        file_sha256 = (file_extras or {}).get("sha256", "")
                         file_headers = {"from": sender, "filename": filename,
-                                        "filesize": filesize, "message_id": message_id}
+                                        "filesize": filesize, "message_id": message_id,
+                                        "sha256": file_sha256}
                         file_delivered = 0
                         for r_sock in receiver_sessions:
                             # P-07 修复：长文件推送前引用接收方 socket——
@@ -739,8 +826,34 @@ class MessageHandler:
                         before = self.server.db.get_message_history_timestamp(before_message_id)
                     if group_id:
                         gid = int(group_id)
+                        # 阶段 M3（P1-18 新成员历史可见性）：按成员加入时间过滤
+                        # visible=1（默认）：可见加入前最近 history_limit 条 ∪ 加入后全部
+                        # visible=0：仅可见自己加入之后的消息
+                        since = None
+                        info = self.server.db.get_group_info(gid)
+                        if info:
+                            with self.server.db._get_connection() as conn:
+                                row = conn.execute(
+                                    "SELECT joined_at FROM group_members "
+                                    "WHERE group_id = ? AND username = ?",
+                                    (gid, username)).fetchone()
+                                joined_at = row[0] if row else None
+                            if joined_at:
+                                if info["history_visible"] == 0:
+                                    since = joined_at
+                                else:
+                                    history_limit = info["history_limit"] or 50
+                                    with self.server.db._get_connection() as conn:
+                                        row2 = conn.execute(
+                                            "SELECT MIN(timestamp) FROM ("
+                                            "SELECT timestamp FROM message_history "
+                                            "WHERE group_id = ? AND timestamp < ? "
+                                            "ORDER BY timestamp DESC, id DESC LIMIT ?)",
+                                            (gid, joined_at, history_limit)).fetchone()
+                                    since = row2[0] if (row2 and row2[0]) else joined_at
                         rows = self.server.db.get_message_history_rows(
-                            username, group_id=gid, before=before, limit=limit_int)
+                            username, group_id=gid, before=before, limit=limit_int,
+                            since=since)
                     elif with_user:
                         rows = self.server.db.get_message_history_rows(
                             username, with_user=with_user, before=before, limit=limit_int)
@@ -1681,11 +1794,85 @@ class MessageHandler:
                         log_context=f"消息ID={message_id}, emoji={emoji}, action={effective_action}")
                     logging.info(f"表情回应: {username} 对 {message_id} {effective_action} {emoji}")
 
+                elif msg_type == "file_resume":
+                    # 阶段 M8（P1-6 下载断点续传）：接收方请求从 offset 续传文件
+                    message_id = header.get("message_id")
+                    try:
+                        resume_offset = int(header.get("offset", "0") or "0")
+                    except (TypeError, ValueError):
+                        resume_offset = 0
+                    if resume_offset < 0:
+                        resume_offset = 0
+                    with self.server.db._get_connection() as conn:
+                        row = conn.execute(
+                            "SELECT sender, receiver, filename, file_path "
+                            "FROM message_history "
+                            "WHERE message_id = ? AND message_type = 'file'",
+                            (message_id,)).fetchone()
+                    if not row or not row[3] or not os.path.exists(row[3]):
+                        self.server.guarded_send(ssock, "error", "文件不存在或已过期")
+                        logging.warning(f"文件续传失败: 消息ID={message_id} 不存在")
+                        continue
+                    if row[1] != username:
+                        self.server.guarded_send(ssock, "error", "无权限续传此文件")
+                        logging.warning(f"文件续传失败: 用户 {username} 非接收方")
+                        continue
+                    filesize = os.path.getsize(row[3])
+                    if resume_offset >= filesize:
+                        self.server.guarded_send(ssock, "error", "偏移超出文件大小")
+                        logging.warning(f"文件续传失败: 偏移 {resume_offset} 超出 {filesize}")
+                        continue
+                    # 从 offset 起推送剩余部分（header 携带 offset 供客户端识别续传）
+                    remaining = filesize - resume_offset
+                    from protocol import send_message_header_only as _send_hdr
+                    send_message_header_only(
+                        ssock, "file", remaining,
+                        extra_headers={"from": row[0], "filename": row[2] or "",
+                                       "filesize": str(filesize),
+                                       "message_id": message_id,
+                                       "offset": str(resume_offset)})
+                    with open(row[3], "rb") as f:
+                        f.seek(resume_offset)
+                        sent = 0
+                        while sent < remaining:
+                            chunk = f.read(1024 * 1024 * 4)
+                            if not chunk:
+                                break
+                            ssock.sendall(chunk)
+                            sent += len(chunk)
+                    logging.info(f"文件续传完成: 消息ID={message_id}, "
+                                 f"offset={resume_offset}, 剩余={remaining} 字节")
+
+                elif msg_type == "list_files":
+                    # 阶段 M8（P1-7 文件收发管理页）：按会话聚合文件历史
+                    with_user = header.get("to")
+                    group_id = header.get("group_id")
+                    gid = None
+                    if group_id:
+                        try:
+                            gid = int(group_id)
+                        except (ValueError, TypeError):
+                            self.server.guarded_send(ssock, "error", "无效的群组ID")
+                            continue
+                    files = self.server.db.get_user_file_messages(
+                        username, with_user=with_user, group_id=gid)
+                    self.server.guarded_send(ssock, "file_list_response",
+                                             json.dumps(files))
+                    logging.info(f"文件列表查询: 用户={username}, "
+                                 f"会话={with_user or group_id or '全局'}, "
+                                 f"返回={len(files)}条")
+
                 elif msg_type == "admin_command":
                     self.admin_handler.handle_admin_command(username, ssock, header, data)
 
                 elif msg_type in ("create_group", "join_group", "group_chat", "list_groups",
-                                 "group_file_response", "leave_group", "list_group_members"):
+                                 "group_file_response", "leave_group", "list_group_members",
+                                 "kick_member", "transfer_owner", "rename_group",
+                                 "set_group_avatar", "set_group_history_visible",
+                                 "request_join_group", "approve_join_request",
+                                 "reject_join_request", "invite_group_member",
+                                 "accept_group_invite", "decline_group_invite",
+                                 "search_groups", "list_join_requests"):
                     self.group_handler.handle_group_message(username, ssock, msg_type, header, data)
             except Exception as e:
                 # 阶段 I 修复：单条消息处理异常（如瞬时 SQLite 锁）不得断开整个连接，

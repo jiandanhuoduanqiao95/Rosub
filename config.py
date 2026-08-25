@@ -46,6 +46,11 @@ class Config:
         "database": {
             "path": "users.db",
         },
+        "storage": {
+            "disk_warning_percent": 10,
+            "file_expire_days": 7,
+            "delivered_expire_days": 30,
+        },
         "security": {
             "admin_secret": "",
             "admin_secret_env": "CHATROOM_ADMIN_SECRET",

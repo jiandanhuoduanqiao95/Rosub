@@ -3,8 +3,10 @@ import ssl
 import os
 import sys
 import time
-import threading
+import json
 import logging
+import collections
+import threading
 
 # 确保项目根目录在 Python 路径中（支持直接运行或作为模块导入）
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,6 +26,9 @@ class Server:
         self.db = Database()
         self.client_map_lock = threading.Lock()
         self.client_handler = ClientHandler(self)
+        # 最近日志环形缓冲（阶段 M4：P1-19 服务端状态面板 recent_logs）
+        self.recent_logs = collections.deque(maxlen=200)
+        self._attach_recent_log_handler()
         # 正在被大文件直传转发（recv_and_forward 写入）的 socket 集合：
         # 转发期间禁止向这些连接写入任何其他数据（心跳 pong/kick/推送都会污染 SSL 流）
         self.active_forward_socks = set()
@@ -49,6 +54,92 @@ class Server:
         # 连接（登录/注册流程中）：guarded_send 活性校验对其放行，
         # 保证"密码错误"等认证前错误响应能送达；finally 中移除。
         self.pending_socks = set()
+
+    def _attach_recent_log_handler(self):
+        """把最近日志接入环形缓冲（阶段 M4：状态面板 recent_logs）。"""
+        class _BufferHandler(logging.Handler):
+            def __init__(self, buf):
+                super().__init__()
+                self.buf = buf
+
+            def emit(self, record):
+                try:
+                    self.buf.append(self.format(record))
+                except Exception:
+                    pass
+
+        handler = _BufferHandler(self.recent_logs)
+        handler.setFormatter(
+            logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+        logging.getLogger().addHandler(handler)
+
+    def group_list_json(self, username):
+        """用户群组列表 JSON（含群主/头像/历史可见性，阶段 M1/M3 推送扩展）。
+
+        向后兼容：在既有 {"id", "group_name"} 基础上新增 created_by / avatar /
+        history_visible / history_limit 字段（旧客户端忽略新字段）。
+        """
+        groups = self.db.get_user_groups_detailed(username)
+        return json.dumps([
+            {"id": g[0], "group_name": g[1],
+             "created_by": g[2], "avatar": g[3] or "",
+             "history_visible": g[4], "history_limit": g[5]}
+            for g in groups
+        ])
+
+    # ============================================================
+    # 阶段 M4/M6（P1-19 状态面板 / P1-21 存储治理）
+    # ============================================================
+
+    def check_disk_usage(self, disk_free=None, disk_total=None):
+        """磁盘剩余检查：剩余比例低于 storage.disk_warning_percent（默认 10）
+        时 warn=True。参数可注入（测试/脚本复用，缺省取数据库所在文件系统）。"""
+        if disk_free is None or disk_total is None:
+            try:
+                st = os.statvfs(os.path.dirname(os.path.abspath(self.db.db_name)))
+                disk_free = st.f_bavail * st.f_frsize
+                disk_total = st.f_blocks * st.f_frsize
+            except Exception:
+                disk_free = disk_free if disk_free is not None else 0
+                disk_total = disk_total if disk_total is not None else 1
+        threshold = config.get("storage.disk_warning_percent", 10)
+        warn = disk_total > 0 and (disk_free / disk_total) * 100 < threshold
+        return {"disk_free": disk_free, "disk_total": disk_total,
+                "warn": bool(warn)}
+
+    def run_storage_cleanup(self, days_file=7, days_delivered=30):
+        """存储治理（P1-21）：过期文件请求清理 + 过期已读消息清理。
+
+        返回 {"expired_file_requests", "expired_delivered_messages"}。
+        message_history 为永久表，不参与清理（9.3 契约）。
+        """
+        expired_files = self.db.cleanup_expired_file_requests(days_file)
+        expired_delivered = self.db.cleanup_expired_delivered_messages(days_delivered)
+        logging.info(f"存储治理完成: 过期文件请求={expired_files}, "
+                     f"过期已读消息={expired_delivered}")
+        return {"expired_file_requests": expired_files,
+                "expired_delivered_messages": expired_delivered}
+
+    def get_server_status(self):
+        """服务端状态面板数据（P1-19）：在线/存储/磁盘/日志聚合。"""
+        with self.client_map_lock:
+            online_sessions = len(self.client_map)
+            online_users = len({u for (u, _d) in self.client_map})
+        stats = self.db.get_storage_stats()
+        return {
+            "online_users": online_users,
+            "online_sessions": online_sessions,
+            "total_users": len(self.db.get_all_users()),
+            "total_messages": stats["message_count"],
+            "pending_file_requests": stats["pending_file_requests"],
+            "storage": {
+                "file_store_bytes": stats["file_store_bytes"],
+                "file_count": stats["file_count"],
+                "db_bytes": stats["db_bytes"],
+            },
+            "disk": self.check_disk_usage(),
+            "recent_logs": list(self.recent_logs)[-20:],
+        }
 
     def _is_live_sock(self, sock):
         """该 socket 是否仍是活跃会话（发送前校验，避免写入已关闭的 fd）。

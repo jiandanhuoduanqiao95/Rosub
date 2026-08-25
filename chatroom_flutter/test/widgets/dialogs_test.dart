@@ -219,7 +219,7 @@ void main() {
             child: const Text('open'),
           ));
       await typeInto(tester, 'abc');
-      await tester.tap(find.text('加入'));
+      await tester.tap(find.text('申请加入'));
       await tester.pumpAndSettle();
       expect(find.text('请输入有效的群组 ID'), findsOneWidget);
       expect(joined, isNull);
@@ -237,7 +237,7 @@ void main() {
               child: const Text('open'),
             ));
         await typeInto(tester, bad);
-        await tester.tap(find.text('加入'));
+        await tester.tap(find.text('申请加入'));
         await tester.pumpAndSettle();
         expect(find.text('请输入有效的群组 ID'), findsOneWidget, reason: '输入 $bad 应被拒');
         expect(joined, isNull);
@@ -258,7 +258,7 @@ void main() {
             child: const Text('open'),
           ));
       await typeInto(tester, '42');
-      await tester.tap(find.text('加入'));
+      await tester.tap(find.text('申请加入'));
       await tester.pumpAndSettle();
       expect(joined, 42);
     });
@@ -470,6 +470,67 @@ void main() {
       await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();
       expect(deleted, isNull);
+    });
+  });
+
+  group('服务端状态面板（阶段 M4）', () {
+    testWidgets('打开时拉取一次，点刷新重新拉取且数据实时更新', (tester) async {
+      final service = MockSocketService();
+      when(() => service.fetchServerStatus()).thenAnswer((_) async {});
+      when(() => service.runStorageCleanup()).thenAnswer((_) async {});
+      state.setLoggedIn('admin', true);
+      // 预置数据避免打开瞬间的加载动画（CircularProgressIndicator 无限
+      // 动画会使 pumpAndSettle 超时）
+      state.setServerStatus(const {
+        'online_users': 1,
+        'online_sessions': 1,
+        'total_users': 3,
+        'total_messages': 5,
+        'pending_file_requests': 0,
+        'storage': {'file_store_bytes': 10, 'file_count': 1, 'db_bytes': 100},
+        'disk': {'disk_free': 100, 'disk_total': 1000, 'warn': false},
+        'recent_logs': ['log0'],
+      });
+      await openDialog(
+          tester,
+          ElevatedButton(
+            onPressed: () => showServerStatusDialog(
+                tester.element(find.byType(ElevatedButton)), service),
+            child: const Text('open'),
+          ));
+
+      // 模拟首次响应：在线用户 2
+      state.setServerStatus(const {
+        'online_users': 2,
+        'online_sessions': 2,
+        'total_users': 3,
+        'total_messages': 5,
+        'pending_file_requests': 0,
+        'storage': {'file_store_bytes': 10, 'file_count': 1, 'db_bytes': 100},
+        'disk': {'disk_free': 100, 'disk_total': 1000, 'warn': false},
+        'recent_logs': ['log1'],
+      });
+      await tester.pumpAndSettle();
+      expect(find.text('2'), findsWidgets, reason: '在线用户数应显示');
+
+      // 模拟数据变化（另一用户上线）后点刷新 → 再次拉取并更新显示
+      state.setServerStatus(const {
+        'online_users': 3,
+        'online_sessions': 3,
+        'total_users': 3,
+        'total_messages': 5,
+        'pending_file_requests': 0,
+        'storage': {'file_store_bytes': 10, 'file_count': 1, 'db_bytes': 100},
+        'disk': {'disk_free': 100, 'disk_total': 1000, 'warn': false},
+        'recent_logs': ['log2'],
+      });
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('刷新'));
+      await tester.pumpAndSettle();
+      // mocktail 的 verify 会重置调用历史——一次性断言"打开 1 次 + 刷新 1 次"
+      verify(() => service.fetchServerStatus()).called(2);
+      expect(find.text('3'), findsWidgets,
+          reason: '刷新后新数据（在线用户 3）应显示');
     });
   });
 

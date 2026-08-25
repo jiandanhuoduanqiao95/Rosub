@@ -89,6 +89,30 @@ class AdminHandler:
         elif command == "exit":
             self.server.guarded_send(ssock, "admin_response", "退出成功")
             logging.info(f"管理员 {username} 退出")
+        elif command == "server_status":
+            # 服务端状态面板（阶段 M4：P1-19）
+            status = self.server.get_server_status()
+            self.server.guarded_send(ssock, "admin_response", json.dumps(status),
+                         extra_headers={"response_type": "server_status"})
+            logging.info(f"服务端状态查询: 管理员={username}, "
+                         f"在线用户={status['online_users']}, "
+                         f"文件占用={status['storage']['file_store_bytes']} 字节")
+        elif command == "storage_cleanup":
+            # 存储治理（阶段 M6：P1-21）：过期文件/已读消息清理
+            try:
+                days_file = int(header.get("days_file", "")) if header.get("days_file") else None
+            except (TypeError, ValueError):
+                days_file = None
+            try:
+                days_delivered = int(header.get("days_delivered", "")) if header.get("days_delivered") else None
+            except (TypeError, ValueError):
+                days_delivered = None
+            result = self.server.run_storage_cleanup(
+                days_file=days_file if days_file is not None else 7,
+                days_delivered=days_delivered if days_delivered is not None else 30)
+            self.server.guarded_send(ssock, "admin_response", json.dumps(result),
+                         extra_headers={"response_type": "storage_cleanup"})
+            logging.info(f"存储清理执行: 管理员={username}, 结果={result}")
         elif command == "reset_password":
             # 管理员重置密码（阶段 J：P0-5）
             target_user = data.decode("utf-8").strip()

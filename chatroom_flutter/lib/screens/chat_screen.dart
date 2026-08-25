@@ -38,6 +38,8 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 到期自动关闭免打扰开关并 SnackBar 提醒——声音通道随即恢复）
   Timer? _dndExpiryTimer;
 
+  /// 阶段 M2：群邀请以入口保留（AppBar badge + 列表对话框），无即时弹窗
+
   @override
   void initState() {
     super.initState();
@@ -217,9 +219,29 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _showJoinGroupDialog() {
-    showJoinGroupDialog(context, (id) {
-      widget.socketService.joinGroup(id);
-    });
+    // 阶段 M（P-11 用户反馈）：群组搜索入口 + 申请制（输入群组 ID 也走审批）
+    showGroupSearchDialog(
+      context,
+      onSearch: (keyword) => widget.socketService.searchGroups(keyword),
+      onRequestJoin: (id, message) =>
+          widget.socketService.requestJoinGroup(id, message: message),
+    );
+  }
+
+  /// 阶段 M2：群邀请入口列表（接受/拒绝）
+  void _showGroupInvites() {
+    showGroupInvitesDialog(
+      context,
+      invites: _state.invitations.toList(),
+      onRespond: (invite, accept) {
+        if (accept) {
+          widget.socketService.acceptGroupInvite(invite.groupId);
+        } else {
+          widget.socketService.declineGroupInvite(invite.groupId);
+        }
+        _state.removeInvitation(invite.groupId);
+      },
+    );
   }
 
   void _showAdminPanel() {
@@ -363,7 +385,11 @@ class _ChatScreenState extends State<ChatScreen> {
         onToggleMute: (v) {
           _state.setConversationMuted(target.key, v);
           widget.socketService.muteConversation(target.key, v);
-        });
+        },
+        // 阶段 M1：群主可见"群管理"入口（踢人/转让/改名/头像/审批/邀请）
+        onAdmin: _state.isGroupOwner(groupId)
+            ? () => showGroupAdminDialog(context, group, widget.socketService)
+            : null);
   }
 
   void _logout() {
@@ -516,6 +542,21 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ),
 
+              // 群邀请入口（阶段 M：P-11 用户反馈——邀请像好友申请一样
+              // 保留入口，离线登录补发后同样在此显示）
+              if (_state.invitations.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: Badge(
+                    label: Text('${_state.invitations.length}'),
+                    child: IconButton(
+                      icon: const Icon(Icons.group_add_rounded),
+                      tooltip: '待处理群邀请',
+                      onPressed: _showGroupInvites,
+                    ),
+                  ),
+                ),
+
               // 管理员面板
               if (_state.isAdmin)
                 IconButton(
@@ -529,6 +570,14 @@ class _ChatScreenState extends State<ChatScreen> {
                 icon: const Icon(Icons.settings_rounded),
                 tooltip: '设置',
                 onPressed: () => showSettingsDialog(context),
+              ),
+
+              // 文件管理（阶段 M8：P1-7 文件收发管理页）
+              IconButton(
+                icon: const Icon(Icons.folder_open_rounded),
+                tooltip: '文件管理',
+                onPressed: () =>
+                    showFileListDialog(context, widget.socketService),
               ),
 
               // 个人资料（阶段 J：P0-2）

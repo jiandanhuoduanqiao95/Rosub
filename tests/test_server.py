@@ -1083,10 +1083,12 @@ class TestGroupOperations:
                          extra_headers={"password": "password456"})
             recv_all_initial_data(s4)  # 消费登录数据
 
-            # bob 加入群组
+            # bob 加入群组（阶段 M：join_group 改为申请制，需群主审批）
             send_message(s4, "join_group", str(group_id))
             h, d = expect_response(s4, "chat")
-            assert "已加入群组" in d.decode()
+            assert "已发送入群申请" in d.decode()
+            # 群主批准后入群（DB 层直接批准，测试目标为加入后收发消息）
+            db.approve_join_request(group_id, "alice", "bob")
 
             s4.close()
             t2.join(timeout=2)
@@ -1139,15 +1141,10 @@ class TestGroupOperations:
                          extra_headers={"password": "password456"})
             recv_all_initial_data(s_bob_cli)
             send_message(s_bob_cli, "join_group", str(group_id))
-            expect_response(s_bob_cli, "chat")  # 加入响应
+            expect_response(s_bob_cli, "chat")  # 申请响应（阶段 M 申请制）
 
-            # 消费掉 bob 的群组列表更新消息
-            # (join_group 会触发 list_groups 推送)
-            try:
-                s_bob_cli.settimeout(1)
-                recv_message(s_bob_cli)  # 可能是 list_groups 或群组通知
-            except socket.timeout:
-                pass  # 没有更多消息也没关系
+            # 群主批准后 bob 入群（DB 层直接批准，测试目标为群聊路由）
+            db.approve_join_request(group_id, "alice", "bob")
             s_bob_cli.close()
             t_bob.join(timeout=2)
         finally:

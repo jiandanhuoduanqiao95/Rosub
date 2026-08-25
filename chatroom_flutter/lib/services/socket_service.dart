@@ -929,6 +929,25 @@ class SocketService {
           }
           break;
 
+        case 'group_invite':
+          // 阶段 M（P-11 用户反馈修复）：登录初始数据窗口内补发的
+          // 群邀请必须处理——服务端 load_offline_data 在登录时推送
+          // pending 邀请，此处丢弃会导致离线用户登录后收不到邀请
+          // （再次邀请被"已发送过邀请"拒绝）。按 groupId 去重。
+          final inviteGroupId = header['group_id'] as String?;
+          if (inviteGroupId != null) {
+            final invite = GroupInvite.fromJson({
+              'group_id': inviteGroupId,
+              'group_name': header['group_name'],
+              'from': header['from'],
+            });
+            if (!state.invitations.any((i) => i.groupId == invite.groupId)) {
+              state.setInvitations([...state.invitations, invite]);
+            }
+            state.log('收到群邀请: 群组 ${invite.groupName}');
+          }
+          break;
+
         case 'presence':
           // 阶段 J：登录时的在线快照（presence 在初始数据之前到达）
           if (from != null) {
@@ -1620,6 +1639,53 @@ class SocketService {
           } catch (_) {
             state.log('解析黑名单失败: $responseBody');
           }
+        } else if (responseType == 'list_join_requests') {
+          // 待审批入群申请列表（阶段 M：群管理对话框数据源，含验证消息）
+          try {
+            final List<dynamic> list = jsonDecode(responseBody);
+            final gid = int.tryParse(header['group_id']?.toString() ?? '');
+            if (gid != null) {
+              final names = <String>[];
+              final messages = <String, String>{};
+              for (final item in list) {
+                final map = item is Map<String, dynamic> ? item : {};
+                final name = map['username']?.toString() ?? '';
+                if (name.isNotEmpty) {
+                  names.add(name);
+                  messages[name] = map['message']?.toString() ?? '';
+                }
+              }
+              state.setJoinRequests(gid, names);
+              state.setJoinRequestMessages(gid, messages);
+            }
+          } catch (_) {}
+        } else if (responseType == 'server_status') {
+          // 服务端状态面板（阶段 M4：P1-19）
+          try {
+            final Map<String, dynamic> status =
+                jsonDecode(responseBody) as Map<String, dynamic>;
+            state.setServerStatus(status);
+          } catch (_) {
+            state.log('解析服务端状态失败: $responseBody');
+          }
+        } else if (responseType == 'storage_cleanup') {
+          // 存储治理结果（阶段 M6：P1-21）
+          try {
+            final Map<String, dynamic> result =
+                jsonDecode(responseBody) as Map<String, dynamic>;
+            state.setStorageCleanupResult(result);
+          } catch (_) {
+            state.log('解析存储清理结果失败: $responseBody');
+          }
+        } else if (responseType == 'file_list_response') {
+          // 文件收发记录（阶段 M8：P1-7）——注意：服务端以独立
+          // file_list_response 类型推送，此处防御性兼容
+          try {
+            final List<dynamic> list = jsonDecode(responseBody);
+            state.setFileRecords(list
+                .map((e) => FileRecord.fromJson(e as Map<String, dynamic>))
+                .toList());
+          } catch (_) {}
         } else {
           // 其他管理响应仅管理员可见
           if (!state.isAdmin) break;
@@ -1641,6 +1707,41 @@ class SocketService {
         try {
           final List<dynamic> list = jsonDecode(utf8.decode(body));
           state.setGroups(
+            list.map((e) => Group.fromJson(e as Map<String, dynamic>)).toList(),
+          );
+        } catch (_) {}
+        break;
+
+      // ---- 群邀请（阶段 M2：P1-17 邀请制）----
+      case 'group_invite':
+        try {
+          final Map<String, dynamic> json = {
+            'group_id': header['group_id'],
+            'group_name': header['group_name'],
+            'from': header['from'],
+          };
+          state.setInvitations([
+            ...state.invitations,
+            GroupInvite.fromJson(json),
+          ]);
+        } catch (_) {}
+        break;
+
+      // ---- 文件收发记录（阶段 M8：P1-7 文件收发管理页）----
+      case 'file_list_response':
+        try {
+          final List<dynamic> list = jsonDecode(utf8.decode(body));
+          state.setFileRecords(
+            list.map((e) => FileRecord.fromJson(e as Map<String, dynamic>)).toList(),
+          );
+        } catch (_) {}
+        break;
+
+      // ---- 群组搜索结果（阶段 M：群组搜索入口）----
+      case 'group_search_response':
+        try {
+          final List<dynamic> list = jsonDecode(utf8.decode(body));
+          state.setGroupSearchResults(
             list.map((e) => Group.fromJson(e as Map<String, dynamic>)).toList(),
           );
         } catch (_) {}
@@ -2534,6 +2635,229 @@ class SocketService {
       state.log('文件已保存: ${file.path}');
     } catch (e) {
       state.log('文件保存失败: $e');
+    }
+  }
+
+  // ============================================================
+  // 阶段 M1（P1-16 群主权限）：踢人 / 转让 / 改名 / 头像
+  // ============================================================
+
+  Future<void> kickGroupMember(int groupId, String target) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('kick_member', '', extraHeaders: {
+        'group_id': '$groupId',
+        'target': target,
+      });
+    } catch (e) {
+      state.log('移出成员失败: $e');
+    }
+  }
+
+  Future<void> transferGroupOwner(int groupId, String target) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('transfer_owner', '', extraHeaders: {
+        'group_id': '$groupId',
+        'target': target,
+      });
+    } catch (e) {
+      state.log('转让群主失败: $e');
+    }
+  }
+
+  Future<void> renameGroup(int groupId, String name) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('rename_group', '', extraHeaders: {
+        'group_id': '$groupId',
+        'name': name,
+      });
+    } catch (e) {
+      state.log('群组改名失败: $e');
+    }
+  }
+
+  Future<void> setGroupAvatar(int groupId, String avatar) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('set_group_avatar', '', extraHeaders: {
+        'group_id': '$groupId',
+        'avatar': avatar,
+      });
+    } catch (e) {
+      state.log('设置群头像失败: $e');
+    }
+  }
+
+  // ============================================================
+  // 阶段 M3（P1-18 新成员历史可见性）
+  // ============================================================
+
+  Future<void> setGroupHistoryVisible(int groupId, bool visible,
+      {int limit = 50}) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('set_group_history_visible', '', extraHeaders: {
+        'group_id': '$groupId',
+        'visible': visible ? '1' : '0',
+        'limit': '$limit',
+      });
+    } catch (e) {
+      state.log('设置历史可见性失败: $e');
+    }
+  }
+
+  // ============================================================
+  // 阶段 M2（P1-17 入群审批/邀请制）
+  // ============================================================
+
+  /// 发送入群申请（[message] 为可选验证消息，群主审批时可见）
+  Future<void> requestJoinGroup(int groupId, {String? message}) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('request_join_group', '$groupId',
+          extraHeaders: {
+            if (message != null && message.isNotEmpty) 'message': message,
+          });
+    } catch (e) {
+      state.log('发送入群申请失败: $e');
+    }
+  }
+
+  /// 群组搜索（阶段 M：群组搜索入口，按群名模糊搜索）
+  Future<void> searchGroups(String keyword) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('search_groups', '', extraHeaders: {
+        'keyword': keyword,
+      });
+    } catch (e) {
+      state.log('搜索群组失败: $e');
+    }
+  }
+
+  /// 拉取群组待审批入群申请列表（群管理对话框数据源）
+  Future<void> fetchJoinRequests(int groupId) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('list_join_requests', '', extraHeaders: {
+        'group_id': '$groupId',
+      });
+    } catch (e) {
+      state.log('拉取入群申请失败: $e');
+    }
+  }
+
+  Future<void> approveJoinRequest(int groupId, String target) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('approve_join_request', '', extraHeaders: {
+        'group_id': '$groupId',
+        'target': target,
+      });
+    } catch (e) {
+      state.log('批准入群申请失败: $e');
+    }
+  }
+
+  Future<void> rejectJoinRequest(int groupId, String target) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('reject_join_request', '', extraHeaders: {
+        'group_id': '$groupId',
+        'target': target,
+      });
+    } catch (e) {
+      state.log('拒绝入群申请失败: $e');
+    }
+  }
+
+  Future<void> inviteGroupMember(int groupId, String target) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('invite_group_member', '', extraHeaders: {
+        'group_id': '$groupId',
+        'target': target,
+      });
+    } catch (e) {
+      state.log('发送群邀请失败: $e');
+    }
+  }
+
+  Future<void> acceptGroupInvite(int groupId) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('accept_group_invite', '', extraHeaders: {
+        'group_id': '$groupId',
+      });
+    } catch (e) {
+      state.log('接受群邀请失败: $e');
+    }
+  }
+
+  Future<void> declineGroupInvite(int groupId) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('decline_group_invite', '', extraHeaders: {
+        'group_id': '$groupId',
+      });
+    } catch (e) {
+      state.log('拒绝群邀请失败: $e');
+    }
+  }
+
+  // ============================================================
+  // 阶段 M4/M6（P1-19 状态面板 / P1-21 存储治理）
+  // ============================================================
+
+  Future<void> fetchServerStatus() async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('admin_command', '', extraHeaders: {
+        'action': 'server_status',
+      });
+    } catch (e) {
+      state.log('获取服务端状态失败: $e');
+    }
+  }
+
+  Future<void> runStorageCleanup() async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('admin_command', '', extraHeaders: {
+        'action': 'storage_cleanup',
+      });
+    } catch (e) {
+      state.log('执行存储清理失败: $e');
+    }
+  }
+
+  // ============================================================
+  // 阶段 M8（P1-7 文件管理页 / P1-6 下载续传）
+  // ============================================================
+
+  Future<void> fetchFileList({String? to, int? groupId}) async {
+    if (_socket == null) return;
+    final extra = <String, String>{};
+    if (to != null) extra['to'] = to;
+    if (groupId != null) extra['group_id'] = '$groupId';
+    try {
+      await _sendMessage('list_files', '', extraHeaders: extra);
+    } catch (e) {
+      state.log('获取文件列表失败: $e');
+    }
+  }
+
+  Future<void> resumeFileTransfer(String messageId, int offset) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('file_resume', '', extraHeaders: {
+        'message_id': messageId,
+        'offset': '$offset',
+      });
+    } catch (e) {
+      state.log('文件续传失败: $e');
     }
   }
 }

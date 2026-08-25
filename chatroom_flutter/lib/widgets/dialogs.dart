@@ -535,9 +535,18 @@ void showJoinGroupDialog(BuildContext context, ValueChanged<int> onJoin) {
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('加入群组'),
-      content: RawTextField(
-        controller: ctrl,
-        hintText: '群组 ID',
+      // 阶段 M（P1-17 申请制）：输入群组 ID 后发送入群申请，由群主审批
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          RawTextField(
+            controller: ctrl,
+            hintText: '群组 ID',
+          ),
+          const SizedBox(height: 8),
+          const Text('申请后将由群主审批，批准后方可加入',
+              style: TextStyle(fontSize: 12, color: Colors.grey)),
+        ],
       ),
       actions: [
         TextButton(
@@ -554,7 +563,183 @@ void showJoinGroupDialog(BuildContext context, ValueChanged<int> onJoin) {
             onJoin(id);
             Navigator.pop(ctx);
           },
-          child: const Text('加入'),
+          child: const Text('申请加入'),
+        ),
+      ],
+    ),
+  );
+}
+
+/// 入群申请验证消息输入对话框（P-11 用户反馈：申请可附验证消息）
+void _showJoinMessageDialog(
+  BuildContext context,
+  int groupId,
+  String groupName,
+  void Function(int groupId, String message) onRequestJoin,
+) {
+  final ctrl = TextEditingController();
+  showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('申请加入群组'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('群组: $groupName', style: const TextStyle(fontSize: 13)),
+          const SizedBox(height: 8),
+          RawTextField(
+            controller: ctrl,
+            hintText: '验证消息（选填，群主审批时可见）',
+            showChineseInput: true,
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () {
+            onRequestJoin(groupId, ctrl.text.trim());
+            Navigator.pop(ctx);
+          },
+          child: const Text('发送申请'),
+        ),
+      ],
+    ),
+  );
+}
+
+// ============================================================
+// 群组搜索对话框（阶段 M：P-11 用户反馈的群组搜索入口）
+// ============================================================
+
+void showGroupSearchDialog(
+  BuildContext context, {
+  required void Function(String keyword) onSearch,
+  required void Function(int groupId, String message) onRequestJoin,
+}) {
+  final ctrl = TextEditingController();
+  final idCtrl = TextEditingController();
+  final state = AppState.instance;
+  showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('搜索群组'),
+      content: SizedBox(
+        width: 360,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: RawTextField(
+                    controller: ctrl,
+                    hintText: '输入群组名称关键字',
+                    showChineseInput: true,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size(80, 46),
+                  ),
+                  onPressed: () {
+                    final keyword = ctrl.text.trim();
+                    if (keyword.isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('请输入搜索关键字')),
+                      );
+                      return;
+                    }
+                    onSearch(keyword);
+                  },
+                  child: const Text('搜索'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            ListenableBuilder(
+              listenable: state,
+              builder: (ctx, _) {
+                final results = state.groupSearchResults;
+                if (results.isEmpty) {
+                  return const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 16),
+                    child: Text('暂无结果', style: TextStyle(color: Colors.grey)),
+                  );
+                }
+                return SizedBox(
+                  height: 220,
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: results.length,
+                    itemBuilder: (_, i) {
+                      final g = results[i];
+                      return ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.group_rounded),
+                        title: Text(g.name, overflow: TextOverflow.ellipsis),
+                        subtitle: Text(
+                          'ID:${g.id} · 群主:${g.owner.isEmpty ? '?' : g.owner}'
+                          ' · ${g.memberCount} 人',
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                        trailing: FilledButton.tonal(
+                          style: FilledButton.styleFrom(
+                            minimumSize: const Size(72, 34),
+                            padding: EdgeInsets.zero,
+                          ),
+                          onPressed: () {
+                            // P-11 用户反馈：申请可附验证消息（仿好友申请）
+                            _showJoinMessageDialog(ctx, g.id, g.name, onRequestJoin);
+                          },
+                          child: const Text('申请加入'),
+                        ),
+                      );
+                    },
+                  ),
+                );
+              },
+            ),
+            const Divider(),
+            Row(
+              children: [
+                Expanded(
+                  child: RawTextField(
+                    controller: idCtrl,
+                    hintText: '或输入群组 ID 申请加入',
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size(72, 46),
+                  ),
+                  onPressed: () {
+                    final id = int.tryParse(idCtrl.text.trim());
+                    if (id == null || id <= 0) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('请输入有效的群组 ID')),
+                      );
+                      return;
+                    }
+                    _showJoinMessageDialog(ctx, id, '群组 $id', onRequestJoin);
+                  },
+                  child: const Text('申请'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('关闭'),
         ),
       ],
     ),
@@ -757,9 +942,10 @@ void showAdminPanel(BuildContext context, SocketService service, AppState _) {
       ),
       content: SizedBox(
         width: 400,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
             // 查看所有用户
             ListTile(
               leading: const Icon(Icons.people_rounded),
@@ -801,7 +987,19 @@ void showAdminPanel(BuildContext context, SocketService service, AppState _) {
                 _showResetPasswordDialog(context, service);
               },
             ),
-          ],
+            const Divider(),
+            // 服务端状态面板（阶段 M4：P1-19）+ 存储治理（阶段 M6：P1-21）
+            ListTile(
+              leading: const Icon(Icons.monitor_heart_outlined),
+              title: const Text('服务端状态'),
+              subtitle: const Text('在线/存储/磁盘/日志 + 存储清理'),
+              onTap: () {
+                Navigator.pop(ctx);
+                showServerStatusDialog(context, service);
+              },
+            ),
+            ],
+          ),
         ),
       ),
       actions: [
@@ -1066,6 +1264,8 @@ void showGroupMenuDialog(
   bool muted = false,
   ValueChanged<bool>? onTogglePin,
   ValueChanged<bool>? onToggleMute,
+  // 阶段 M1：群管理入口（仅群主提供回调时渲染）
+  VoidCallback? onAdmin,
 }) {
   final state = AppState.instance;
   showDialog(
@@ -1121,6 +1321,16 @@ void showGroupMenuDialog(
                     onTap: () {
                       Navigator.pop(ctx);
                       onToggleMute(!muted);
+                    },
+                  ),
+                // 阶段 M1：群管理（群主可见：踢人/转让/改名/审批/邀请）
+                if (onAdmin != null)
+                  ListTile(
+                    leading: const Icon(Icons.admin_panel_settings),
+                    title: const Text('群管理'),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      onAdmin();
                     },
                   ),
                 const Divider(),
@@ -1354,6 +1564,549 @@ void showSettingsDialog(BuildContext context) {
                   ),
                 ),
             ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('关闭'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
+
+// ============================================================
+// 阶段 M —— 群管理 / 群邀请 / 服务端状态 / 文件管理对话框
+// ============================================================
+
+String _formatBytes(num? bytes) {
+  if (bytes == null) return '0 B';
+  if (bytes < 1024) return '$bytes B';
+  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  if (bytes < 1024 * 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+}
+
+/// 阶段 M1/M2/M3：群管理对话框（仅群主可见入口）
+/// 成员移出 / 转让群主 / 改名 / 历史可见性 / 入群审批 / 邀请成员
+/// （2026-08-25 用户决策：头像功能已废除，个人与群聊均不支持自定义头像）
+void showGroupAdminDialog(
+    BuildContext context, Group group, SocketService service) {
+  final state = AppState.instance;
+  // 打开即拉取待审批入群申请列表（P1-17 审批数据源）
+  service.fetchJoinRequests(group.id);
+  showDialog(
+    context: context,
+    builder: (ctx) => ListenableBuilder(
+      listenable: state,
+      builder: (ctx, _) {
+        final current = state.groups.where((g) => g.id == group.id).firstOrNull;
+        final members = current?.members ?? group.members;
+        final owner = current?.owner ?? group.owner;
+        final requests = state.joinRequestsOf(group.id);
+        return AlertDialog(
+          title: Row(
+            children: [
+              const Icon(Icons.admin_panel_settings),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('群管理 - ${group.displayName}',
+                    overflow: TextOverflow.ellipsis),
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: 400,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(left: 16, bottom: 4),
+                    child: Text('成员（${members.length} 人）',
+                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+                  ...members.map((m) {
+                    final isOwnerSelf = m == owner;
+                    return ListTile(
+                      dense: true,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                      leading: CircleAvatar(
+                        radius: 14,
+                        child: Text(m.isNotEmpty ? m[0].toUpperCase() : '?'),
+                      ),
+                      title: Text(
+                        m,
+                        style: TextStyle(
+                          fontWeight:
+                              isOwnerSelf ? FontWeight.bold : FontWeight.normal,
+                        ),
+                      ),
+                      subtitle: isOwnerSelf
+                          ? const Text('群主', style: TextStyle(fontSize: 11))
+                          : null,
+                      trailing: isOwnerSelf
+                          ? null
+                          : IconButton(
+                              icon: const Icon(Icons.person_remove_outlined),
+                              tooltip: '移出成员',
+                              onPressed: () => service.kickGroupMember(
+                                  group.id, m),
+                            ),
+                    );
+                  }),
+                  const Divider(),
+                  ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.swap_horiz_rounded),
+                    title: const Text('转让群主'),
+                    subtitle: const Text('将群主移交给指定成员'),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _showTransferOwnerDialog(context, group, members, service);
+                    },
+                  ),
+                  ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.edit_rounded),
+                    title: const Text('修改群名'),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _showRenameGroupDialog(context, group, service);
+                    },
+                  ),
+                  SwitchListTile(
+                    dense: true,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                    title: const Text('新成员历史可见'),
+                    subtitle: Text(
+                      current?.historyVisible == true
+                          ? '新成员可见加入前最近 ${current?.historyLimit ?? 50} 条'
+                          : '新成员仅可见自己加入后的消息',
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                    value: current?.historyVisible ?? true,
+                    onChanged: (v) => service.setGroupHistoryVisible(
+                        group.id, v,
+                        limit: current?.historyLimit ?? 50),
+                  ),
+                  const Divider(),
+                  if (requests.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.only(left: 16, bottom: 4),
+                      child: Text('暂无待审批的入群申请',
+                          style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    )
+                  else ...[
+                    const Padding(
+                      padding: EdgeInsets.only(left: 16, bottom: 4),
+                      child: Text('入群申请',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                    ),
+                    ...requests.map((u) {
+                      final reqMsg = state.joinRequestMessageOf(group.id, u);
+                      return ListTile(
+                          dense: true,
+                          leading: const Icon(Icons.person_add_alt),
+                          title: Text(u),
+                          subtitle: reqMsg.isNotEmpty
+                              ? Text('验证消息: $reqMsg',
+                                  style: const TextStyle(fontSize: 11))
+                              : null,
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: const Icon(Icons.check_circle,
+                                    color: Colors.green),
+                                tooltip: '批准',
+                                onPressed: () {
+                                  service.approveJoinRequest(group.id, u);
+                                  state.removeJoinRequest(group.id, u);
+                                },
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.cancel,
+                                    color: Colors.red),
+                                tooltip: '拒绝',
+                                onPressed: () {
+                                  service.rejectJoinRequest(group.id, u);
+                                  state.removeJoinRequest(group.id, u);
+                                },
+                              ),
+                            ],
+                          ),
+                        );
+                    }),
+                  ],
+                  const Divider(),
+                  ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.person_add_alt_1),
+                    title: const Text('邀请成员'),
+                    subtitle: const Text('输入用户名发送群邀请'),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _showInviteMemberDialog(context, group, service);
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('关闭'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
+
+void _showTransferOwnerDialog(BuildContext context, Group group,
+    List<String> members, SocketService service) {
+  final owner = AppState.instance.groups
+      .where((g) => g.id == group.id)
+      .firstOrNull
+      ?.owner;
+  final candidates =
+      members.where((m) => m != owner && m != AppState.instance.username).toList();
+  showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('转让群主'),
+      content: candidates.isEmpty
+          ? const Text('群内没有可转让的成员')
+          : SizedBox(
+              width: 300,
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: candidates.length,
+                itemBuilder: (_, i) => ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.person_rounded),
+                  title: Text(candidates[i]),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    service.transferGroupOwner(group.id, candidates[i]);
+                  },
+                ),
+              ),
+            ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('取消'),
+        ),
+      ],
+    ),
+  );
+}
+
+void _showRenameGroupDialog(
+    BuildContext context, Group group, SocketService service) {
+  final controller = TextEditingController(text: group.name);
+  showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('修改群名'),
+      content: RawTextField(
+        controller: controller,
+        hintText: '新群名',
+        showChineseInput: true,
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () {
+            final name = controller.text.trim();
+            if (name.isNotEmpty) {
+              service.renameGroup(group.id, name);
+            }
+            Navigator.pop(ctx);
+          },
+          child: const Text('保存'),
+        ),
+      ],
+    ),
+  );
+}
+
+
+
+void _showInviteMemberDialog(
+    BuildContext context, Group group, SocketService service) {
+  final controller = TextEditingController();
+  showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('邀请成员'),
+      content: RawTextField(controller: controller, hintText: '用户名'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () {
+            final name = controller.text.trim();
+            if (name.isNotEmpty) {
+              service.inviteGroupMember(group.id, name);
+            }
+            Navigator.pop(ctx);
+          },
+          child: const Text('邀请'),
+        ),
+      ],
+    ),
+  );
+}
+
+/// 阶段 M2：群邀请入口列表（P-11 用户反馈：邀请像好友申请一样保留入口，
+/// 而非即时弹窗——离线用户登录后由服务端补发 group_invite 进入此列表）
+void showGroupInvitesDialog(
+  BuildContext context, {
+  required List<GroupInvite> invites,
+  required void Function(GroupInvite invite, bool accept) onRespond,
+}) {
+  showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Row(
+        children: [
+          Icon(Icons.group_add_rounded),
+          SizedBox(width: 8),
+          Text('群邀请'),
+        ],
+      ),
+      content: SizedBox(
+        width: 320,
+        child: invites.isEmpty
+            ? const Padding(
+                padding: EdgeInsets.symmetric(vertical: 16),
+                child: Text('暂无待处理的群邀请',
+                    style: TextStyle(color: Colors.grey)),
+              )
+            : ListView.builder(
+                shrinkWrap: true,
+                itemCount: invites.length,
+                itemBuilder: (_, i) {
+                  final invite = invites[i];
+                  return ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.group_rounded),
+                    title: Text(invite.groupName.isEmpty
+                        ? '群组 ID:${invite.groupId}'
+                        : invite.groupName),
+                    subtitle: Text('来自 ${invite.inviter}',
+                        style: const TextStyle(fontSize: 11)),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.check, color: Colors.green),
+                          tooltip: '接受',
+                          onPressed: () {
+                            onRespond(invite, true);
+                            Navigator.pop(ctx);
+                          },
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.close, color: Colors.red),
+                          tooltip: '拒绝',
+                          onPressed: () {
+                            onRespond(invite, false);
+                            Navigator.pop(ctx);
+                          },
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('关闭'),
+        ),
+      ],
+    ),
+  );
+}
+
+/// 阶段 M4/M6：服务端状态面板 + 存储治理（管理员）
+void showServerStatusDialog(BuildContext context, SocketService service) {
+  final state = AppState.instance;
+  service.fetchServerStatus();
+  showDialog(
+    context: context,
+    builder: (ctx) => ListenableBuilder(
+      listenable: state,
+      builder: (ctx, _) {
+        final s = state.serverStatus;
+        final cleanup = state.storageCleanupResult;
+        final logs = (s?['recent_logs'] as List?) ?? const [];
+        return AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.monitor_heart_outlined),
+              SizedBox(width: 8),
+              Text('服务端状态'),
+            ],
+          ),
+          content: SizedBox(
+            width: 440,
+            child: s == null
+                ? const Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                : SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _statusRow('在线用户', '${s['online_users']}'),
+                        _statusRow('总连接数', '${s['online_sessions']}'),
+                        _statusRow('用户总数', '${s['total_users']}'),
+                        _statusRow('消息总数', '${s['total_messages']}'),
+                        _statusRow('待处理文件请求', '${s['pending_file_requests']}'),
+                        const Divider(),
+                        _statusRow('文件存储占用',
+                            _formatBytes(s['storage']?['file_store_bytes'])),
+                        _statusRow('文件数', '${s['storage']?['file_count']}'),
+                        _statusRow('数据库大小',
+                            _formatBytes(s['storage']?['db_bytes'])),
+                        const Divider(),
+                        _statusRow(
+                            '磁盘剩余', _formatBytes(s['disk']?['disk_free'])),
+                        _statusRow(
+                            '磁盘总量', _formatBytes(s['disk']?['disk_total'])),
+                        _statusRow(
+                            '磁盘预警',
+                            s['disk']?['warn'] == true
+                                ? '⚠ 剩余空间不足，请及时清理'
+                                : '正常'),
+                        const Divider(),
+                        if (cleanup != null) ...[
+                          Text(
+                            '上次清理: 文件请求 ${cleanup['expired_file_requests']} '
+                            '个 / 已读消息 ${cleanup['expired_delivered_messages']} 条',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                          const Divider(),
+                        ],
+                        const Text('最近日志',
+                            style: TextStyle(fontWeight: FontWeight.bold)),
+                        ...logs.take(8).map((l) => Padding(
+                              padding: const EdgeInsets.only(top: 2),
+                              child: Text('$l',
+                                  style: const TextStyle(
+                                      fontSize: 11, color: Colors.grey)),
+                            )),
+                      ],
+                    ),
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                service.runStorageCleanup();
+              },
+              child: const Text('存储清理'),
+            ),
+            // 2026-08-25 用户反馈：面板数据刷新（无需反复进入退出）
+            TextButton(
+              onPressed: () {
+                service.fetchServerStatus();
+              },
+              child: const Text('刷新'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('关闭'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
+
+Widget _statusRow(String label, String value) {
+  return Padding(
+    padding: const EdgeInsets.symmetric(vertical: 3),
+    child: Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(label, style: const TextStyle(fontSize: 13)),
+        Text(value,
+            style:
+                const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+      ],
+    ),
+  );
+}
+
+/// 阶段 M8：文件收发管理页（按会话聚合）
+void showFileListDialog(BuildContext context, SocketService service,
+    {String? to, int? groupId}) {
+  final state = AppState.instance;
+  service.fetchFileList(to: to, groupId: groupId);
+  showDialog(
+    context: context,
+    builder: (ctx) => ListenableBuilder(
+      listenable: state,
+      builder: (ctx, _) {
+        final files = state.fileRecords;
+        return AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.folder_open_rounded),
+              SizedBox(width: 8),
+              Text('文件管理'),
+            ],
+          ),
+          content: SizedBox(
+            width: 440,
+            height: 380,
+            child: files.isEmpty
+                ? const Center(
+                    child: Text('暂无文件记录',
+                        style: TextStyle(color: Colors.grey)))
+                : ListView.builder(
+                    itemCount: files.length,
+                    itemBuilder: (_, i) {
+                      final f = files[i];
+                      final ts = f.timestamp
+                          .toString()
+                          .replaceFirst('.000', '')
+                          .substring(0, 16);
+                      return ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.insert_drive_file_outlined),
+                        title: Text(f.filename,
+                            overflow: TextOverflow.ellipsis),
+                        subtitle: Text(
+                          '${f.sender} → ${f.isGroupFile ? '群组' : f.receiver} · '
+                          '${_formatBytes(f.filesize)} · $ts',
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                      );
+                    },
+                  ),
           ),
           actions: [
             TextButton(

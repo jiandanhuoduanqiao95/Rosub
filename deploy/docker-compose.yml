@@ -1,0 +1,26 @@
+# ============================================================
+# 聊天室服务端 —— Docker Compose 编排（阶段 M5：P1-20）
+# ============================================================
+# 用法：docker compose -f deploy/docker-compose.yml up -d
+# 管理员密钥：编辑下方环境变量（或使用 .env 文件）
+# ============================================================
+
+services:
+  chatroom:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: chatroom:latest
+    container_name: chatroom
+    restart: on-failure
+    ports:
+      - "8090:8090"
+    environment:
+      - CHATROOM_ADMIN_SECRET=${CHATROOM_ADMIN_SECRET:-change-me}
+      - CHATROOM_DATA_DIR=/app/data
+    volumes:
+      - chatroom-data:/app/data
+      - ./SSL:/app/SSL:ro
+
+volumes:
+  chatroom-data:

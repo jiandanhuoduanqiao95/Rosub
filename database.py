@@ -125,6 +125,7 @@ class Database:
                     content BLOB NOT NULL,
                     file_path TEXT,
                     status TEXT DEFAULT 'pending',
+                    sha256 TEXT DEFAULT '',
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (sender) REFERENCES users(username),
                     FOREIGN KEY (receiver) REFERENCES users(username)
@@ -136,6 +137,9 @@ class Database:
                     group_name TEXT UNIQUE NOT NULL,
                     created_by TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    avatar TEXT DEFAULT '',
+                    history_visible INTEGER DEFAULT 1,
+                    history_limit INTEGER DEFAULT 50,
                     FOREIGN KEY (created_by) REFERENCES users(username)
                 )
             ''')
@@ -160,6 +164,7 @@ class Database:
                     content BLOB NOT NULL,
                     file_path TEXT,
                     status TEXT DEFAULT 'pending',
+                    sha256 TEXT DEFAULT '',
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (group_id) REFERENCES groups(id),
                     FOREIGN KEY (sender) REFERENCES users(username)
@@ -305,6 +310,55 @@ class Database:
                 except sqlite3.OperationalError:
                     cursor.execute(f"ALTER TABLE friends ADD COLUMN {col} TEXT DEFAULT ''")
                     logging.info(f"friends 表已迁移：新增 {col} 列")
+
+            # 迁移：groups 表新增治理列（阶段 M1：P1-16 群主权限 / M3：P1-18 历史可见性）
+            for col, ddl in (("avatar", "TEXT DEFAULT ''"),
+                             ("history_visible", "INTEGER DEFAULT 1"),
+                             ("history_limit", "INTEGER DEFAULT 50")):
+                try:
+                    cursor.execute(f"SELECT {col} FROM groups LIMIT 1")
+                except sqlite3.OperationalError:
+                    cursor.execute(f"ALTER TABLE groups ADD COLUMN {col} {ddl}")
+                    logging.info(f"groups 表已迁移：新增 {col} 列")
+
+            # 迁移：file 表新增 sha256 列（阶段 M8：P1-5 文件完整性校验）
+            for table in ("file_requests", "group_file_requests"):
+                try:
+                    cursor.execute(f"SELECT sha256 FROM {table} LIMIT 1")
+                except sqlite3.OperationalError:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN sha256 TEXT DEFAULT ''")
+                    logging.info(f"{table} 表已迁移：新增 sha256 列")
+
+            # 阶段 M2（P1-17 入群审批/邀请制）：申请与邀请表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS group_join_requests (
+                    group_id INTEGER NOT NULL,
+                    username TEXT NOT NULL,
+                    status TEXT DEFAULT 'pending',
+                    request_message TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (group_id, username)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS group_invitations (
+                    group_id INTEGER NOT NULL,
+                    username TEXT NOT NULL,
+                    inviter TEXT NOT NULL,
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (group_id, username)
+                )
+            ''')
+            # 迁移：group_join_requests 表新增验证消息列（P-11 用户反馈：
+            # 申请入群可附带验证消息）
+            try:
+                cursor.execute("SELECT request_message FROM group_join_requests LIMIT 1")
+            except sqlite3.OperationalError:
+                cursor.execute(
+                    "ALTER TABLE group_join_requests "
+                    "ADD COLUMN request_message TEXT DEFAULT ''")
+                logging.info("group_join_requests 表已迁移：新增 request_message 列")
 
             conn.commit()
 
@@ -544,14 +598,16 @@ class Database:
                 self._delete_disk_file(p)
             return users_deleted > 0 or friends_deleted > 0
 
-    def save_file_request(self, sender, receiver, filename, filesize, content, message_id, file_path=None):
+    def save_file_request(self, sender, receiver, filename, filesize, content,
+                          message_id, file_path=None, sha256=None):
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO file_requests (message_id, sender, receiver, filename, filesize, content, file_path)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (message_id, sender, receiver, filename, filesize, content, file_path))
+                    INSERT INTO file_requests (message_id, sender, receiver, filename, filesize, content, file_path, sha256)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (message_id, sender, receiver, filename, filesize, content,
+                      file_path, sha256 or ""))
                 conn.commit()
                 logging.info(f"已保存文件请求：{sender} -> {receiver}, 文件名={filename}, 消息ID={message_id}")
         except Exception as e:
@@ -566,6 +622,22 @@ class Database:
                 WHERE message_id = ?
             ''', (message_id,))
             return cursor.fetchone()
+
+    def get_file_request_extras(self, message_id):
+        """查询文件请求的扩展元数据（阶段 M8：sha256），不存在返回 None。
+
+        仿 get_offline_extras 惯例：不改动 get_file_request 的既有 7 元组
+        形态（既有调用方解包依赖），sha256 经此平行访问。
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT sha256 FROM file_requests WHERE message_id = ?",
+                (message_id,))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return {"sha256": row[0] or ""}
 
     def get_pending_file_requests(self, receiver):
         with self._get_connection() as conn:
@@ -659,14 +731,16 @@ class Database:
             logging.error(f"文件请求删除失败: {e}")
             return False
 
-    def save_group_file_request(self, group_id, sender, filename, filesize, content, message_id, file_path=None):
+    def save_group_file_request(self, group_id, sender, filename, filesize,
+                                content, message_id, file_path=None, sha256=None):
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO group_file_requests (message_id, group_id, sender, filename, filesize, content, file_path)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (message_id, group_id, sender, filename, filesize, content, file_path))
+                    INSERT INTO group_file_requests (message_id, group_id, sender, filename, filesize, content, file_path, sha256)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (message_id, group_id, sender, filename, filesize, content,
+                      file_path, sha256 or ""))
                 conn.commit()
                 logging.info(f"已保存群组文件请求：群组ID={group_id}, 发送者={sender}, 文件名={filename}, 消息ID={message_id}")
                 return True
@@ -683,6 +757,18 @@ class Database:
                 WHERE message_id = ?
             ''', (message_id,))
             return cursor.fetchone()
+
+    def get_group_file_request_extras(self, message_id):
+        """查询群组文件请求的扩展元数据（阶段 M8：sha256），不存在返回 None。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT sha256 FROM group_file_requests WHERE message_id = ?",
+                (message_id,))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return {"sha256": row[0] or ""}
 
     def get_pending_group_file_requests(self, group_id, username):
         with self._get_connection() as conn:
@@ -1186,6 +1272,409 @@ class Database:
             return cursor.fetchone() is not None
 
     # ============================================================
+    # 阶段 M1/M3（P1-16 群主权限 / P1-18 历史可见性）：群组治理
+    # ============================================================
+
+    def get_group_info(self, group_id):
+        """查询群组治理信息；群不存在返回 None。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT g.id, g.group_name, g.created_by, g.avatar,
+                       g.history_visible, g.history_limit,
+                       (SELECT COUNT(*) FROM group_members gm
+                        WHERE gm.group_id = g.id)
+                FROM groups g WHERE g.id = ?
+            ''', (group_id,))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "group_name": row[1],
+            "created_by": row[2],
+            "avatar": row[3] or "",
+            "history_visible": row[4],
+            "history_limit": row[5],
+            "member_count": row[6],
+        }
+
+    def get_user_groups_detailed(self, username):
+        """查询用户所属群组（含治理字段）。
+
+        返回 (id, group_name, created_by, avatar, history_visible, history_limit)，
+        供 list_groups 推送携带群主/头像/历史可见性（阶段 M1/M3）。
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT g.id, g.group_name, g.created_by, g.avatar,
+                       g.history_visible, g.history_limit
+                FROM groups g
+                JOIN group_members gm ON g.id = gm.group_id
+                WHERE gm.username = ?
+                ORDER BY g.id ASC
+            ''', (username,))
+            return cursor.fetchall()
+
+    def search_groups(self, keyword, username=None, limit=50):
+        """按群名 LIKE 搜索群组（阶段 M：群组搜索入口）。
+
+        username 提供时排除其已加入的群（搜索目的是申请加入）；
+        返回 [{"id", "group_name", "created_by", "avatar", "member_count"}]。
+        """
+        if not keyword:
+            return []
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                like = f"%{keyword}%"
+                if username:
+                    cursor.execute('''
+                        SELECT g.id, g.group_name, g.created_by, g.avatar,
+                               (SELECT COUNT(*) FROM group_members gm
+                                WHERE gm.group_id = g.id) AS member_count
+                        FROM groups g
+                        WHERE g.group_name LIKE ?
+                          AND g.id NOT IN (
+                              SELECT group_id FROM group_members WHERE username = ?)
+                        ORDER BY g.id ASC LIMIT ?
+                    ''', (like, username, limit))
+                else:
+                    cursor.execute('''
+                        SELECT g.id, g.group_name, g.created_by, g.avatar,
+                               (SELECT COUNT(*) FROM group_members gm
+                                WHERE gm.group_id = g.id) AS member_count
+                        FROM groups g
+                        WHERE g.group_name LIKE ?
+                        ORDER BY g.id ASC LIMIT ?
+                    ''', (like, limit))
+                rows = cursor.fetchall()
+            return [
+                {"id": r[0], "group_name": r[1], "created_by": r[2],
+                 "avatar": r[3] or "", "member_count": r[4]}
+                for r in rows
+            ]
+        except sqlite3.Error as e:
+            logging.error(f"搜索群组失败: keyword={keyword}, 错误={e}")
+            return []
+
+    def kick_group_member(self, group_id, username, target):
+        """群主移出成员（P1-16）。仅群主可操作；不能移出群主/自己；
+        target 必须是成员。成功删除 group_members 行并返回 True。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT created_by FROM groups WHERE id = ?", (group_id,))
+                row = cursor.fetchone()
+                if not row or row[0] != username:
+                    return False
+                if target == username or row[0] == target:
+                    return False
+                cursor.execute(
+                    "DELETE FROM group_members WHERE group_id = ? AND username = ?",
+                    (group_id, target))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"移出群成员失败: 群组={group_id}, 目标={target}, 错误={e}")
+            return False
+
+    def transfer_group_owner(self, group_id, username, target):
+        """转让群主（P1-16）。仅群主可转让；target 必须是成员且非本人。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT created_by FROM groups WHERE id = ?", (group_id,))
+                row = cursor.fetchone()
+                if not row or row[0] != username:
+                    return False
+                if target == username:
+                    return False
+                cursor.execute(
+                    "SELECT 1 FROM group_members WHERE group_id = ? AND username = ?",
+                    (group_id, target))
+                if not cursor.fetchone():
+                    return False
+                cursor.execute(
+                    "UPDATE groups SET created_by = ? WHERE id = ?",
+                    (target, group_id))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"转让群主失败: 群组={group_id}, 错误={e}")
+            return False
+
+    def rename_group(self, group_id, username, new_name):
+        """群主改名（P1-16）。名称非空且不与既有群组重名（UNIQUE）。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT created_by FROM groups WHERE id = ?", (group_id,))
+                row = cursor.fetchone()
+                if not row or row[0] != username:
+                    return False
+                new_name = (new_name or "").strip()
+                if not new_name:
+                    return False
+                cursor.execute(
+                    "UPDATE groups SET group_name = ? WHERE id = ?",
+                    (new_name, group_id))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.IntegrityError:
+            logging.error(f"群组改名失败: 名称已存在 {new_name}")
+            return False
+        except sqlite3.Error as e:
+            logging.error(f"群组改名失败: 群组={group_id}, 错误={e}")
+            return False
+
+    def set_group_avatar(self, group_id, username, avatar):
+        """群主设置群头像（P1-16）；传 '' 表示清除。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT created_by FROM groups WHERE id = ?", (group_id,))
+                row = cursor.fetchone()
+                if not row or row[0] != username:
+                    return False
+                cursor.execute(
+                    "UPDATE groups SET avatar = ? WHERE id = ?",
+                    (avatar or "", group_id))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"设置群头像失败: 群组={group_id}, 错误={e}")
+            return False
+
+    def set_group_history_visibility(self, group_id, username, visible, limit):
+        """群主设置新成员历史可见性（P1-18）。visible 为 1/0，limit 为可见条数。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT created_by FROM groups WHERE id = ?", (group_id,))
+                row = cursor.fetchone()
+                if not row or row[0] != username:
+                    return False
+                cursor.execute(
+                    "UPDATE groups SET history_visible = ?, history_limit = ? "
+                    "WHERE id = ?",
+                    (1 if visible else 0, int(limit or 50), group_id))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"设置历史可见性失败: 群组={group_id}, 错误={e}")
+            return False
+
+    # ============================================================
+    # 阶段 M2（P1-17 入群审批/邀请制）
+    # ============================================================
+
+    def request_join_group(self, group_id, username, message=None):
+        """发起入群申请：群存在 + 非成员 + 无既有 pending 申请 → 插入。
+
+        message 为可选验证消息（P-11 用户反馈：申请可附验证消息，
+        群主审批时可见）。
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT 1 FROM groups WHERE id = ?", (group_id,))
+                if not cursor.fetchone():
+                    return False
+                cursor.execute(
+                    "SELECT 1 FROM group_members WHERE group_id = ? AND username = ?",
+                    (group_id, username))
+                if cursor.fetchone():
+                    return False
+                cursor.execute(
+                    "SELECT 1 FROM group_join_requests "
+                    "WHERE group_id = ? AND username = ?",
+                    (group_id, username))
+                if cursor.fetchone():
+                    return False
+                cursor.execute(
+                    "INSERT INTO group_join_requests "
+                    "(group_id, username, request_message) VALUES (?, ?, ?)",
+                    (group_id, username, message or ""))
+                conn.commit()
+                logging.info(f"入群申请已保存: 用户={username}, 群组={group_id}")
+                return True
+        except sqlite3.Error as e:
+            logging.error(f"入群申请失败: 群组={group_id}, 用户={username}, 错误={e}")
+            return False
+
+    def get_pending_group_join_requests(self, group_id):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT username FROM group_join_requests
+                WHERE group_id = ? AND status = 'pending'
+                ORDER BY created_at ASC
+            ''', (group_id,))
+            return [row[0] for row in cursor.fetchall()]
+
+    def get_pending_group_join_requests_detail(self, group_id):
+        """查询待审批入群申请（含验证消息），返回 [(username, request_message)]。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT username, request_message FROM group_join_requests
+                WHERE group_id = ? AND status = 'pending'
+                ORDER BY created_at ASC
+            ''', (group_id,))
+            return [(row[0], row[1] or "") for row in cursor.fetchall()]
+
+    def has_pending_group_join_request(self, group_id, username):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT 1 FROM group_join_requests
+                WHERE group_id = ? AND username = ? AND status = 'pending'
+            ''', (group_id, username))
+            return cursor.fetchone() is not None
+
+    def approve_join_request(self, group_id, approver, target):
+        """群主批准入群申请：删除申请行并加入群组。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT created_by FROM groups WHERE id = ?", (group_id,))
+                row = cursor.fetchone()
+                if not row or row[0] != approver:
+                    return False
+                cursor.execute(
+                    "SELECT 1 FROM group_join_requests "
+                    "WHERE group_id = ? AND username = ?",
+                    (group_id, target))
+                if not cursor.fetchone():
+                    return False
+                cursor.execute(
+                    "DELETE FROM group_join_requests "
+                    "WHERE group_id = ? AND username = ?", (group_id, target))
+                cursor.execute(
+                    "INSERT OR IGNORE INTO group_members (group_id, username) "
+                    "VALUES (?, ?)", (group_id, target))
+                conn.commit()
+                logging.info(f"入群申请已批准: 用户={target}, 群组={group_id}")
+                return True
+        except sqlite3.Error as e:
+            logging.error(f"批准入群申请失败: 群组={group_id}, 错误={e}")
+            return False
+
+    def reject_join_request(self, group_id, approver, target):
+        """群主拒绝入群申请：删除申请行，不加入。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT created_by FROM groups WHERE id = ?", (group_id,))
+                row = cursor.fetchone()
+                if not row or row[0] != approver:
+                    return False
+                cursor.execute(
+                    "DELETE FROM group_join_requests "
+                    "WHERE group_id = ? AND username = ?", (group_id, target))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"拒绝入群申请失败: 群组={group_id}, 错误={e}")
+            return False
+
+    def invite_group_member(self, group_id, inviter, invitee):
+        """邀请入群：inviter 必须是成员；invitee 存在、非成员、无既有邀请。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT 1 FROM group_members WHERE group_id = ? AND username = ?",
+                    (group_id, inviter))
+                if not cursor.fetchone():
+                    return False
+                cursor.execute(
+                    "SELECT 1 FROM users WHERE username = ?", (invitee,))
+                if not cursor.fetchone():
+                    return False
+                cursor.execute(
+                    "SELECT 1 FROM group_members WHERE group_id = ? AND username = ?",
+                    (group_id, invitee))
+                if cursor.fetchone():
+                    return False
+                cursor.execute(
+                    "SELECT 1 FROM group_invitations "
+                    "WHERE group_id = ? AND username = ?",
+                    (group_id, invitee))
+                if cursor.fetchone():
+                    return False
+                cursor.execute(
+                    "INSERT INTO group_invitations (group_id, username, inviter) "
+                    "VALUES (?, ?, ?)", (group_id, invitee, inviter))
+                conn.commit()
+                logging.info(f"群邀请已保存: {inviter} 邀请 {invitee} 加入群组 {group_id}")
+                return True
+        except sqlite3.Error as e:
+            logging.error(f"群邀请失败: 群组={group_id}, 错误={e}")
+            return False
+
+    def get_pending_group_invitations(self, username):
+        """查询用户的待处理群邀请，返回 [(group_id, group_name, inviter)]。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT gi.group_id, g.group_name, gi.inviter
+                FROM group_invitations gi
+                JOIN groups g ON g.id = gi.group_id
+                WHERE gi.username = ? AND gi.status = 'pending'
+                ORDER BY gi.created_at ASC
+            ''', (username,))
+            return cursor.fetchall()
+
+    def accept_group_invite(self, group_id, username):
+        """接受群邀请：删除邀请行并加入群组。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT 1 FROM group_invitations "
+                    "WHERE group_id = ? AND username = ?",
+                    (group_id, username))
+                if not cursor.fetchone():
+                    return False
+                cursor.execute(
+                    "DELETE FROM group_invitations "
+                    "WHERE group_id = ? AND username = ?", (group_id, username))
+                cursor.execute(
+                    "INSERT OR IGNORE INTO group_members (group_id, username) "
+                    "VALUES (?, ?)", (group_id, username))
+                conn.commit()
+                logging.info(f"群邀请已接受: 用户={username}, 群组={group_id}")
+                return True
+        except sqlite3.Error as e:
+            logging.error(f"接受群邀请失败: 群组={group_id}, 错误={e}")
+            return False
+
+    def decline_group_invite(self, group_id, username):
+        """拒绝群邀请：删除邀请行，不加入。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "DELETE FROM group_invitations "
+                    "WHERE group_id = ? AND username = ?", (group_id, username))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"拒绝群邀请失败: 群组={group_id}, 错误={e}")
+            return False
+
+    # ============================================================
     # 消息历史持久化
     # ============================================================
 
@@ -1279,11 +1768,13 @@ class Database:
         return self._history_row_dict(row) if row else None
 
     def get_message_history_rows(self, user, with_user=None, group_id=None,
-                                 limit=50, before=None):
+                                 limit=50, before=None, since=None):
         """分页拉取历史消息（dict 行，含 K 扩展字段），时间倒序（最新在前）。
 
         范围/排序与既有 get_message_history 完全一致；供服务端
         history_response 组装（携带 reply_to）。
+        since（阶段 M3：P1-18 新成员历史可见性）：可选时间下界，
+        仅返回 timestamp >= since 的行（可见性过滤），缺省不过滤。
         """
         columns = self._HISTORY_ROW_COLUMNS
         with self._get_connection() as conn:
@@ -1291,20 +1782,38 @@ class Database:
             if group_id is not None:
                 if before is not None:
                     ts, rid = before
-                    cursor.execute(f'''
-                        SELECT {columns} FROM message_history
-                        WHERE group_id = ?
-                          AND (timestamp < ? OR (timestamp = ? AND id < ?))
-                        ORDER BY timestamp DESC, id DESC
-                        LIMIT ?
-                    ''', (group_id, ts, ts, rid, limit))
+                    if since is not None:
+                        cursor.execute(f'''
+                            SELECT {columns} FROM message_history
+                            WHERE group_id = ?
+                              AND timestamp >= ?
+                              AND (timestamp < ? OR (timestamp = ? AND id < ?))
+                            ORDER BY timestamp DESC, id DESC
+                            LIMIT ?
+                        ''', (group_id, since, ts, ts, rid, limit))
+                    else:
+                        cursor.execute(f'''
+                            SELECT {columns} FROM message_history
+                            WHERE group_id = ?
+                              AND (timestamp < ? OR (timestamp = ? AND id < ?))
+                            ORDER BY timestamp DESC, id DESC
+                            LIMIT ?
+                        ''', (group_id, ts, ts, rid, limit))
                 else:
-                    cursor.execute(f'''
-                        SELECT {columns} FROM message_history
-                        WHERE group_id = ?
-                        ORDER BY timestamp DESC, id DESC
-                        LIMIT ? OFFSET 0
-                    ''', (group_id, limit))
+                    if since is not None:
+                        cursor.execute(f'''
+                            SELECT {columns} FROM message_history
+                            WHERE group_id = ? AND timestamp >= ?
+                            ORDER BY timestamp DESC, id DESC
+                            LIMIT ? OFFSET 0
+                        ''', (group_id, since, limit))
+                    else:
+                        cursor.execute(f'''
+                            SELECT {columns} FROM message_history
+                            WHERE group_id = ?
+                            ORDER BY timestamp DESC, id DESC
+                            LIMIT ? OFFSET 0
+                        ''', (group_id, limit))
             elif with_user is not None:
                 if before is not None:
                     ts, rid = before
@@ -1611,6 +2120,137 @@ class Database:
         except sqlite3.Error as e:
             logging.error(f"清理过期文件请求失败: {e}")
             return 0
+
+    # ============================================================
+    # 阶段 M6（P1-21 存储治理）：过期已读消息清理 + 占用统计
+    # ============================================================
+
+    def cleanup_expired_delivered_messages(self, days=30):
+        """清理超过 N 天的已送达（delivered）离线消息（9.3 并入 P1-21）。
+
+        仅删除 status='delivered' 且超过 N 天的行；status='sent'（未读）保留；
+        message_history 为永久表，不参与清理。返回删除行数。
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    DELETE FROM offline_messages
+                    WHERE status = 'delivered'
+                      AND timestamp <= datetime('now', '-' || ? || ' days')
+                ''', (days,))
+                deleted = cursor.rowcount
+                conn.commit()
+                logging.info(f"清理过期已读消息: 删除 {deleted} 条（{days} 天前 delivered）")
+                return deleted
+        except sqlite3.Error as e:
+            logging.error(f"清理过期已读消息失败: {e}")
+            return 0
+
+    def get_file_stats(self):
+        """统计 file_store 目录（pending + history）的文件数与字节数。"""
+        count = 0
+        total_bytes = 0
+        store = self._file_store_dir()
+        for root, _, files in os.walk(store):
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    total_bytes += os.path.getsize(fp)
+                    count += 1
+                except OSError:
+                    continue
+        return {"file_count": count, "file_store_bytes": total_bytes}
+
+    def get_message_count(self):
+        """message_history 总行数（状态面板 total_messages）。"""
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM message_history").fetchone()
+        return row[0] if row else 0
+
+    def get_pending_file_request_count(self):
+        """待处理文件请求数（file_requests + group_file_requests，排除 recalled）。"""
+        with self._get_connection() as conn:
+            row = conn.execute('''
+                SELECT
+                    (SELECT COUNT(*) FROM file_requests WHERE status != 'recalled') +
+                    (SELECT COUNT(*) FROM group_file_requests WHERE status != 'recalled')
+            ''').fetchone()
+        return row[0] if row else 0
+
+    def get_storage_stats(self):
+        """存储占用统计（P1-21）：文件字节数/文件数/库大小/消息数/待处理请求数。"""
+        fs = self.get_file_stats()
+        db_bytes = 0
+        try:
+            db_bytes = os.path.getsize(self.db_name)
+        except OSError:
+            pass
+        return {
+            "file_store_bytes": fs["file_store_bytes"],
+            "file_count": fs["file_count"],
+            "db_bytes": db_bytes,
+            "message_count": self.get_message_count(),
+            "pending_file_requests": self.get_pending_file_request_count(),
+        }
+
+    # ============================================================
+    # 阶段 M8（P1-7 文件收发管理页）：文件历史查询
+    # ============================================================
+
+    def get_user_file_messages(self, username, with_user=None, group_id=None):
+        """查询用户的文件收发历史（message_history 中 type='file' 的行）。
+
+        范围：私聊（with_user）双向 / 群聊（group_id）全员 / 缺省全局
+        （私聊双向 ∪ 所属群组全部）。filesize 取 file_path 磁盘实际大小
+        （文件缺失 → 0）。返回 dict 列表。
+        """
+        columns = ("message_id, sender, receiver, message_type, content, "
+                   "filename, timestamp, group_id, status, file_path")
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if group_id is not None:
+                cursor.execute(f'''
+                    SELECT {columns} FROM message_history
+                    WHERE group_id = ? AND message_type = 'file'
+                    ORDER BY timestamp DESC, id DESC
+                ''', (group_id,))
+            elif with_user is not None:
+                cursor.execute(f'''
+                    SELECT {columns} FROM message_history
+                    WHERE message_type = 'file'
+                      AND ((sender = ? AND receiver = ?)
+                        OR (sender = ? AND receiver = ?))
+                    ORDER BY timestamp DESC, id DESC
+                ''', (username, with_user, with_user, username))
+            else:
+                cursor.execute(f'''
+                    SELECT {columns} FROM message_history
+                    WHERE message_type = 'file'
+                      AND (sender = ? OR receiver = ? OR group_id IN (
+                          SELECT group_id FROM group_members WHERE username = ?))
+                    ORDER BY timestamp DESC, id DESC
+                ''', (username, username, username))
+            rows = cursor.fetchall()
+        result = []
+        for r in rows:
+            filesize = 0
+            if r[9]:
+                try:
+                    filesize = os.path.getsize(r[9])
+                except OSError:
+                    filesize = 0
+            result.append({
+                "filename": r[5] or "",
+                "filesize": filesize,
+                "sender": r[1],
+                "receiver": r[2] or "",
+                "message_id": r[0],
+                "timestamp": r[6],
+                "group_id": r[7],
+                "status": r[8] or "sent",
+            })
+        return result
 
     def remove_friend(self, user1, user2):
         """删除好友关系（双向），清除双向 friends 记录。

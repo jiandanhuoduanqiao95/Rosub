@@ -211,10 +211,8 @@ class TestGroupChatIdempotency:
             cur.execute("SELECT id FROM groups WHERE group_name='测试群'")
             gid = cur.fetchone()[0]
         alice.drain()  # 消费"创建了群组"系统提示 + list_groups
-        for member in (bob, carol):
-            member.send("join_group", str(gid))
-            member.expect("chat")  # 已加入
-            member.drain()  # 消费 list_groups
+        for uname in ("bob", "carol"):
+            harness.db.join_group(gid, uname)
         return alice, bob, carol, gid
 
     def test_duplicate_group_chat_not_broadcast(self, harness):
@@ -307,9 +305,7 @@ class TestGroupChatIdempotency:
 
         member = harness.client()
         member.login("foo_bar", "pass123")
-        member.send("join_group", str(gid))
-        member.expect("chat")
-        member.drain()
+        harness.db.join_group(gid, "foo_bar")
 
         mid = f"{int(time.time() * 1000)}_123456"
         alice.send("group_chat", "含下划线成员群聊", group_id=str(gid), message_id=mid)

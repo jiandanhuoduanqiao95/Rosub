@@ -205,8 +205,7 @@ class TestLeaveGroupHandler:
         bob = harness.client()
         bob.login("bob", "password456", consume=False)
         bob.recv_initial()
-        bob.send("join_group", str(gid))
-        bob.drain(timeout=0.8)
+        harness.db.join_group(gid, "bob")
 
         # bob 离开
         assert harness.db.is_group_member(gid, "bob") is True
@@ -231,8 +230,7 @@ class TestLeaveGroupHandler:
         bob.recv_initial()
         # 阶段 J：消费 bob 登录触发的 presence 广播（通知性噪声）
         alice.drain(timeout=0.8)
-        bob.send("join_group", str(gid))
-        bob.drain(timeout=0.8)
+        harness.db.join_group(gid, "bob")
 
         # alice 还在线时 bob 离开 → alice 应收到通知
         bob.send("leave_group", "", group_id=str(gid))
@@ -257,8 +255,7 @@ class TestLeaveGroupHandler:
         bob = harness.client()
         bob.login("bob", "password456", consume=False)
         bob.recv_initial()
-        bob.send("join_group", str(gid))
-        bob.drain(timeout=0.8)
+        harness.db.join_group(gid, "bob")
 
         # alice（创建者）离开
         alice.send("leave_group", "", group_id=str(gid))
@@ -312,16 +309,16 @@ class TestLeaveGroupHandler:
         bob = harness.client()
         bob.login("bob", "password456", consume=False)
         bob.recv_initial()
-        bob.send("join_group", str(gid))
-        bob.drain(timeout=0.8)
+        harness.db.join_group(gid, "bob")
         bob.send("leave_group", "", group_id=str(gid))
         bob.drain(timeout=0.8)
 
-        # 重新加入
+        # 重新加入：申请制（输入群组 ID 加入需群主审批）
         bob.send("join_group", str(gid))
         h, d = bob.recv(timeout=2)
         assert h is not None
-        assert "已加入群组" in d.decode()
+        assert "已发送入群申请" in d.decode()
+        harness.db.approve_join_request(gid, "alice", "bob")
         assert harness.db.is_group_member(gid, "bob") is True
 
     def test_last_member_leave_deletes_group(self, harness):
@@ -383,8 +380,7 @@ class TestListGroupMembersHandler:
         bob = harness.client()
         bob.login("bob", "password456", consume=False)
         bob.recv_initial()
-        bob.send("join_group", str(gid))
-        bob.drain(timeout=0.8)
+        harness.db.join_group(gid, "bob")
 
         # alice 查询成员列表
         alice.send("list_group_members", "", group_id=str(gid))

@@ -1,0 +1,5 @@
+# 聊天室服务端运行时依赖（阶段 M5：Docker 构建使用）
+bcrypt>=4.0
+pyyaml>=6.0
+cryptography>=41.0
+pyopenssl>=23.0

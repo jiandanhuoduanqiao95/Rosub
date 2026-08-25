@@ -183,6 +183,36 @@ class AppState extends ChangeNotifier {
   final List<Group> _groups = [];
   UnmodifiableListView<Group> get groups => UnmodifiableListView(_groups);
 
+  // ---- 阶段 M2：入群申请（按群隔离）----
+  final Map<int, List<String>> _joinRequests = {};
+  final Map<int, Map<String, String>> _joinRequestMessages = {};
+  List<String> joinRequestsOf(int groupId) =>
+      UnmodifiableListView(_joinRequests[groupId] ?? const []);
+
+  /// 某申请的验证消息（P-11 用户反馈：申请可附验证消息）
+  String joinRequestMessageOf(int groupId, String username) =>
+      _joinRequestMessages[groupId]?[username] ?? '';
+
+  // ---- 阶段 M2：群邀请（group_invite 推送）----
+  final List<GroupInvite> _invitations = [];
+  List<GroupInvite> get invitations =>
+      UnmodifiableListView(_invitations);
+
+  // ---- 阶段 M8：文件收发记录（file_list_response 推送）----
+  final List<FileRecord> _fileRecords = [];
+  List<FileRecord> get fileRecords => UnmodifiableListView(_fileRecords);
+
+  // ---- 阶段 M：群组搜索结果（group_search_response 推送）----
+  final List<Group> _groupSearchResults = [];
+  List<Group> get groupSearchResults =>
+      UnmodifiableListView(_groupSearchResults);
+
+  // ---- 阶段 M4：服务端状态面板 / 存储清理结果 ----
+  Map<String, dynamic>? _serverStatus;
+  Map<String, dynamic>? get serverStatus => _serverStatus;
+  Map<String, dynamic>? _storageCleanupResult;
+  Map<String, dynamic>? get storageCleanupResult => _storageCleanupResult;
+
   // ---- 聊天消息 ----
   // key = 好友用户名 或 "group_N"
   final Map<String, List<ChatMessage>> _messages = {};
@@ -538,6 +568,14 @@ class AppState extends ChangeNotifier {
     _friendMeta.clear();
     _blockedUsers.clear();
     _userSearchResults.clear();
+    // 阶段 M：群组治理/运维状态随登出清空
+    _joinRequests.clear();
+    _joinRequestMessages.clear();
+    _invitations.clear();
+    _fileRecords.clear();
+    _groupSearchResults.clear();
+    _serverStatus = null;
+    _storageCleanupResult = null;
     _currentChat = null;
     _noticeQueue.clear();
     _log('已断开连接');
@@ -609,11 +647,111 @@ class AppState extends ChangeNotifier {
   void updateGroupMembers(int groupId, List<String> members) {
     final index = _groups.indexWhere((g) => g.id == groupId);
     if (index == -1) return;
+    final old = _groups[index];
     _groups[index] = Group(
       id: groupId,
-      name: _groups[index].name,
+      name: old.name,
       members: members,
+      owner: old.owner,
+      avatar: old.avatar,
+      historyVisible: old.historyVisible,
+      historyLimit: old.historyLimit,
     );
+    notifyListeners();
+  }
+
+  // ---- 阶段 M1：群主标识 / 群组更新（改名/头像/转让后同步）----
+
+  bool isGroupOwner(int groupId) {
+    final index = _groups.indexWhere((g) => g.id == groupId);
+    if (index == -1) return false;
+    return _groups[index].isOwner(_username ?? '');
+  }
+
+  void updateGroup(Group group) {
+    final index = _groups.indexWhere((g) => g.id == group.id);
+    if (index == -1) {
+      _groups.add(group);
+    } else {
+      _groups[index] = group;
+    }
+    notifyListeners();
+  }
+
+  void removeGroup(int groupId) {
+    final key = 'group_$groupId';
+    _groups.removeWhere((g) => g.id == groupId);
+    _messages.remove(key);
+    _unreadCount.remove(key);
+    _noMoreHistory.remove(key);
+    _searchResults.remove(key);
+    _searchQueries.remove(key);
+    if (_currentChat == key) _currentChat = null;
+    notifyListeners();
+  }
+
+  // ---- 阶段 M2：入群申请状态 ----
+
+  void setJoinRequests(int groupId, List<String> usernames) {
+    _joinRequests[groupId] = List.of(usernames);
+    notifyListeners();
+  }
+
+  /// 设置某群待审批申请的验证消息（与 setJoinRequests 配套）
+  void setJoinRequestMessages(int groupId, Map<String, String> messages) {
+    _joinRequestMessages[groupId] = Map.of(messages);
+    notifyListeners();
+  }
+
+  void removeJoinRequest(int groupId, String username) {
+    final list = _joinRequests[groupId];
+    if (list == null) return;
+    list.remove(username);
+    _joinRequestMessages[groupId]?.remove(username);
+    notifyListeners();
+  }
+
+  // ---- 阶段 M2：群邀请状态 ----
+
+  void setInvitations(List<GroupInvite> invites) {
+    _invitations
+      ..clear()
+      ..addAll(invites);
+    notifyListeners();
+  }
+
+  void removeInvitation(int groupId) {
+    _invitations.removeWhere((i) => i.groupId == groupId);
+    notifyListeners();
+  }
+
+  // ---- 阶段 M8：文件收发记录 ----
+
+  void setFileRecords(List<FileRecord> records) {
+    _fileRecords
+      ..clear()
+      ..addAll(records);
+    notifyListeners();
+  }
+
+  // ---- 阶段 M：群组搜索结果 ----
+
+  void setGroupSearchResults(List<Group> groups) {
+    _groupSearchResults
+      ..clear()
+      ..addAll(groups);
+    notifyListeners();
+  }
+
+  // ---- 阶段 M4：服务端状态面板 / 存储清理 ----
+
+  void setServerStatus(Map<String, dynamic>? status) {
+    _serverStatus = status;
+    notifyListeners();
+  }
+
+  void setStorageCleanupResult(Map<String, dynamic>? result) {
+    _storageCleanupResult = result;
     notifyListeners();
   }
 

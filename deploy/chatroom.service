@@ -1,0 +1,35 @@
+# ============================================================
+# 聊天室服务端 —— systemd 服务单元（阶段 M5：P1-20）
+# ============================================================
+# 安装：
+#   sudo cp deploy/chatroom.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable chatroom   # 开机自启
+#   sudo systemctl start chatroom    # 启动（崩溃自动拉起）
+# 管理员密钥：经 EnvironmentFile 注入（不硬编码在单元内）
+#   sudo mkdir -p /etc/chatroom && echo 'CHATROOM_ADMIN_SECRET=<你的密钥>' \
+#     | sudo tee /etc/chatroom/chatroom.env && sudo chmod 600 /etc/chatroom/chatroom.env
+# ============================================================
+
+[Unit]
+Description=Chatroom IM Server（聊天室服务端）
+After=network.target
+
+[Service]
+Type=simple
+# 项目根目录（按实际部署路径修改）
+WorkingDirectory=/opt/chatroom
+# 管理员密钥：只读注入，权限 600
+EnvironmentFile=/etc/chatroom/chatroom.env
+ExecStart=/opt/chatroom/.venv/bin/python /opt/chatroom/server/server_main.py
+# 崩溃自动拉起
+Restart=on-failure
+RestartSec=3
+# 资源与安全加固
+User=chatroom
+Group=chatroom
+NoNewPrivileges=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
