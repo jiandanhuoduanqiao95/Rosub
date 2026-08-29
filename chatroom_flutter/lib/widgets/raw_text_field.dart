@@ -12,8 +12,12 @@
 ///   ESC:   —— 用户按 Esc 取消
 
 import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
+import '../models/chat_models.dart';
 import '../services/ime_bridge.dart';
 
 class RawTextField extends StatefulWidget {
@@ -24,6 +28,8 @@ class RawTextField extends StatefulWidget {
   final bool showVisibilityToggle;
   final bool showChineseInput;
   final ValueChanged<String>? onSubmitted;
+  // 阶段 N3（P2-4 图片粘贴直发）：剪贴板含图片时回调（经 GTK 桥接读取）
+  final ValueChanged<Uint8List>? onImagePasted;
 
   const RawTextField({
     super.key,
@@ -34,6 +40,7 @@ class RawTextField extends StatefulWidget {
     this.showVisibilityToggle = false,
     this.showChineseInput = false,
     this.onSubmitted,
+    this.onImagePasted,
   });
 
   @override
@@ -43,6 +50,9 @@ class RawTextField extends StatefulWidget {
 class _RawTextFieldState extends State<RawTextField> {
   late final FocusNode _focusNode;
   final Object _imeOwner = Object();
+  /// 阶段 N 补充（鼠标文字选择）：内容 RichText 的 key，用于
+  /// 全局坐标 → 字符索引映射（TextPainter 测量）
+  final GlobalKey _textKey = GlobalKey();
   int _cursorPos = 0;
   int _selStart = 0;
   int _selEnd = 0;
@@ -79,6 +89,12 @@ class _RawTextFieldState extends State<RawTextField> {
       ImeBridgeManager.instance.addCursorListener(_onImeCursor);
       ImeBridgeManager.instance.addSubmitListener(_onImeSubmit);
       ImeBridgeManager.instance.addEscapeListener(_onImeEscape);
+      // 阶段 N5（P2-14 键盘导航）：中文输入激活时方向键经桥接输出
+      // NAV:UP/NAV:DOWN，此处注册监听执行焦点切换（客户端内部管道）
+      ImeBridgeManager.instance.addNavUpListener(_onNavUp);
+      ImeBridgeManager.instance.addNavDownListener(_onNavDown);
+      // 阶段 N3 补充：桥接 Ctrl+V 拦截到剪贴板图片 → 主动推送
+      ImeBridgeManager.instance.addImageListener(_onBridgeImage);
     }
 
     _focusNode.addListener(_onFocusChanged);
@@ -110,6 +126,9 @@ class _RawTextFieldState extends State<RawTextField> {
       ImeBridgeManager.instance.removeCursorListener(_onImeCursor);
       ImeBridgeManager.instance.removeSubmitListener(_onImeSubmit);
       ImeBridgeManager.instance.removeEscapeListener(_onImeEscape);
+      ImeBridgeManager.instance.removeNavUpListener(_onNavUp);
+      ImeBridgeManager.instance.removeNavDownListener(_onNavDown);
+      ImeBridgeManager.instance.removeImageListener(_onBridgeImage);
     }
     // 仅自行创建的 FocusNode 才 dispose，外部传入的不管理
     if (widget.focusNode == null) {
@@ -141,6 +160,19 @@ class _RawTextFieldState extends State<RawTextField> {
   void _activateBridge() {
     _stealingFocus = true;
     _bridgeActive = true;
+    // 阶段 N 补充（用户反馈）：把桥接 GTK 窗口移到输入框下方，候选窗口
+    // 跟随输入框显示（原先固定在屏幕外 → 候选窗口出现在屏幕左上角）。
+    // 须在 grabFocus（夺焦）之前发送：X11 活动窗口此时仍是 Flutter 窗口。
+    // localToGlobal 返回 Flutter 逻辑坐标，桥接 GTK 的 win.move 按
+    // 物理像素定位（HiDPI 下实测 2 倍缩放）——乘 devicePixelRatio 换算。
+    final box = context.findRenderObject() as RenderBox?;
+    if (box != null && box.attached) {
+      final offset = box.localToGlobal(Offset.zero);
+      final dpr = MediaQuery.of(context).devicePixelRatio;
+      ImeBridgeManager.instance.moveWindow(
+          (offset.dx * dpr).round(),
+          ((offset.dy + box.size.height + 2) * dpr).round());
+    }
     ImeBridgeManager.instance.setActiveOwner(_imeOwner);
     ImeBridgeManager.instance.grabFocus(widget.controller.text);
 
@@ -239,6 +271,54 @@ class _RawTextFieldState extends State<RawTextField> {
     });
   }
 
+  /// 阶段 N5：无 onSubmitted 的输入框回车 → 跳到下一个输入框
+  /// （末框不循环回第一个；与 Tab 的环绕语义区分）
+  void _moveFocusForward() {
+    if (_focusNode.context == null) return;
+    try {
+      _focusNode.focusInDirection(TraversalDirection.down);
+    } catch (_) {}
+  }
+
+  // ---- 阶段 N5（P2-14 键盘导航）：桥接 NAV 信号 → 焦点切换 ----
+  // 中文输入（showChineseInput）激活时方向键走 GTK 桥接进程，Flutter
+  // 侧收不到 ↑/↓；桥接拦截后输出 NAV:UP/NAV:DOWN，此处执行与 ASCII
+  // 路径一致的焦点切换（上 = 前一个，下 = 下一个，边界不越界）。
+  // 仅当前激活输入框响应（isActiveOwner 守门，避免多输入框串扰）。
+
+  void _onNavUp() {
+    if (!_bridgeActive || !ImeBridgeManager.instance.isActiveOwner(_imeOwner)) {
+      return;
+    }
+    // P-69 修复（用户实测崩溃）：输入框已从树卸载（context null）时
+    // focusInDirection 内部 null check 会抛未处理异常（桥接 stdout 的
+    // NAV 行在 dispose 竞态窗口内到达）。防御：未挂载/异常均静默忽略。
+    if (_focusNode.context == null) return;
+    try {
+      _focusNode.focusInDirection(TraversalDirection.up);
+    } catch (_) {}
+  }
+
+  void _onNavDown() {
+    if (!_bridgeActive || !ImeBridgeManager.instance.isActiveOwner(_imeOwner)) {
+      return;
+    }
+    if (_focusNode.context == null) return;
+    try {
+      _focusNode.focusInDirection(TraversalDirection.down);
+    } catch (_) {}
+  }
+
+  /// 阶段 N3 补充：桥接推送的剪贴板图片（仅当前激活输入框响应）
+  void _onBridgeImage(Uint8List bytes) {
+    if (!mounted ||
+        !_bridgeActive ||
+        !ImeBridgeManager.instance.isActiveOwner(_imeOwner)) {
+      return;
+    }
+    widget.onImagePasted?.call(bytes);
+  }
+
   // ---- 选择操作 ----
 
   String _selectedText() {
@@ -250,6 +330,66 @@ class _RawTextFieldState extends State<RawTextField> {
   void _clearSelection() {
     _selStart = _cursorPos;
     _selEnd = _cursorPos;
+  }
+
+  // ---- 阶段 N 补充（鼠标文字选择）----
+
+  /// 把全局坐标映射为字符索引（TextPainter 测量，与 _buildContent 同字体）。
+  int _charIndexAtGlobal(Offset global) {
+    final box = _textKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.attached) return _cursorPos;
+    final local = box.globalToLocal(global);
+    final text = widget.controller.text;
+    final display = _obscured ? '●' * text.length : text;
+    if (display.isEmpty) return 0;
+    final baseStyle = DefaultTextStyle.of(context).style.copyWith(fontSize: 16);
+    final tp = TextPainter(
+      text: TextSpan(style: baseStyle, text: display),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+    return tp
+        .getPositionForOffset(local)
+        .offset
+        .clamp(0, text.length);
+  }
+
+  /// 光标/选区变化后同步到桥接 GTK entry（保证中文输入插入点正确）。
+  /// 缓存经 focus 命令一并发送（合并单写规避 IOSink 丢失），
+  /// 首次激活（tapdown 时桥接尚未激活）同样生效。
+  void _syncCursorToBridge(int position) {
+    if (widget.showChineseInput) {
+      ImeBridgeManager.instance.setCursor(position);
+    }
+  }
+
+  void _onTapDownAt(TapDownDetails details) {
+    final idx = _charIndexAtGlobal(details.globalPosition);
+    setState(() {
+      _cursorPos = idx;
+      _clearSelection();
+    });
+    _syncCursorToBridge(idx);
+  }
+
+  void _onPanStartAt(DragStartDetails details) {
+    final idx = _charIndexAtGlobal(details.globalPosition);
+    setState(() {
+      _cursorPos = idx;
+      _selStart = idx;
+      _selEnd = idx;
+    });
+    _syncCursorToBridge(idx);
+  }
+
+  void _onPanUpdateAt(DragUpdateDetails details) {
+    final idx = _charIndexAtGlobal(details.globalPosition);
+    if (idx == _cursorPos) return;
+    setState(() {
+      _cursorPos = idx;
+      _selEnd = idx;
+    });
+    _syncCursorToBridge(idx);
   }
 
   void _deleteSelection() {
@@ -301,16 +441,41 @@ class _RawTextFieldState extends State<RawTextField> {
       return KeyEventResult.handled;
     }
 
-    // 回车 → 提交
+    // 回车 → 提交（阶段 N5：有 onSubmitted 触发提交/发送；
+    // 无回调的输入框（对话框中间输入框等）回车自动跳到下一个输入框）
     if (key == LogicalKeyboardKey.enter ||
         key == LogicalKeyboardKey.numpadEnter) {
-      widget.onSubmitted?.call(widget.controller.text);
+      if (widget.onSubmitted != null) {
+        widget.onSubmitted!(widget.controller.text);
+      } else {
+        _moveFocusForward();
+      }
       return KeyEventResult.handled;
     }
 
     // Tab
     if (key == LogicalKeyboardKey.tab) {
       _focusNode.nextFocus();
+      return KeyEventResult.handled;
+    }
+
+    // 阶段 N5（P2-14 键盘导航）：↑/↓ 切换同一界面输入框焦点
+    // （上 = 前一个，下 = 下一个；首/末不越界——
+    // focusInDirection 与 Flutter 默认方向导航一致，边界不环绕）
+    if (key == LogicalKeyboardKey.arrowUp) {
+      if (_focusNode.context != null) {
+        try {
+          _focusNode.focusInDirection(TraversalDirection.up);
+        } catch (_) {}
+      }
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowDown) {
+      if (_focusNode.context != null) {
+        try {
+          _focusNode.focusInDirection(TraversalDirection.down);
+        } catch (_) {}
+      }
       return KeyEventResult.handled;
     }
 
@@ -430,19 +595,56 @@ class _RawTextFieldState extends State<RawTextField> {
   }
 
   void _paste() async {
-    final data = await Clipboard.getData(Clipboard.kTextPlain);
-    final text = data?.text;
-    if (text == null || text.isEmpty) return;
-    if (_hasSelection) _deleteSelection();
-    for (int i = 0; i < text.length; i++) {
-      final ch = text[i];
-      final code = ch.codeUnitAt(0);
-      if (code >= 0x20 && ch != '\n') {
-        _insert(ch);
-      } else if (ch == '\n') {
-        widget.onSubmitted?.call(widget.controller.text);
+    // 阶段 N3 修订（用户反馈）：图片优先——文件管理器复制图片文件时
+    // 剪贴板同时含路径文本与文件数据，先查图片避免把路径当文字粘贴
+    if (widget.onImagePasted != null) {
+      final image = await ImeBridgeManager.instance.readClipboardImage();
+      if (image != null && image.isNotEmpty) {
+        widget.onImagePasted!(image);
+        return;
       }
     }
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+    if (text != null && text.isNotEmpty) {
+      // 文本像图片文件路径（file:// 或本地路径）且文件为支持的图片 →
+      // 读取文件走图片发送，不把路径当文字插入
+      final imagePath = _imagePathFromText(text);
+      if (imagePath != null && widget.onImagePasted != null) {
+        try {
+          final bytes = File(imagePath).readAsBytesSync();
+          if (isSupportedImage(bytes)) {
+            widget.onImagePasted!(bytes);
+            return;
+          }
+        } catch (_) {
+          // 读取失败回退为文本粘贴
+        }
+      }
+      if (_hasSelection) _deleteSelection();
+      for (int i = 0; i < text.length; i++) {
+        final ch = text[i];
+        final code = ch.codeUnitAt(0);
+        if (code >= 0x20 && ch != '\n') {
+          _insert(ch);
+        } else if (ch == '\n') {
+          widget.onSubmitted?.call(widget.controller.text);
+        }
+      }
+    }
+  }
+
+  /// 文本是否为指向图片文件的路径（单行、图片扩展名、文件存在）
+  String? _imagePathFromText(String text) {
+    var t = text.trim();
+    if (t.isEmpty || t.contains('\n')) return null;
+    if (t.startsWith('file://')) t = t.substring(7);
+    if (!RegExp(r'\.(png|jpe?g|gif)\s*$', caseSensitive: false)
+        .hasMatch(t)) {
+      return null;
+    }
+    if (!File(t).existsSync()) return null;
+    return t;
   }
 
   void _insert(String ch) {
@@ -490,6 +692,11 @@ class _RawTextFieldState extends State<RawTextField> {
       },
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
+        // 阶段 N 补充：鼠标点击定位光标 + 拖动选择文字
+        // （配合既有 Ctrl+C/X/V 快捷键，补齐文本选择操作）
+        onTapDown: _onTapDownAt,
+        onPanStart: _onPanStartAt,
+        onPanUpdate: _onPanUpdateAt,
         onTap: () {
           _focusNode.requestFocus();
           // 如果桥接活跃但用户点击了输入框，重新抢占焦点
@@ -569,6 +776,11 @@ class _RawTextFieldState extends State<RawTextField> {
     final spans = <InlineSpan>[];
     final baseStyle = DefaultTextStyle.of(context).style.copyWith(fontSize: 16);
 
+    // P-68（缺陷修复）：光标在任意位置均渲染细条 '|'（与末尾光标同样式：
+    // primary 色 + w100 字重），字符本身正常渲染——不再把光标处字符反色
+    // 渲染成覆盖整个字符的块状光标（中文/全角字符下像"覆盖一个字"）。
+    // 选区高亮与 530ms 闪烁逻辑不变。
+    var cursorBarEmitted = false;
     int i = 0;
     while (i < display.length || (i == cursor && i == display.length)) {
       if (i >= display.length) {
@@ -597,19 +809,15 @@ class _RawTextFieldState extends State<RawTextField> {
         i = high;
         continue;
       }
-      if (i == cursor && !_hasSelection) {
+      if (i == cursor && !_hasSelection && !cursorBarEmitted) {
         if (i < display.length) {
           spans.add(TextSpan(
-            text: display[i],
+            text: _showCursor ? '|' : ' ',
             style: TextStyle(
-              backgroundColor: _showCursor
-                  ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.7)
-                  : Colors.transparent,
-              color:
-                  _showCursor ? Theme.of(context).colorScheme.onPrimary : null,
-            ),
+                color: Theme.of(context).colorScheme.primary,
+                fontWeight: FontWeight.w100),
           ));
-          i++;
+          cursorBarEmitted = true;
           continue;
         }
       }
@@ -617,6 +825,9 @@ class _RawTextFieldState extends State<RawTextField> {
       break;
     }
 
-    return RichText(text: TextSpan(style: baseStyle, children: spans));
+    return RichText(
+      key: _textKey,
+      text: TextSpan(style: baseStyle, children: spans),
+    );
   }
 }

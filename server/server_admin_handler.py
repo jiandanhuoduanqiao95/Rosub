@@ -30,6 +30,8 @@ class AdminHandler:
                 logging.warning(f"管理员 {username} 尝试删除自己的账号")
                 return
             if self.server.db.delete_user(target_user):
+                # 阶段 N7（P2-7 审计日志）：敏感操作成功即落库
+                self.server.db.record_audit_log(username, "delete_user", target_user)
                 users = self.server.db.get_all_users()
                 # has_any_session 内部取锁（非重入锁，此处不得再持锁）
                 users_list = [[user, self.server.has_any_session(user), bool(is_admin)] for user, is_admin in users]
@@ -84,6 +86,10 @@ class AdminHandler:
                         "[系统公告]", username, "chat", announcement_msg.encode('utf-8'),
                         message_id=str(_uuid.uuid4()))
                     logging.info(f"离线用户 {username} 的公告已持久化")
+            # 阶段 N7（P2-7 审计日志）：发公告为敏感操作，先落库再回执
+            # （避免客户端收到"公告发送成功"后立即查询审计读到空）
+            self.server.db.record_audit_log(
+                username, "announcement", "全体用户", detail=announcement_msg)
             self.server.guarded_send(ssock, "chat", "公告发送成功")
             logging.info(f"管理员 {username} 发送公告成功")
         elif command == "exit":
@@ -113,6 +119,16 @@ class AdminHandler:
             self.server.guarded_send(ssock, "admin_response", json.dumps(result),
                          extra_headers={"response_type": "storage_cleanup"})
             logging.info(f"存储清理执行: 管理员={username}, 结果={result}")
+        elif command == "audit_log":
+            # 阶段 N7（P2-7 审计日志）：敏感操作记录查询（最新在前）
+            try:
+                limit = int(header.get("limit", "")) if header.get("limit") else 100
+            except (TypeError, ValueError):
+                limit = 100
+            logs = self.server.db.get_audit_logs(limit=limit)
+            self.server.guarded_send(ssock, "admin_response", json.dumps(logs),
+                         extra_headers={"response_type": "audit_log"})
+            logging.info(f"审计日志查询: 管理员={username}, 返回={len(logs)}条")
         elif command == "reset_password":
             # 管理员重置密码（阶段 J：P0-5）
             target_user = data.decode("utf-8").strip()
@@ -128,6 +144,8 @@ class AdminHandler:
                 return
             new_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
             if self.server.db.admin_reset_password(target_user, new_hash):
+                # 阶段 N7（P2-7 审计日志）：重置密码为敏感操作，成功即落库
+                self.server.db.record_audit_log(username, "reset_password", target_user)
                 # 先回执管理员（若目标即管理员本人，后续关闭其会话不丢回执）
                 self.server.guarded_send(ssock, "admin_response",
                              f"已将用户 {target_user} 的密码重置",

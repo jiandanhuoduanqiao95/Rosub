@@ -294,15 +294,18 @@ class GroupHandler:
                                 if file_path else None)
                 if history_path:
                     file_data = b''
-                self.server.db.save_offline_message(sender, username, "file", file_data, filename=filename, message_id=message_id, file_path=history_path)
-                self.server.db.save_message_history(sender, username, "file", file_data, filename=filename, message_id=message_id, file_path=history_path)
+                self.server.db.save_offline_message(sender, username, "file", file_data, filename=filename, message_id=message_id, file_path=history_path, group_id=group_id_db)
+                self.server.db.save_message_history(sender, username, "file", file_data, filename=filename, message_id=message_id, file_path=history_path, group_id=group_id_db)
                 # 阶段 L1：群文件送达接受者所有在线会话
                 # 阶段 M8（P1-5）：推送携带 sha256（接收方校验依据）
+                # 阶段 N3b 修复：推送携带 group_id——接收方据此路由到群聊
+                # （旧实现缺 group_id，群文件错落入与发送者的私聊）
                 group_extras = self.server.db.get_group_file_request_extras(message_id)
                 group_sha256 = (group_extras or {}).get("sha256", "")
                 file_headers = {"from": sender, "filename": filename,
                                 "filesize": filesize, "message_id": message_id,
-                                "sha256": group_sha256}
+                                "sha256": group_sha256,
+                                "group_id": str(group_id_db)}
                 for u_sock in self.server.sessions_of(username):
                     # P-07 修复：长文件推送前引用接收方 socket——
                     # 推送期间接收方会话被关闭时 fd 不被释放（延迟关闭），
@@ -357,6 +360,9 @@ class GroupHandler:
                 self.server.guarded_send(ssock, "error", f"用户 {target} 不在群组中")
                 return
             if self.server.db.kick_group_member(group_id, username, target):
+                # 阶段 N7（P2-7 审计日志）：群组治理为敏感操作，成功即落库
+                self.server.db.record_audit_log(
+                    username, "kick_member", target, detail=info["group_name"])
                 self.server.guarded_send(ssock, "chat", f"已将 {target} 移出群组")
                 logging.info(f"群主 {username} 将 {target} 移出群组 {group_id}")
                 # 被踢者通知（在线实时 / 离线保存）+ 群列表刷新
@@ -397,6 +403,9 @@ class GroupHandler:
                 self.server.guarded_send(ssock, "error", f"用户 {target} 不在群组中")
                 return
             if self.server.db.transfer_group_owner(group_id, username, target):
+                # 阶段 N7（P2-7 审计日志）：转让群主为敏感操作，成功即落库
+                self.server.db.record_audit_log(
+                    username, "transfer_owner", target, detail=info["group_name"])
                 self.server.guarded_send(ssock, "chat", f"已将群主转让给 {target}")
                 logging.info(f"群主已转让: {username} -> {target}, 群组={group_id}")
                 # 新群主通知（在线实时 / 离线保存）
@@ -440,6 +449,9 @@ class GroupHandler:
                 self.server.guarded_send(ssock, "error", "群组名称不能为空")
                 return
             if self.server.db.rename_group(group_id, username, new_name):
+                # 阶段 N7（P2-7 审计日志）：改名成功即落库（target=新名，detail=旧名）
+                self.server.db.record_audit_log(
+                    username, "rename_group", new_name, detail=info["group_name"])
                 self.server.guarded_send(ssock, "chat", f"群组已改名为 {new_name}")
                 logging.info(f"群组改名: {group_id} -> {new_name}, 操作者={username}")
                 self.server.broadcast_to_user(

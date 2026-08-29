@@ -71,6 +71,14 @@ else:
     time.sleep(8.0)
 ''';
 
+
+/// 写入 E2E 辅助脚本：确保 /tmp/opencode 目录存在
+/// （部分环境该目录缺失会导致 writeAsStringSync 抛 PathNotFoundException）
+void _writeE2eScript(File file, String content) {
+  Directory('/tmp/opencode').createSync(recursive: true);
+  file.writeAsStringSync(content);
+}
+
 void main() {
   Process? serverProcess;
   var skipped = false;
@@ -84,7 +92,7 @@ void main() {
     }
     AppConfig.serverPort = 8093;
     final script = File('/tmp/opencode/l_p07_e2e_server.py');
-    script.writeAsStringSync(serverScript);
+    _writeE2eScript(script, serverScript);
     serverProcess = await Process.start(
       python,
       [script.path],
@@ -107,7 +115,7 @@ void main() {
   Future<Process> startAlice(String device, String action, String seed) async {
     final root = Directory.current.parent;
     final script = File('/tmp/opencode/l_p07_alice.py');
-    script.writeAsStringSync(pyAlice);
+    _writeE2eScript(script, pyAlice);
     return Process.start('${root.path}/.venv/bin/python',
         [script.path, 'alice', 'password123', device, action, seed],
         environment: {'CHATROOM_ROOT': root.path},

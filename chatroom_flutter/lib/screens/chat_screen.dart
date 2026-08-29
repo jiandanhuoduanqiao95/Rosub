@@ -7,7 +7,14 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
+
+import '../config.dart';
 import '../models/chat_models.dart';
+import '../services/chat_exporter.dart';
+import '../services/file_drop.dart';
 import '../services/ime_bridge.dart';
 import '../services/session_store.dart';
 import '../services/socket_service.dart';
@@ -44,12 +51,16 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _state.addListener(_onStateChanged);
-    _dndExpiryTimer = Timer.periodic(
-        const Duration(seconds: 30), (_) => _checkDndExpiry());
+    _dndExpiryTimer =
+        Timer.periodic(const Duration(seconds: 30), (_) => _checkDndExpiry());
+    // 阶段 N3（P2-4 文件拖拽发送）：接收 GTK 拖入的文件路径
+    FileDrop.instance.ensureListening();
+    FileDrop.instance.setOnFilesDropped(_onFilesDropped);
   }
 
   @override
   void dispose() {
+    FileDrop.instance.setOnFilesDropped(null);
     _draftDebounce?.cancel();
     _dndExpiryTimer?.cancel();
     _state.removeListener(_onStateChanged);
@@ -57,6 +68,18 @@ class _ChatScreenState extends State<ChatScreen> {
     // ChatScreen 退出时释放 IME 桥接焦点，但保留进程（后续登录界面可能需要）
     ImeBridgeManager.instance.releaseFocus();
     super.dispose();
+  }
+
+  /// 阶段 N3（P2-4 文件拖拽发送）：拖入文件 → 既有上传通道
+  /// （sendFile 依据大小自动走 M8 大文件分流；系统会话只读不发送）
+  void _onFilesDropped(List<String> paths) {
+    final key = _state.currentChat;
+    if (key == null || key == '服务器' || paths.isEmpty) return;
+    for (final path in paths) {
+      final name = path.split(RegExp(r'[/\\]')).last;
+      if (name.isEmpty || name == '.' || name == '..') continue;
+      widget.socketService.sendFile(key, path, name);
+    }
   }
 
   /// 免打扰到期检查：到期 → 自动关闭开关 + 提醒用户
@@ -429,6 +452,134 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// 阶段 N3（P2-4 图片粘贴直发）：剪贴板图片预览条
+  /// （发送图片 → sendFileBytes 复用既有上传通道；取消 → 清除预览）
+  Widget _buildImagePreviewBar() {
+    final bytes = _state.pendingImagePreview;
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          children: [
+            const Icon(Icons.image_rounded, size: 20),
+            const SizedBox(width: 8),
+            const Expanded(
+              child: Text(
+                'pasted_image.png',
+                style: TextStyle(fontSize: 13),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            TextButton(
+              onPressed: () => _state.clearPendingImagePreview(),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              // 阶段 N3 修复（用户实测崩溃）：主题 filledButtonTheme 的
+              // minimumSize 为 Size.fromHeight(46)（= 宽度 infinity，
+              // 服务登录等拉伸场景）——FilledButton 放进 Row 会拿到
+              // 无界主轴约束，内部 ConstrainedBox 产生 w=Infinity，
+              // RenderPhysicalShape 布局直接抛异常。此处覆盖为有限尺寸。
+              style: FilledButton.styleFrom(minimumSize: const Size(0, 40)),
+              // 未选会话时禁用发送（预览保留，选会话后可发送）
+              onPressed: (bytes == null || _state.currentChat == null)
+                  ? null
+                  : _sendPastedImage,
+              child: const Text('发送图片'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 发送剪贴板图片（阶段 N3）：复用 sendFileBytes（既有上传通道）
+  void _sendPastedImage() {
+    final key = _state.currentChat;
+    final bytes = _state.pendingImagePreview;
+    if (key == null || key == '服务器' || bytes == null) return;
+    widget.socketService.sendFileBytes(key, bytes, 'pasted_image.png');
+    _state.clearPendingImagePreview();
+  }
+
+  /// 阶段 N3b（P2-4 扩展）：点击内联图片 → 黑底全屏查看（参考微信）。
+  /// 字节优先 Image.memory，否则本地路径 Image.file；点击关闭，可缩放。
+  void _openImageViewer(ChatMessage message) {
+    final bytes = message.fileData;
+    String? path = message.filePath;
+    if (path == null && message.filename != null) {
+      final base = message.filename!.split(RegExp(r'[/\\]')).last;
+      path = '${AppConfig.receivedFilesDir}/$base';
+    }
+    if (bytes == null && (path == null || !File(path).existsSync())) return;
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black,
+      barrierDismissible: true,
+      builder: (ctx) => GestureDetector(
+        onTap: () => Navigator.of(ctx).pop(),
+        child: Center(
+          child: InteractiveViewer(
+            minScale: 0.5,
+            maxScale: 4,
+            child:
+                bytes != null ? Image.memory(bytes) : Image.file(File(path!)),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 阶段 N2（P2-1 聊天记录导出）：当前会话导出 TXT/JSON
+  /// （数据主权闭环：JSON 含完整元数据，TXT 人工可读；保存路径由用户选择）
+  Future<void> _exportChat() async {
+    final key = _state.currentChat;
+    if (key == null || key == '服务器') return;
+    final messages = _state.getMessages(key);
+    // 阶段 N2 修订（用户反馈）：TXT 与 JSON 地位相同——
+    // 两个并列按钮，避免主/次按钮暗示格式有主次之分
+    final format = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('导出聊天记录'),
+        content: const Text('TXT：人工可读的纯文本\nJSON：含完整元数据（时间戳/状态/引用/表情）'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          OutlinedButton.icon(
+            onPressed: () => Navigator.pop(ctx, 'txt'),
+            icon: const Icon(Icons.description_outlined, size: 18),
+            label: const Text('TXT'),
+          ),
+          OutlinedButton.icon(
+            onPressed: () => Navigator.pop(ctx, 'json'),
+            icon: const Icon(Icons.data_object_rounded, size: 18),
+            label: const Text('JSON'),
+          ),
+        ],
+      ),
+    );
+    if (format == null || !mounted) return;
+    final safeName = key.replaceAll(RegExp(r'[^\w\-]'), '_');
+    final path = await FilePicker.platform.saveFile(
+      dialogTitle: '导出聊天记录',
+      fileName: 'chat_$safeName.$format',
+    );
+    if (path == null) return;
+    final content = format == 'txt'
+        ? ChatExporter.exportTxt(chatKey: key, messages: messages)
+        : ChatExporter.exportJson(chatKey: key, messages: messages);
+    try {
+      File(path).writeAsStringSync(content);
+      _state.showNotice('已导出 ${messages.length} 条消息到 $path');
+    } catch (e) {
+      _state.showNotice('导出失败: $e');
+    }
+  }
+
   /// 阶段 K5（P1-2）：引用回复对话框
   Future<void> _showReplyMessageDialog(String messageId) async {
     final current = _state.currentChat;
@@ -580,6 +731,14 @@ class _ChatScreenState extends State<ChatScreen> {
                     showFileListDialog(context, widget.socketService),
               ),
 
+              // 设备管理（阶段 N6：P2-6 登录设备管理——列表/远程下线）
+              IconButton(
+                icon: const Icon(Icons.devices_rounded),
+                tooltip: '设备管理',
+                onPressed: () =>
+                    showDeviceManagementDialog(context, widget.socketService),
+              ),
+
               // 个人资料（阶段 J：P0-2）
               IconButton(
                 icon: const Icon(Icons.account_circle_rounded),
@@ -653,7 +812,8 @@ class _ChatScreenState extends State<ChatScreen> {
                         if (previous != null &&
                             previous != key &&
                             previous != '服务器') {
-                          _state.setConversationDraft(previous, _inputCtrl.text);
+                          _state.setConversationDraft(
+                              previous, _inputCtrl.text);
                           _flushDraft();
                         }
                         _state.selectChat(key);
@@ -677,66 +837,101 @@ class _ChatScreenState extends State<ChatScreen> {
 
                     // === 右侧：聊天区域 ===
                     Expanded(
-                      child: _state.currentChat != null
-                          ? ChatView(
-                              chatKey: _state.currentChat!,
-                              chatTitle: _state
-                                  .displayNameForChat(_state.currentChat!),
-                              messages: _state.isSearchMode(_state.currentChat!)
-                                  ? _state.searchResults(_state.currentChat!)
-                                  : _state.getMessages(_state.currentChat!),
-                              username: _state.username!,
-                              inputCtrl: _inputCtrl,
-                              canSend: _state.currentChat != '服务器',
-                              onSend: _sendMessage,
-                              onSendFile: _sendFile,
-                              onRecall: _confirmRecall,
-                              onLoadHistory: (beforeId) =>
-                                  _loadHistory(_state.currentChat!, beforeId),
-                              hasMoreHistory: _state.hasMoreHistory,
-                              transferFraction: _state.transferFraction,
-                              isSearchMode:
-                                  _state.isSearchMode(_state.currentChat!),
-                              searchQuery:
-                                  _state.searchQueryOf(_state.currentChat!),
-                              onSearch: _runSearch,
-                              onSearchExit: _exitSearch,
-                              onRetrySend: (messageId) => widget.socketService
-                                  .retryPendingMessage(messageId),
-                              // 阶段 K2：输入变化 → 本地草稿状态 + 防抖自动保存
-                              onInputChanged: _onInputChanged,
-                              // 阶段 K5：消息操作（引用/转发/表情/仅我删除）
-                              onReplyMessage: _showReplyMessageDialog,
-                              onForwardMessage: _showForwardTargetDialog,
-                              onAddReaction: (messageId, emoji) {
-                                final key = _state.currentChat;
-                                if (key != null) {
-                                  widget.socketService
-                                      .addReaction(messageId, emoji, key);
-                                }
-                              },
-                              onDeleteMessage: (messageId) {
-                                final key = _state.currentChat;
-                                if (key != null) {
-                                  _state.removeMessageLocally(key, messageId);
-                                }
-                              },
-                            )
-                          : const Center(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(Icons.chat_rounded,
-                                      size: 64, color: Colors.grey),
-                                  SizedBox(height: 16),
-                                  Text(
-                                    '选择一个会话开始聊天',
-                                    style: TextStyle(
-                                        color: Colors.grey, fontSize: 16),
+                      child: Column(
+                        children: [
+                          // 阶段 N3（P2-4 图片粘贴直发）：剪贴板图片预览条
+                          // （发送复用既有上传通道；系统会话只读不显示）
+                          if (_state.pendingImagePreview != null &&
+                              _state.currentChat != '服务器')
+                            _buildImagePreviewBar(),
+                          Expanded(
+                            child: _state.currentChat != null
+                                ? ChatView(
+                                    chatKey: _state.currentChat!,
+                                    chatTitle: _state.displayNameForChat(
+                                        _state.currentChat!),
+                                    messages: _state
+                                            .isSearchMode(_state.currentChat!)
+                                        ? _state
+                                            .searchResults(_state.currentChat!)
+                                        : _state
+                                            .getMessages(_state.currentChat!),
+                                    username: _state.username!,
+                                    inputCtrl: _inputCtrl,
+                                    canSend: _state.currentChat != '服务器',
+                                    onSend: _sendMessage,
+                                    onSendFile: _sendFile,
+                                    onRecall: _confirmRecall,
+                                    onLoadHistory: (beforeId) => _loadHistory(
+                                        _state.currentChat!, beforeId),
+                                    hasMoreHistory: _state.hasMoreHistory,
+                                    transferFraction: _state.transferFraction,
+                                    isSearchMode: _state
+                                        .isSearchMode(_state.currentChat!),
+                                    searchQuery: _state
+                                        .searchQueryOf(_state.currentChat!),
+                                    onSearch: _runSearch,
+                                    onSearchExit: _exitSearch,
+                                    onRetrySend: (messageId) => widget
+                                        .socketService
+                                        .retryPendingMessage(messageId),
+                                    // 阶段 K2：输入变化 → 本地草稿状态 + 防抖自动保存
+                                    onInputChanged: _onInputChanged,
+                                    // 阶段 K5：消息操作（引用/转发/表情/仅我删除）
+                                    onReplyMessage: _showReplyMessageDialog,
+                                    onForwardMessage: _showForwardTargetDialog,
+                                    onAddReaction: (messageId, emoji) {
+                                      final key = _state.currentChat;
+                                      if (key != null) {
+                                        widget.socketService
+                                            .addReaction(messageId, emoji, key);
+                                      }
+                                    },
+                                    onDeleteMessage: (messageId) {
+                                      final key = _state.currentChat;
+                                      if (key != null) {
+                                        _state.removeMessageLocally(
+                                            key, messageId);
+                                      }
+                                    },
+                                    // 阶段 N1（P2-2 永久删除）：本地缓存中彻底移除
+                                    onDeletePermanently: (messageId) {
+                                      final key = _state.currentChat;
+                                      if (key != null) {
+                                        widget.socketService
+                                            .permanentlyDeleteMessage(
+                                                key, messageId);
+                                      }
+                                    },
+                                    // 阶段 N3（P2-4）：剪贴板图片 → 预览条
+                                    onImagePasted: (bytes) {
+                                      if (isSupportedImage(bytes)) {
+                                        _state.setPendingImagePreview(bytes);
+                                      }
+                                    },
+                                    // 阶段 N3b：点击内联图片 → 全屏查看
+                                    onImageTap: _openImageViewer,
+                                    // 阶段 N2（P2-1）：聊天记录导出（TXT/JSON）
+                                    onExportChat: _exportChat,
+                                  )
+                                : const Center(
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(Icons.chat_rounded,
+                                            size: 64, color: Colors.grey),
+                                        SizedBox(height: 16),
+                                        Text(
+                                          '选择一个会话开始聊天',
+                                          style: TextStyle(
+                                              color: Colors.grey, fontSize: 16),
+                                        ),
+                                      ],
+                                    ),
                                   ),
-                                ],
-                              ),
-                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),

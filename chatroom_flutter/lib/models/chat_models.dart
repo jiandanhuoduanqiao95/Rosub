@@ -14,7 +14,16 @@ enum ConnectionStatus {
 
 /// 表情回应默认表情盘（阶段 K：P1-4，Telegram 风格彩色 emoji）
 const List<String> defaultReactionEmojis = [
-  '👍', '❤️', '🔥', '😂', '😮', '😢', '😡', '🎉', '👏', '🙏',
+  '👍',
+  '❤️',
+  '🔥',
+  '😂',
+  '😮',
+  '😢',
+  '😡',
+  '🎉',
+  '👏',
+  '🙏',
 ];
 
 /// 一条聊天消息
@@ -28,6 +37,7 @@ class ChatMessage {
   bool isHistory; // 是否离线历史消息
   String? filename; // 文件消息的文件名
   Uint8List? fileData; // 文件消息的数据
+  String? filePath; // 文件消息的本地落盘路径（阶段 N3b：内联图片展示）
   int? groupId; // 群聊消息的群组 ID
 
   // ---- 阶段 K5（P1-2/P1-4）消息操作扩展 ----
@@ -45,6 +55,7 @@ class ChatMessage {
     this.isHistory = false,
     this.filename,
     this.fileData,
+    this.filePath,
     this.groupId,
     this.replyTo,
     this.replyPreview,
@@ -304,7 +315,8 @@ class Group {
     final rawOwner = json['created_by'];
     final owner = rawOwner is String ? rawOwner : (rawOwner?.toString() ?? '');
     final rawAvatar = json['avatar'];
-    final avatar = rawAvatar is String ? rawAvatar : (rawAvatar?.toString() ?? '');
+    final avatar =
+        rawAvatar is String ? rawAvatar : (rawAvatar?.toString() ?? '');
     final rawVisible = json['history_visible'];
     bool historyVisible = true;
     if (rawVisible is int) {
@@ -394,8 +406,8 @@ class FileRecord {
     final rawTs = json['timestamp'];
     DateTime timestamp;
     if (rawTs is String) {
-      timestamp = DateTime.tryParse(rawTs.replaceFirst(' ', 'T')) ??
-          DateTime.now();
+      timestamp =
+          DateTime.tryParse(rawTs.replaceFirst(' ', 'T')) ?? DateTime.now();
     } else if (rawTs is DateTime) {
       timestamp = rawTs;
     } else {
@@ -418,6 +430,118 @@ class FileRecord {
       status: (json['status'] as String?) ?? 'sent',
     );
   }
+}
+
+// ============================================================
+// 阶段 N —— 日常使用便利性模型
+// ============================================================
+
+/// 登录设备会话（阶段 N6：P2-6 登录设备管理，sessions_response 推送）
+class SessionInfo {
+  final String deviceId;
+  final DateTime lastActive;
+  final bool isCurrent;
+
+  const SessionInfo({
+    required this.deviceId,
+    required this.lastActive,
+    this.isCurrent = false,
+  });
+
+  factory SessionInfo.fromJson(Map<String, dynamic> json) {
+    // last_active 为 epoch 秒（数字或数字字符串）；缺失/非法 → epoch 0
+    final rawActive = json['last_active'];
+    var lastActive = DateTime.fromMillisecondsSinceEpoch(0);
+    if (rawActive is num) {
+      lastActive =
+          DateTime.fromMillisecondsSinceEpoch((rawActive * 1000).round());
+    } else if (rawActive is String) {
+      final epoch = double.tryParse(rawActive);
+      if (epoch != null) {
+        lastActive =
+            DateTime.fromMillisecondsSinceEpoch((epoch * 1000).round());
+      }
+    }
+    return SessionInfo(
+      deviceId: (json['device_id'] as String?) ?? '',
+      lastActive: lastActive,
+      isCurrent: json['is_current'] == true,
+    );
+  }
+}
+
+/// 审计日志条目（阶段 N7：P2-7 审计日志，admin_response audit_log 推送）
+class AuditLogEntry {
+  final int id;
+  final String operator;
+  final String action;
+  final String target;
+  final String detail;
+  final DateTime? timestamp; // 服务端 UTC（YYYY-MM-DD HH:MM:SS）→ 本地；非法为 null
+
+  const AuditLogEntry({
+    this.id = 0,
+    required this.operator,
+    required this.action,
+    this.target = '',
+    this.detail = '',
+    this.timestamp,
+  });
+
+  factory AuditLogEntry.fromJson(Map<String, dynamic> json) {
+    final rawId = json['id'];
+    final id =
+        rawId is int ? rawId : (int.tryParse(rawId?.toString() ?? '') ?? 0);
+    DateTime? ts;
+    final rawTs = json['timestamp'];
+    if (rawTs is String && rawTs.trim().isNotEmpty) {
+      // DB 存储 UTC 时间（YYYY-MM-DD HH:MM:SS），加 Z 解析再转本地
+      ts = DateTime.tryParse('${rawTs.trim()}Z')?.toLocal();
+    }
+    return AuditLogEntry(
+      id: id,
+      operator: (json['operator'] as String?) ?? '',
+      action: (json['action'] as String?) ?? '',
+      target: (json['target'] as String?) ?? '',
+      detail: (json['detail'] as String?) ?? '',
+      timestamp: ts,
+    );
+  }
+}
+
+/// 图片字节识别（阶段 N3：P2-4 图片粘贴直发/拖拽发送）。
+/// 支持 PNG / JPEG / GIF 魔数校验。
+bool isSupportedImage(Uint8List bytes) {
+  if (bytes.length < 4) return false;
+  // PNG: 89 50 4E 47
+  if (bytes[0] == 0x89 &&
+      bytes[1] == 0x50 &&
+      bytes[2] == 0x4E &&
+      bytes[3] == 0x47) {
+    return true;
+  }
+  // JPEG: FF D8 FF
+  if (bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) {
+    return true;
+  }
+  // GIF: 'GIF8'
+  if (bytes[0] == 0x47 &&
+      bytes[1] == 0x49 &&
+      bytes[2] == 0x46 &&
+      bytes[3] == 0x38) {
+    return true;
+  }
+  return false;
+}
+
+/// 文件名是否为图片（阶段 N3b：小图片自动接收，扩展名判断，大小写不敏感）。
+/// 支持 PNG / JPG / JPEG / GIF。
+bool isImageFilename(String filename) {
+  final lower = filename.toLowerCase();
+  return lower.endsWith('.png') ||
+      lower.endsWith('.jpg') ||
+      lower.endsWith('.jpeg') ||
+      lower.endsWith('.gif');
 }
 
 /// 待处理的文件请求

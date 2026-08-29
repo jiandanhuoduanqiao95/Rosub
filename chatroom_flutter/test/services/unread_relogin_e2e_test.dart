@@ -132,6 +132,14 @@ else:
 time.sleep(2.0)
 ''';
 
+
+/// 写入 E2E 辅助脚本：确保 /tmp/opencode 目录存在
+/// （部分环境该目录缺失会导致 writeAsStringSync 抛 PathNotFoundException）
+void _writeE2eScript(File file, String content) {
+  Directory('/tmp/opencode').createSync(recursive: true);
+  file.writeAsStringSync(content);
+}
+
 void main() {
   Process? serverProcess;
   var skipped = false;
@@ -145,7 +153,7 @@ void main() {
     }
     AppConfig.serverPort = 8092; // 独立端口（8090/8091 已被其他 E2E 占用）
     final script = File('/tmp/opencode/unread_regression_e2e_server.py');
-    script.writeAsStringSync(serverScript);
+    _writeE2eScript(script, serverScript);
     serverProcess = await Process.start(
       python,
       [script.path],
@@ -169,7 +177,7 @@ void main() {
       String msg, String gid, String seed) async {
     final root = Directory.current.parent;
     final script = File('/tmp/opencode/unread_regression_py_sender.py');
-    script.writeAsStringSync(pySender);
+    _writeE2eScript(script, pySender);
     return Process.start(
         '${root.path}/.venv/bin/python',
         [script.path, user, pw, to, msgType, msg, gid, seed],
@@ -180,7 +188,7 @@ void main() {
   Future<void> sendAnnouncement(String content) async {
     final root = Directory.current.parent;
     final script = File('/tmp/opencode/unread_regression_py_admin.py');
-    script.writeAsStringSync(pyAdmin);
+    _writeE2eScript(script, pyAdmin);
     final py = await Process.start(
         '${root.path}/.venv/bin/python', [script.path, content],
         environment: {'CHATROOM_ROOT': root.path},

@@ -2,6 +2,8 @@ import logging
 import json
 import uuid
 import os
+import time
+import socket
 import hashlib
 import bcrypt
 from datetime import datetime, timedelta, UTC
@@ -148,6 +150,11 @@ class MessageHandler:
         messages = self.server.db.get_offline_messages(username)
         logging.info(f"用户 {username} 的离线消息: {len(messages)} 条")
 
+        # 阶段 N3b 修复：群文件离线补发按群组路由——平行查询各离线行的
+        # group_id（get_offline_messages 元组形态保持 9 列不变）
+        offline_group_ids = self.server.db.get_offline_group_ids(
+            [m[4] for m in messages])
+
         for msg in messages:
             message_id = "?"
             try:
@@ -177,6 +184,9 @@ class MessageHandler:
                                      "status": status}
                     if sender == username:
                         extra_headers["to"] = msg_receiver
+                    gid = offline_group_ids.get(message_id)
+                    if gid is not None:
+                        extra_headers["group_id"] = str(gid)
                     if file_path and os.path.exists(file_path):
                         # 大文件：流式分块发送，不读入内存
                         send_file_message(ssock, "file", file_path, extra_headers=extra_headers)
@@ -1864,6 +1874,67 @@ class MessageHandler:
 
                 elif msg_type == "admin_command":
                     self.admin_handler.handle_admin_command(username, ssock, header, data)
+
+                elif msg_type == "list_sessions":
+                    # 阶段 N6（P2-6 登录设备管理）：列出自己账号全部在线会话。
+                    # 排序：当前会话在前，其余按 device_id 升序（确定性输出）；
+                    # last_active 取 Server.session_activity（epoch 秒），
+                    # 无记录（理论不发生）时回退当前时间。
+                    with self.server.client_map_lock:
+                        own = [(d, s) for (u, d), s in self.server.client_map.items()
+                               if u == username]
+                    now = time.time()
+                    current_dev = None
+                    for d, s in own:
+                        if s is ssock:
+                            current_dev = d
+                            break
+                    entries = []
+                    for d, s in own:
+                        last = self.server.session_activity.get(s, now)
+                        entries.append({
+                            "device_id": d,
+                            "last_active": last,
+                            "is_current": d == current_dev,
+                        })
+                    entries.sort(key=lambda e: (not e["is_current"], e["device_id"]))
+                    self.server.guarded_send(ssock, "sessions_response",
+                                             json.dumps(entries))
+                    logging.info(f"会话列表查询: 用户={username}, 会话数={len(entries)}")
+
+                elif msg_type == "kick_session":
+                    # 阶段 N6（P2-6 登录设备管理）：远程下线自己账号的指定设备。
+                    # 复用 _kick_old_session 的 P-07 约定：只 shutdown 不 close，
+                    # 被下线线程 finally 在锁内清理映射并广播 presence。
+                    device = (header.get("device_id") or "").strip()
+                    if not device:
+                        self.server.guarded_send(ssock, "error", "缺少设备标识")
+                        continue
+                    with self.server.client_map_lock:
+                        target_sock = self.server.client_map.get((username, device))
+                        is_current = (self.server.client_map.get((username, device))
+                                      is ssock)
+                    if is_current:
+                        self.server.guarded_send(ssock, "error", "不能下线当前设备")
+                        logging.warning(f"下线当前设备被拒: 用户={username}, 设备={device}")
+                        continue
+                    if target_sock is None:
+                        self.server.guarded_send(ssock, "error",
+                                                 f"设备 {device} 不在线")
+                        logging.warning(f"下线不在线设备被拒: 用户={username}, 设备={device}")
+                        continue
+                    try:
+                        self.server.guarded_send(target_sock, "error",
+                                                 "您已被其他设备远程下线")
+                    except Exception as e:
+                        logging.warning(f"通知被下线设备失败: 用户={username}, 设备={device}, 错误={e}")
+                    try:
+                        target_sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    self.server.guarded_send(ssock, "chat",
+                                             f"已下线设备 {device}")
+                    logging.info(f"远程下线设备: 用户={username}, 设备={device}")
 
                 elif msg_type in ("create_group", "join_group", "group_chat", "list_groups",
                                  "group_file_response", "leave_group", "list_group_members",

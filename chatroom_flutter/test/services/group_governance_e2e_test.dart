@@ -143,6 +143,14 @@ Future<bool> waitUntil(bool Function() cond,
   return cond();
 }
 
+
+/// 写入 E2E 辅助脚本：确保 /tmp/opencode 目录存在
+/// （部分环境该目录缺失会导致 writeAsStringSync 抛 PathNotFoundException）
+void _writeE2eScript(File file, String content) {
+  Directory('/tmp/opencode').createSync(recursive: true);
+  file.writeAsStringSync(content);
+}
+
 void main() {
   Process? serverProcess;
   var skipped = false;
@@ -156,7 +164,7 @@ void main() {
     }
     AppConfig.serverPort = 8094;
     final script = File('/tmp/opencode/m_group_governance_server.py');
-    script.writeAsStringSync(serverScript);
+    _writeE2eScript(script, serverScript);
     serverProcess = await Process.start(
       python,
       [script.path],
@@ -179,7 +187,7 @@ void main() {
   Future<Process> startHelper(String name, String scriptSrc, String pyFile) async {
     final root = Directory.current.parent;
     final script = File('/tmp/opencode/$pyFile');
-    script.writeAsStringSync(scriptSrc);
+    _writeE2eScript(script, scriptSrc);
     return Process.start('${root.path}/.venv/bin/python', [script.path],
         environment: {'CHATROOM_ROOT': root.path},
         workingDirectory: root.path);

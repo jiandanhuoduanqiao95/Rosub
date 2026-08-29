@@ -49,6 +49,14 @@ server.db = db
 server.build_listen()
 ''';
 
+
+/// 写入 E2E 辅助脚本：确保 /tmp/opencode 目录存在
+/// （部分环境该目录缺失会导致 writeAsStringSync 抛 PathNotFoundException）
+void _writeE2eScript(File file, String content) {
+  Directory('/tmp/opencode').createSync(recursive: true);
+  file.writeAsStringSync(content);
+}
+
 void main() {
   Process? serverProcess;
   var skipped = false;
@@ -61,7 +69,7 @@ void main() {
       return;
     }
     final script = File('/tmp/opencode/j_e2e_server.py');
-    script.writeAsStringSync(serverScript);
+    _writeE2eScript(script, serverScript);
     serverProcess = await Process.start(
       python,
       [script.path],

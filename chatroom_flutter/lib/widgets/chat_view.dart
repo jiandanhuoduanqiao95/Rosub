@@ -5,9 +5,12 @@
 /// 输入框使用 RawTextField + IME 桥接，避免 Flutter + fcitx GTK IM Context 死锁。
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../config.dart';
 import '../models/chat_models.dart';
 import 'raw_text_field.dart';
 
@@ -38,7 +41,17 @@ class ChatView extends StatefulWidget {
   final ValueChanged<String>? onForwardMessage;
   final void Function(String messageId, String emoji)? onAddReaction;
   final ValueChanged<String>? onDeleteMessage; // 仅我删除（本地）
+  final ValueChanged<String>? onDeletePermanently; // 永久删除（本地缓存，阶段 N1）
   final ValueChanged<String>? onJumpToMessage; // 点击引用块跳转原消息
+
+  // 阶段 N3（P2-4 图片粘贴直发）：剪贴板图片回调（输入框 Ctrl+V 触发）
+  final ValueChanged<Uint8List>? onImagePasted;
+
+  // 阶段 N3b（P2-4 扩展）：点击内联图片 → 全屏查看回调
+  final ValueChanged<ChatMessage>? onImageTap;
+
+  // 阶段 N2（P2-1 聊天记录导出）：工具栏导出按钮回调（非系统会话提供）
+  final VoidCallback? onExportChat;
 
   const ChatView({
     super.key,
@@ -64,7 +77,11 @@ class ChatView extends StatefulWidget {
     this.onForwardMessage,
     this.onAddReaction,
     this.onDeleteMessage,
+    this.onDeletePermanently,
     this.onJumpToMessage,
+    this.onImagePasted,
+    this.onImageTap,
+    this.onExportChat,
   });
 
   static void _noopSearch(String _) {}
@@ -88,12 +105,14 @@ class _ChatViewState extends State<ChatView> {
   /// 系统消息会话（'服务器'，只读）不提供搜索入口
   bool get _canSearch => widget.chatKey != '服务器';
 
-  /// 阶段 K5：是否启用消息菜单（任一 K5 回调非空）
+  /// 阶段 K5：是否启用消息菜单（任一 K5 回调非空；
+  /// 阶段 N1：提供 onDeletePermanently 同样启用菜单模式）
   bool get _kMenuEnabled =>
       widget.onReplyMessage != null ||
       widget.onForwardMessage != null ||
       widget.onAddReaction != null ||
-      widget.onDeleteMessage != null;
+      widget.onDeleteMessage != null ||
+      widget.onDeletePermanently != null;
 
   /// 提交搜索（空关键字不触发回调）
   void _submitSearch(String keyword) {
@@ -262,6 +281,13 @@ class _ChatViewState extends State<ChatView> {
                   tooltip: '搜索消息',
                   onPressed: () => setState(() => _searchInputVisible = true),
                 ),
+              // 阶段 N2（P2-1 聊天记录导出）：按会话导出 TXT/JSON
+              if (widget.chatKey != '服务器' && widget.onExportChat != null)
+                IconButton(
+                  icon: const Icon(Icons.ios_share_rounded),
+                  tooltip: '导出聊天记录',
+                  onPressed: widget.onExportChat,
+                ),
             ],
           ),
         ),
@@ -353,12 +379,13 @@ class _ChatViewState extends State<ChatView> {
                           onForwardMessage: widget.onForwardMessage,
                           onAddReaction: widget.onAddReaction,
                           onDeleteMessage: widget.onDeleteMessage,
+                          onDeletePermanently: widget.onDeletePermanently,
                           onJumpToMessage: widget.onJumpToMessage,
+                          onImageTap: widget.onImageTap,
                           // 跳转目标是被引用的原消息（P-30 修复）
-                          onJump: () => _jumpToMessage(
-                              msg.replyTo ?? msg.messageId),
-                          highlighted:
-                              msg.messageId == _highlightMessageId,
+                          onJump: () =>
+                              _jumpToMessage(msg.replyTo ?? msg.messageId),
+                          highlighted: msg.messageId == _highlightMessageId,
                         );
                       },
                     ),
@@ -414,6 +441,8 @@ class _ChatViewState extends State<ChatView> {
             inputCtrl: widget.inputCtrl,
             onSend: widget.onSend,
             onSendFile: widget.onSendFile,
+            canSend: widget.canSend,
+            onImagePasted: widget.onImagePasted,
           )
         else
           _ReadOnlyBar(chatTitle: widget.chatTitle),
@@ -426,11 +455,15 @@ class _InputBar extends StatelessWidget {
   final TextEditingController inputCtrl;
   final VoidCallback onSend;
   final VoidCallback onSendFile;
+  final bool canSend; // 阶段 N3：系统会话只读不接收图片粘贴
+  final ValueChanged<Uint8List>? onImagePasted;
 
   const _InputBar({
     required this.inputCtrl,
     required this.onSend,
     required this.onSendFile,
+    this.canSend = true,
+    this.onImagePasted,
   });
 
   @override
@@ -456,6 +489,8 @@ class _InputBar extends StatelessWidget {
               hintText: '输入消息，Enter 发送...',
               showChineseInput: true,
               onSubmitted: (_) => onSend(),
+              // 阶段 N3（P2-4）：剪贴板图片 → 上层预览（仅非只读会话）
+              onImagePasted: canSend ? onImagePasted : null,
             ),
           ),
           const SizedBox(width: 8),
@@ -509,9 +544,11 @@ class _MessageBubble extends StatelessWidget {
   final ValueChanged<String>? onForwardMessage;
   final void Function(String messageId, String emoji)? onAddReaction;
   final ValueChanged<String>? onDeleteMessage; // 仅我删除（本地）
+  final ValueChanged<String>? onDeletePermanently; // 永久删除（阶段 N1）
   final ValueChanged<String>? onJumpToMessage;
   final VoidCallback onJump; // 内部跳转（引用块点击）
   final bool highlighted; // 引用跳转高亮（P-30）
+  final ValueChanged<ChatMessage>? onImageTap; // 阶段 N3b：点击内联图片全屏
 
   const _MessageBubble({
     required this.message,
@@ -524,18 +561,18 @@ class _MessageBubble extends StatelessWidget {
     this.onForwardMessage,
     this.onAddReaction,
     this.onDeleteMessage,
+    this.onDeletePermanently,
     this.onJumpToMessage,
     required this.onJump,
     this.highlighted = false,
+    this.onImageTap,
   });
 
   /// 阶段 K5：文字/文件消息且提供 K5 回调时启用消息菜单
   /// （P-33 修订 2026-08-18：文件消息改用新菜单交互——长按弹菜单，
   /// 菜单内仅"撤回"入口；系统/已撤回消息仍不弹菜单）
   bool get _showMenu =>
-      kMenuEnabled &&
-      message.type != 'system' &&
-      !message.isRecalled;
+      kMenuEnabled && message.type != 'system' && !message.isRecalled;
 
   void _openMenu(BuildContext context) {
     if (!_showMenu) return;
@@ -549,8 +586,55 @@ class _MessageBubble extends StatelessWidget {
         onForwardMessage: onForwardMessage,
         onAddReaction: onAddReaction,
         onDeleteMessage: onDeleteMessage,
+        onDeletePermanently: onDeletePermanently,
       ),
     );
+  }
+
+  // ---- 阶段 N3b：小图片内联展示 ----
+
+  /// 是否为可内联展示的图片文件消息（未撤回 + 图片扩展名 + 有可用字节/路径）。
+  /// 阶段 N3b 修复（用户实测破图）：传输进行中（transferFraction 非空）
+  /// 不内联——文件尚未完整落盘时 Image.file 加载失败即显示破图且不重试；
+  /// 传输完成后 removeTransfer 触发重建，此时文件完整再渲染。
+  bool get _isInlineImage {
+    if (message.type != 'file' || message.isRecalled) return false;
+    if (!isImageFilename(message.filename ?? '')) return false;
+    if (transferFraction != null) return false;
+    if (message.fileData != null) return true;
+    final path = _resolvedImagePath;
+    return path != null && File(path).existsSync();
+  }
+
+  /// 解析图片的本地磁盘路径（filePath 优先，否则按文件名回推 received_files）
+  String? get _resolvedImagePath {
+    final fp = message.filePath;
+    if (fp != null) return fp;
+    final name = message.filename;
+    if (name == null) return null;
+    final base = name.split(RegExp(r'[/\\]')).last;
+    return '${AppConfig.receivedFilesDir}/$base';
+  }
+
+  /// 构建内联缩略图（字节优先 Image.memory，否则 Image.file）
+  Widget _buildInlineImage() {
+    Widget image;
+    if (message.fileData != null) {
+      image = Image.memory(
+        message.fileData!,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) =>
+            const Icon(Icons.broken_image_outlined, size: 40),
+      );
+    } else {
+      image = Image.file(
+        File(_resolvedImagePath!),
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) =>
+            const Icon(Icons.broken_image_outlined, size: 40),
+      );
+    }
+    return SizedBox(width: 200, height: 180, child: image);
   }
 
   @override
@@ -568,17 +652,22 @@ class _MessageBubble extends StatelessWidget {
     // 阶段 I1：自己发送失败的消息可点击重试（与长按撤回共存）。
     // 文件消息不走文字发送队列（传输进度条承载状态），不提供重试交互。
     final retryable = isSelf && message.isFailed && message.type != 'file';
+    // 阶段 N3b：图片文件消息点击打开全屏查看器
+    final imageTap = _isInlineImage && onImageTap != null
+        ? () => onImageTap!(message)
+        : null;
     // 阶段 K5：菜单启用时文字消息改用菜单；否则保持既有直接撤回交互（回归）
     final VoidCallback? menuOrRecall =
         _showMenu ? () => _openMenu(context) : onRecall;
     return MouseRegion(
-      cursor: onRecall == null && !_showMenu
+      cursor: onRecall == null && !_showMenu && imageTap == null
           ? MouseCursor.defer
           : SystemMouseCursors.click,
       child: GestureDetector(
         onLongPress: menuOrRecall,
         onSecondaryTap: menuOrRecall,
-        onTap: retryable ? () => onRetrySend?.call(message.messageId) : null,
+        onTap: imageTap ??
+            (retryable ? () => onRetrySend?.call(message.messageId) : null),
         child: Container(
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
@@ -679,6 +768,12 @@ class _MessageBubble extends StatelessWidget {
                           color: Colors.grey[500],
                           fontStyle: FontStyle.italic,
                         ),
+                      )
+                    else if (_isInlineImage)
+                      // 阶段 N3b：图片文件消息内联展示（缩略图）
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: _buildInlineImage(),
                       )
                     else
                       Text(
@@ -884,6 +979,7 @@ class _MessageMenuSheet extends StatefulWidget {
   final ValueChanged<String>? onForwardMessage;
   final void Function(String messageId, String emoji)? onAddReaction;
   final ValueChanged<String>? onDeleteMessage; // 仅我删除（本地）
+  final ValueChanged<String>? onDeletePermanently; // 永久删除（阶段 N1）
 
   const _MessageMenuSheet({
     required this.message,
@@ -893,6 +989,7 @@ class _MessageMenuSheet extends StatefulWidget {
     this.onForwardMessage,
     this.onAddReaction,
     this.onDeleteMessage,
+    this.onDeletePermanently,
   });
 
   @override
@@ -909,13 +1006,27 @@ class _MessageMenuSheetState extends State<_MessageMenuSheet> {
     action();
   }
 
+  /// 阶段 N1（P2-2）：复制消息内容文本到剪贴板
+  /// （复制 content 本体，非引用缩略 replyPreview）
+  void _copyMessage() {
+    Clipboard.setData(ClipboardData(text: widget.message.content));
+  }
+
   @override
   Widget build(BuildContext context) {
     final canEditOrRecall = widget.isSelf;
     // 文件消息（P-33 修订 2026-08-18）：菜单仅提供"撤回"入口
-    // （文件不支持引用/转发/表情/仅我删除）
+    // （文件不支持引用/转发/表情/仅我删除；阶段 N1 亦不新增复制/永久删除）
     final isFile = widget.message.type == 'file';
     final entries = <Widget>[];
+    // 阶段 N1（P2-2）：复制——文字消息可复制内容文本（复制与归属无关）
+    if (!isFile) {
+      entries.add(_MenuTile(
+        icon: Icons.copy_rounded,
+        title: '复制',
+        onTap: () => _invoke(_copyMessage),
+      ));
+    }
     if (!isFile && widget.onReplyMessage != null) {
       entries.add(_MenuTile(
         icon: Icons.reply_rounded,
@@ -955,32 +1066,47 @@ class _MessageMenuSheetState extends State<_MessageMenuSheet> {
             _invoke(() => widget.onDeleteMessage!(widget.message.messageId)),
       ));
     }
+    // 阶段 N1（P2-2）：永久删除——本地缓存中彻底移除（内存 + MessageCache，
+    // 重登后不恢复；与"仅我删除"的内存语义区分）。文字消息均可，
+    // 与归属无关（本地缓存语义，非权限操作）。
+    if (!isFile && widget.onDeletePermanently != null) {
+      entries.add(_MenuTile(
+        icon: Icons.delete_forever_outlined,
+        title: '永久删除',
+        onTap: () => _invoke(
+            () => widget.onDeletePermanently!(widget.message.messageId)),
+      ));
+    }
 
     return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ...entries,
-            if (_showEmojiPalette)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Wrap(
-                  spacing: 8,
-                  children: [
-                    for (final emoji in defaultReactionEmojis)
-                      ActionChip(
-                        label: Text(emoji,
-                            style: const TextStyle(
-                                fontFamily: 'NotoColorEmoji')),
-                        onPressed: () => _invoke(() => widget.onAddReaction!(
-                            widget.message.messageId, emoji)),
-                      ),
-                  ],
+      // 阶段 N1：菜单条目增多（复制/永久删除）后小视口可能放不下，
+      // 改为可滚动，保证全部入口可达
+      child: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ...entries,
+              if (_showEmojiPalette)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Wrap(
+                    spacing: 8,
+                    children: [
+                      for (final emoji in defaultReactionEmojis)
+                        ActionChip(
+                          label: Text(emoji,
+                              style: const TextStyle(
+                                  fontFamily: 'NotoColorEmoji')),
+                          onPressed: () => _invoke(() => widget.onAddReaction!(
+                              widget.message.messageId, emoji)),
+                        ),
+                    ],
+                  ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -1000,10 +1126,13 @@ class _MenuTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 阶段 N1：菜单条目增多（复制/永久删除）后压缩纵向占位
+    // （visualDensity 紧凑 + 字号 14），保证小视口下全部条目可见
     return ListTile(
       dense: true,
-      leading: Icon(icon),
-      title: Text(title),
+      visualDensity: VisualDensity.compact,
+      leading: Icon(icon, size: 20),
+      title: Text(title, style: const TextStyle(fontSize: 14)),
       onTap: onTap,
     );
   }

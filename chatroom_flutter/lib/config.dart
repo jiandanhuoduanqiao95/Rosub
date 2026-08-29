@@ -41,4 +41,8 @@ class AppConfig {
 
   /// 文件发送目录（用于测试）
   static const String filesDir = '../files';
+
+  /// 小图片自动接收阈值（字节，5MB，阶段 N3b）：扩展名为图片
+  /// 且 ≤ 此值的文件请求自动接受并内联展示（参考微信）。
+  static const int autoAcceptImageMaxSize = 5 * 1024 * 1024;
 }

@@ -3,6 +3,9 @@
 /// 包含：添加好友、创建群组、加入群组、好友请求处理、
 ///       文件请求处理、管理员面板、文件选择辅助等。
 
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -695,7 +698,8 @@ void showGroupSearchDialog(
                           ),
                           onPressed: () {
                             // P-11 用户反馈：申请可附验证消息（仿好友申请）
-                            _showJoinMessageDialog(ctx, g.id, g.name, onRequestJoin);
+                            _showJoinMessageDialog(
+                                ctx, g.id, g.name, onRequestJoin);
                           },
                           child: const Text('申请加入'),
                         ),
@@ -946,58 +950,69 @@ void showAdminPanel(BuildContext context, SocketService service, AppState _) {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-            // 查看所有用户
-            ListTile(
-              leading: const Icon(Icons.people_rounded),
-              title: const Text('查看所有用户'),
-              subtitle: const Text('获取在线/离线状态'),
-              onTap: () {
-                Navigator.pop(ctx);
-                service.adminCommand('list_users');
-              },
-            ),
-            const Divider(),
-            // 发送公告
-            ListTile(
-              leading: const Icon(Icons.campaign_rounded),
-              title: const Text('发送系统公告'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _showAnnouncementDialog(context, service);
-              },
-            ),
-            const Divider(),
-            // 删除用户
-            ListTile(
-              leading: const Icon(Icons.person_remove_rounded),
-              title: const Text('删除用户'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _showDeleteUserDialog(context, service);
-              },
-            ),
-            const Divider(),
-            // 重置用户密码（阶段 J：P0-5）
-            ListTile(
-              leading: const Icon(Icons.password_rounded),
-              title: const Text('重置用户密码'),
-              subtitle: const Text('无需旧密码，直接重置'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _showResetPasswordDialog(context, service);
-              },
-            ),
-            const Divider(),
-            // 服务端状态面板（阶段 M4：P1-19）+ 存储治理（阶段 M6：P1-21）
-            ListTile(
-              leading: const Icon(Icons.monitor_heart_outlined),
-              title: const Text('服务端状态'),
-              subtitle: const Text('在线/存储/磁盘/日志 + 存储清理'),
-              onTap: () {
-                Navigator.pop(ctx);
-                showServerStatusDialog(context, service);
-              },
-            ),
+              // 查看所有用户
+              ListTile(
+                leading: const Icon(Icons.people_rounded),
+                title: const Text('查看所有用户'),
+                subtitle: const Text('获取在线/离线状态'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  service.adminCommand('list_users');
+                },
+              ),
+              const Divider(),
+              // 发送公告
+              ListTile(
+                leading: const Icon(Icons.campaign_rounded),
+                title: const Text('发送系统公告'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _showAnnouncementDialog(context, service);
+                },
+              ),
+              const Divider(),
+              // 删除用户
+              ListTile(
+                leading: const Icon(Icons.person_remove_rounded),
+                title: const Text('删除用户'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _showDeleteUserDialog(context, service);
+                },
+              ),
+              const Divider(),
+              // 重置用户密码（阶段 J：P0-5）
+              ListTile(
+                leading: const Icon(Icons.password_rounded),
+                title: const Text('重置用户密码'),
+                subtitle: const Text('无需旧密码，直接重置'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _showResetPasswordDialog(context, service);
+                },
+              ),
+              const Divider(),
+              // 服务端状态面板（阶段 M4：P1-19）+ 存储治理（阶段 M6：P1-21）
+              ListTile(
+                leading: const Icon(Icons.monitor_heart_outlined),
+                title: const Text('服务端状态'),
+                subtitle: const Text('在线/存储/磁盘/日志 + 存储清理'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  showServerStatusDialog(context, service);
+                },
+              ),
+              const Divider(),
+              // 审计日志（阶段 N7：P2-7 敏感操作记录）
+              ListTile(
+                leading: const Icon(Icons.receipt_long_rounded),
+                title: const Text('审计日志'),
+                subtitle: const Text('删除用户/重置密码/公告/群组治理记录'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  showAuditLogDialog(context, service);
+                },
+              ),
             ],
           ),
         ),
@@ -1530,8 +1545,8 @@ void showSettingsDialog(BuildContext context) {
                             onChanged: (h) {
                               if (h != null) {
                                 final old = TaskbarNotifier.dndEndTime;
-                                TaskbarNotifier.dndEndTime = DateTime(
-                                    old.year, old.month, old.day, h, old.minute);
+                                TaskbarNotifier.dndEndTime = DateTime(old.year,
+                                    old.month, old.day, h, old.minute);
                                 setState(() {});
                               }
                             },
@@ -1541,8 +1556,7 @@ void showSettingsDialog(BuildContext context) {
                             value: TaskbarNotifier.dndEndTime.minute,
                             items: [
                               for (var m = 0; m < 60; m++)
-                                DropdownMenuItem(
-                                    value: m, child: Text('$m 分')),
+                                DropdownMenuItem(value: m, child: Text('$m 分')),
                             ],
                             onChanged: (m) {
                               if (m != null) {
@@ -1635,7 +1649,8 @@ void showGroupAdminDialog(
                     final isOwnerSelf = m == owner;
                     return ListTile(
                       dense: true,
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                      contentPadding:
+                          const EdgeInsets.symmetric(horizontal: 16),
                       leading: CircleAvatar(
                         radius: 14,
                         child: Text(m.isNotEmpty ? m[0].toUpperCase() : '?'),
@@ -1655,8 +1670,8 @@ void showGroupAdminDialog(
                           : IconButton(
                               icon: const Icon(Icons.person_remove_outlined),
                               tooltip: '移出成员',
-                              onPressed: () => service.kickGroupMember(
-                                  group.id, m),
+                              onPressed: () =>
+                                  service.kickGroupMember(group.id, m),
                             ),
                     );
                   }),
@@ -1668,7 +1683,8 @@ void showGroupAdminDialog(
                     subtitle: const Text('将群主移交给指定成员'),
                     onTap: () {
                       Navigator.pop(ctx);
-                      _showTransferOwnerDialog(context, group, members, service);
+                      _showTransferOwnerDialog(
+                          context, group, members, service);
                     },
                   ),
                   ListTile(
@@ -1711,37 +1727,36 @@ void showGroupAdminDialog(
                     ...requests.map((u) {
                       final reqMsg = state.joinRequestMessageOf(group.id, u);
                       return ListTile(
-                          dense: true,
-                          leading: const Icon(Icons.person_add_alt),
-                          title: Text(u),
-                          subtitle: reqMsg.isNotEmpty
-                              ? Text('验证消息: $reqMsg',
-                                  style: const TextStyle(fontSize: 11))
-                              : null,
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                icon: const Icon(Icons.check_circle,
-                                    color: Colors.green),
-                                tooltip: '批准',
-                                onPressed: () {
-                                  service.approveJoinRequest(group.id, u);
-                                  state.removeJoinRequest(group.id, u);
-                                },
-                              ),
-                              IconButton(
-                                icon: const Icon(Icons.cancel,
-                                    color: Colors.red),
-                                tooltip: '拒绝',
-                                onPressed: () {
-                                  service.rejectJoinRequest(group.id, u);
-                                  state.removeJoinRequest(group.id, u);
-                                },
-                              ),
-                            ],
-                          ),
-                        );
+                        dense: true,
+                        leading: const Icon(Icons.person_add_alt),
+                        title: Text(u),
+                        subtitle: reqMsg.isNotEmpty
+                            ? Text('验证消息: $reqMsg',
+                                style: const TextStyle(fontSize: 11))
+                            : null,
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.check_circle,
+                                  color: Colors.green),
+                              tooltip: '批准',
+                              onPressed: () {
+                                service.approveJoinRequest(group.id, u);
+                                state.removeJoinRequest(group.id, u);
+                              },
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.cancel, color: Colors.red),
+                              tooltip: '拒绝',
+                              onPressed: () {
+                                service.rejectJoinRequest(group.id, u);
+                                state.removeJoinRequest(group.id, u);
+                              },
+                            ),
+                          ],
+                        ),
+                      );
                     }),
                   ],
                   const Divider(),
@@ -1777,8 +1792,9 @@ void _showTransferOwnerDialog(BuildContext context, Group group,
       .where((g) => g.id == group.id)
       .firstOrNull
       ?.owner;
-  final candidates =
-      members.where((m) => m != owner && m != AppState.instance.username).toList();
+  final candidates = members
+      .where((m) => m != owner && m != AppState.instance.username)
+      .toList();
   showDialog(
     context: context,
     builder: (ctx) => AlertDialog(
@@ -1843,8 +1859,6 @@ void _showRenameGroupDialog(
   );
 }
 
-
-
 void _showInviteMemberDialog(
     BuildContext context, Group group, SocketService service) {
   final controller = TextEditingController();
@@ -1895,8 +1909,7 @@ void showGroupInvitesDialog(
         child: invites.isEmpty
             ? const Padding(
                 padding: EdgeInsets.symmetric(vertical: 16),
-                child: Text('暂无待处理的群邀请',
-                    style: TextStyle(color: Colors.grey)),
+                child: Text('暂无待处理的群邀请', style: TextStyle(color: Colors.grey)),
               )
             : ListView.builder(
                 shrinkWrap: true,
@@ -1987,8 +2000,8 @@ void showServerStatusDialog(BuildContext context, SocketService service) {
                         _statusRow('文件存储占用',
                             _formatBytes(s['storage']?['file_store_bytes'])),
                         _statusRow('文件数', '${s['storage']?['file_count']}'),
-                        _statusRow('数据库大小',
-                            _formatBytes(s['storage']?['db_bytes'])),
+                        _statusRow(
+                            '数据库大小', _formatBytes(s['storage']?['db_bytes'])),
                         const Divider(),
                         _statusRow(
                             '磁盘剩余', _formatBytes(s['disk']?['disk_free'])),
@@ -2053,8 +2066,7 @@ Widget _statusRow(String label, String value) {
       children: [
         Text(label, style: const TextStyle(fontSize: 13)),
         Text(value,
-            style:
-                const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
       ],
     ),
   );
@@ -2084,8 +2096,7 @@ void showFileListDialog(BuildContext context, SocketService service,
             height: 380,
             child: files.isEmpty
                 ? const Center(
-                    child: Text('暂无文件记录',
-                        style: TextStyle(color: Colors.grey)))
+                    child: Text('暂无文件记录', style: TextStyle(color: Colors.grey)))
                 : ListView.builder(
                     itemCount: files.length,
                     itemBuilder: (_, i) {
@@ -2097,8 +2108,8 @@ void showFileListDialog(BuildContext context, SocketService service,
                       return ListTile(
                         dense: true,
                         leading: const Icon(Icons.insert_drive_file_outlined),
-                        title: Text(f.filename,
-                            overflow: TextOverflow.ellipsis),
+                        title:
+                            Text(f.filename, overflow: TextOverflow.ellipsis),
                         subtitle: Text(
                           '${f.sender} → ${f.isGroupFile ? '群组' : f.receiver} · '
                           '${_formatBytes(f.filesize)} · $ts',
@@ -2118,4 +2129,247 @@ void showFileListDialog(BuildContext context, SocketService service,
       },
     ),
   );
+}
+
+// ============================================================
+// 阶段 N6（P2-6 登录设备管理）/ N7（P2-7 审计日志）面板
+// ============================================================
+
+String _formatActiveTime(DateTime dt) {
+  String pad(int n) => n.toString().padLeft(2, '0');
+  return '${pad(dt.hour)}:${pad(dt.minute)}';
+}
+
+/// 设备管理对话框（阶段 N6：P2-6 登录设备管理）
+///
+/// 列出当前账号全部在线会话（device_id/当前标记/最后活跃），可远程下线
+/// （复用服务端 _kick_old_session 逻辑；"同类别互踢、异类别并存"语义由
+/// 登录模型保证）。打开即拉取，下线后刷新。
+void showDeviceManagementDialog(BuildContext context, SocketService service) {
+  final state = AppState.instance;
+  service.fetchSessions();
+  showDialog(
+    context: context,
+    builder: (ctx) => ListenableBuilder(
+      listenable: state,
+      builder: (ctx, _) {
+        final sessions = state.sessions;
+        return AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.devices_rounded),
+              SizedBox(width: 8),
+              Text('设备管理'),
+            ],
+          ),
+          content: SizedBox(
+            width: 400,
+            child: sessions.isEmpty
+                ? const Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Center(child: Text('加载中...')),
+                  )
+                : SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        for (final s in sessions)
+                          ListTile(
+                            leading: Icon(
+                              s.isCurrent
+                                  ? Icons.desktop_windows_rounded
+                                  : Icons.devices_other_rounded,
+                            ),
+                            title: Text(s.deviceId),
+                            subtitle:
+                                Text('最后活跃: ${_formatActiveTime(s.lastActive)}'
+                                    '${s.isCurrent ? ' · 当前' : ''}'),
+                            trailing: s.isCurrent
+                                ? null
+                                : TextButton(
+                                    onPressed: () {
+                                      service.kickSession(s.deviceId);
+                                      service.fetchSessions();
+                                    },
+                                    child: const Text('下线'),
+                                  ),
+                          ),
+                        if (sessions.length <= 1)
+                          const Padding(
+                            padding: EdgeInsets.all(16),
+                            child: Text('暂无其他设备'),
+                          ),
+                      ],
+                    ),
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('关闭'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
+
+/// 审计日志对话框（阶段 N7：P2-7 审计日志，管理面板可查）
+///
+/// 展示敏感操作记录（操作者/操作/对象/时间），打开即拉取。
+void showAuditLogDialog(BuildContext context, SocketService service) {
+  final state = AppState.instance;
+  service.fetchAuditLogs();
+  showDialog(
+    context: context,
+    builder: (ctx) => ListenableBuilder(
+      listenable: state,
+      builder: (ctx, _) {
+        final logs = state.auditLogs;
+        return AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.receipt_long_rounded),
+              SizedBox(width: 8),
+              Text('审计日志'),
+            ],
+          ),
+          content: SizedBox(
+            width: 460,
+            child: logs.isEmpty
+                ? const Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Text('暂无审计记录'),
+                  )
+                : SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        for (final e in logs)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 6),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Text(e.operator,
+                                        style: const TextStyle(fontSize: 13)),
+                                    const Text('  ·  ',
+                                        style: TextStyle(fontSize: 13)),
+                                    Text(e.action,
+                                        style: const TextStyle(fontSize: 13)),
+                                    const Text('  ·  ',
+                                        style: TextStyle(fontSize: 13)),
+                                    Text(e.target,
+                                        style: const TextStyle(fontSize: 13)),
+                                  ],
+                                ),
+                                if (e.detail.isNotEmpty)
+                                  Text(
+                                    e.detail,
+                                    style: TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.grey.shade600),
+                                  ),
+                                Text(
+                                  e.timestamp == null
+                                      ? ''
+                                      : '${e.timestamp!.year}-'
+                                          '${e.timestamp!.month.toString().padLeft(2, '0')}-'
+                                          '${e.timestamp!.day.toString().padLeft(2, '0')} '
+                                          '${e.timestamp!.hour.toString().padLeft(2, '0')}:'
+                                          '${e.timestamp!.minute.toString().padLeft(2, '0')}',
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey.shade500),
+                                ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('关闭'),
+            ),
+            // 阶段 N7 补充（用户反馈）：审计日志支持导出（TXT/JSON）
+            TextButton.icon(
+              onPressed:
+                  logs.isEmpty ? null : () => _exportAuditLogs(context, logs),
+              icon: const Icon(Icons.ios_share_rounded, size: 18),
+              label: const Text('导出'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
+
+/// 阶段 N7 补充：审计日志导出（TXT 每行一条 / JSON 完整字段）
+Future<void> _exportAuditLogs(
+    BuildContext context, List<AuditLogEntry> logs) async {
+  final format = await showDialog<String>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('导出审计日志'),
+      content: const Text('TXT：每行一条记录\nJSON：完整字段（含 id/详情/时间）'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('取消'),
+        ),
+        OutlinedButton(
+          onPressed: () => Navigator.pop(ctx, 'txt'),
+          child: const Text('TXT'),
+        ),
+        OutlinedButton(
+          onPressed: () => Navigator.pop(ctx, 'json'),
+          child: const Text('JSON'),
+        ),
+      ],
+    ),
+  );
+  if (format == null) return;
+  String tsOf(DateTime? t) {
+    if (t == null) return '';
+    String pad(int n) => n.toString().padLeft(2, '0');
+    return '${t.year}-${pad(t.month)}-${pad(t.day)} '
+        '${pad(t.hour)}:${pad(t.minute)}:${pad(t.second)}';
+  }
+
+  final path = await FilePicker.platform.saveFile(
+    dialogTitle: '导出审计日志',
+    fileName: 'audit_logs.$format',
+  );
+  if (path == null) return;
+  final content = format == 'txt'
+      ? [
+          for (final e in logs)
+            '${tsOf(e.timestamp)} | ${e.operator} | ${e.action}'
+                ' | ${e.target} | ${e.detail}',
+        ].join('\n')
+      : jsonEncode([
+          for (final e in logs)
+            {
+              'id': e.id,
+              'operator': e.operator,
+              'action': e.action,
+              'target': e.target,
+              'detail': e.detail,
+              'timestamp': tsOf(e.timestamp),
+            },
+        ]);
+  try {
+    File(path).writeAsStringSync(content);
+    AppState.instance.showNotice('已导出 ${logs.length} 条审计记录到 $path');
+  } catch (e) {
+    AppState.instance.showNotice('审计导出失败: $e');
+  }
 }

@@ -46,6 +46,48 @@ void chatroom_set_urgency(int urgent) {
   g_idle_add(apply_urgency_cb, d);
 }
 
+// 阶段 N3（P2-4 文件拖拽发送）：GTK 拖拽接收 —— 把拖入窗口的文件
+// （text/uri-list）解析为本地路径，经 MethodChannel("chatroom/dnd")
+// 的 "files" 方法转发给 Dart 侧（走既有上传通道，复用 M8 大文件分流）。
+//
+// 生命周期（P-70 修复）：Dart 侧 setMethodCallHandler 会替换 messenger 里
+// 同名 channel 的 handler 并触发 destroy_notify（g_object_unref），若不
+// 提前 ref，channel 在首次注册 Dart handler 时即被销毁，拖拽回调里
+// fl_method_channel_invoke_method 落到悬空指针（CRITICAL:
+// assertion 'FL_IS_METHOD_CHANNEL(self)' failed）。因此 new 后立即
+// g_object_ref 保活，回调用静态指针 + FL_IS_METHOD_CHANNEL 防御检查。
+static FlMethodChannel* g_dnd_channel = nullptr;
+
+static void drag_data_received_cb(GtkWidget* widget, GdkDragContext* context,
+                                  gint x, gint y,
+                                  GtkSelectionData* selection_data,
+                                  guint info, guint time, gpointer user_data) {
+  if (g_dnd_channel == nullptr || !FL_IS_METHOD_CHANNEL(g_dnd_channel)) {
+    return;
+  }
+  gchar** uris = gtk_selection_data_get_uris(selection_data);
+  if (uris != nullptr) {
+    FlValue* files = fl_value_new_list();
+    for (int i = 0; uris[i] != nullptr; i++) {
+      gchar* path = g_filename_from_uri(uris[i], nullptr, nullptr);
+      if (path != nullptr) {
+        fl_value_append_take(files, fl_value_new_string(path));
+        g_free(path);
+      }
+    }
+    // 参数直接传路径 List（与 Dart 侧 call.arguments as List 对齐；
+    // 旧实现包一层 map {"files": [...]} 导致 Dart 侧强转 List 抛错，
+    // 拖拽静默无反应）。args 由 invoke 同步序列化，调用后统一释放。
+    if (fl_value_get_length(files) > 0) {
+      fl_method_channel_invoke_method(g_dnd_channel, "files", files, nullptr,
+                                      nullptr, nullptr);
+    }
+    fl_value_unref(files);
+    g_strfreev(uris);
+  }
+  gtk_drag_finish(context, TRUE, FALSE, time);
+}
+
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
@@ -107,6 +149,25 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_realize(GTK_WIDGET(view));
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
+
+  // 阶段 N3（P2-4 文件拖拽发送）：注册窗口拖拽目标（text/uri-list），
+  // 拖入文件 → drag_data_received_cb → MethodChannel("chatroom/dnd")。
+  // P-70/P-71 修复：① channel new 必须提供标准 method codec（与 Dart 侧
+  // MethodChannel 默认 codec 匹配）——旧实现传 nullptr 触发
+  // 'FL_IS_METHOD_CODEC(codec)' 断言失败 + g_object_ref 悬空 CRITICAL，
+  // 拖拽通道从未建立；② Dart 侧 setMethodCallHandler 会替换 messenger 里
+  // 同名 channel 的 handler 并触发 destroy_notify（g_object_unref），
+  // 因此 new 后立即 g_object_ref 保活，回调用静态指针 + FL_IS_METHOD_CHANNEL
+  // 防御检查。
+  g_dnd_channel = fl_method_channel_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)),
+      "chatroom/dnd", FL_METHOD_CODEC(fl_standard_method_codec_new()));
+  g_object_ref(g_dnd_channel);
+  GtkTargetEntry drag_targets[] = {{(gchar*)"text/uri-list", 0, 0}};
+  gtk_drag_dest_set(GTK_WIDGET(window), GTK_DEST_DEFAULT_ALL, drag_targets, 1,
+                    GDK_ACTION_COPY);
+  g_signal_connect(window, "drag-data-received",
+                   G_CALLBACK(drag_data_received_cb), nullptr);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }

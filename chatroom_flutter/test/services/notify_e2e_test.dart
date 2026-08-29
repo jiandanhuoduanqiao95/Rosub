@@ -82,6 +82,14 @@ send_message(s, 'chat', msg, extra_headers={'to': to, 'message_id': '%d_%s' % (i
 time.sleep(2.0)
 ''';
 
+
+/// 写入 E2E 辅助脚本：确保 /tmp/opencode 目录存在
+/// （部分环境该目录缺失会导致 writeAsStringSync 抛 PathNotFoundException）
+void _writeE2eScript(File file, String content) {
+  Directory('/tmp/opencode').createSync(recursive: true);
+  file.writeAsStringSync(content);
+}
+
 void main() {
   Process? serverProcess;
   var skipped = false;
@@ -95,7 +103,7 @@ void main() {
     }
     AppConfig.serverPort = 8091; // 独立端口，避免与 blocked_state E2E 的 8090 冲突
     final script = File('/tmp/opencode/k_notify_e2e_server.py');
-    script.writeAsStringSync(serverScript);
+    _writeE2eScript(script, serverScript);
     serverProcess = await Process.start(
       python,
       [script.path],
@@ -120,7 +128,7 @@ void main() {
       {double delay = 1.2}) async {
     final root = Directory.current.parent;
     final script = File('/tmp/opencode/k_notify_py_sender.py');
-    script.writeAsStringSync(pySender);
+    _writeE2eScript(script, pySender);
     return Process.start('${root.path}/.venv/bin/python',
         [script.path, user, pw, to, seed, msg, delay.toString()],
         environment: {'CHATROOM_ROOT': root.path},

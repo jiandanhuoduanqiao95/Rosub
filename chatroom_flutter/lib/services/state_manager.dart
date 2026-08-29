@@ -195,8 +195,7 @@ class AppState extends ChangeNotifier {
 
   // ---- 阶段 M2：群邀请（group_invite 推送）----
   final List<GroupInvite> _invitations = [];
-  List<GroupInvite> get invitations =>
-      UnmodifiableListView(_invitations);
+  List<GroupInvite> get invitations => UnmodifiableListView(_invitations);
 
   // ---- 阶段 M8：文件收发记录（file_list_response 推送）----
   final List<FileRecord> _fileRecords = [];
@@ -212,6 +211,43 @@ class AppState extends ChangeNotifier {
   Map<String, dynamic>? get serverStatus => _serverStatus;
   Map<String, dynamic>? _storageCleanupResult;
   Map<String, dynamic>? get storageCleanupResult => _storageCleanupResult;
+
+  // ---- 阶段 N6（P2-6）：登录设备会话列表（sessions_response 推送）----
+  final List<SessionInfo> _sessions = [];
+  List<SessionInfo> get sessions => UnmodifiableListView(_sessions);
+
+  void setSessions(List<SessionInfo> sessions) {
+    _sessions
+      ..clear()
+      ..addAll(sessions);
+    notifyListeners();
+  }
+
+  // ---- 阶段 N7（P2-7）：审计日志列表（admin_response audit_log 推送）----
+  final List<AuditLogEntry> _auditLogs = [];
+  List<AuditLogEntry> get auditLogs => UnmodifiableListView(_auditLogs);
+
+  void setAuditLogs(List<AuditLogEntry> logs) {
+    _auditLogs
+      ..clear()
+      ..addAll(logs);
+    notifyListeners();
+  }
+
+  // ---- 阶段 N3（P2-4）：图片粘贴预览（剪贴板图片 → 预览 → 发送）----
+  Uint8List? _pendingImagePreview;
+  Uint8List? get pendingImagePreview => _pendingImagePreview;
+
+  void setPendingImagePreview(Uint8List bytes) {
+    _pendingImagePreview = bytes;
+    notifyListeners();
+  }
+
+  void clearPendingImagePreview() {
+    if (_pendingImagePreview == null) return;
+    _pendingImagePreview = null;
+    notifyListeners();
+  }
 
   // ---- 聊天消息 ----
   // key = 好友用户名 或 "group_N"
@@ -576,6 +612,10 @@ class AppState extends ChangeNotifier {
     _groupSearchResults.clear();
     _serverStatus = null;
     _storageCleanupResult = null;
+    // 阶段 N：设备会话/审计日志/图片预览随登出清空（防跨账号泄漏）
+    _sessions.clear();
+    _auditLogs.clear();
+    _pendingImagePreview = null;
     _currentChat = null;
     _noticeQueue.clear();
     _log('已断开连接');

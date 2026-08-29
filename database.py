@@ -97,7 +97,8 @@ class Database:
                     status TEXT DEFAULT 'sent',
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     reply_to TEXT,
-                    reply_preview TEXT
+                    reply_preview TEXT,
+                    group_id INTEGER
                 )
             ''')
             cursor.execute('''
@@ -290,6 +291,14 @@ class Database:
                     "ALTER TABLE file_requests ADD COLUMN status TEXT DEFAULT 'pending'")
                 logging.info("file_requests 表已迁移：新增 status 列")
 
+            # 迁移：offline_messages 表新增 group_id 列（阶段 N3b 修复：
+            # 群文件离线补发按群组路由——旧库无此列时自动迁移）
+            try:
+                cursor.execute("SELECT group_id FROM offline_messages LIMIT 1")
+            except sqlite3.OperationalError:
+                cursor.execute("ALTER TABLE offline_messages ADD COLUMN group_id INTEGER")
+                logging.info("offline_messages 表已迁移：新增 group_id 列")
+
             # 迁移：users 表新增资料列（阶段 J：P0-2 用户资料）
             for col in ("nickname", "avatar", "signature"):
                 try:
@@ -359,6 +368,19 @@ class Database:
                     "ALTER TABLE group_join_requests "
                     "ADD COLUMN request_message TEXT DEFAULT ''")
                 logging.info("group_join_requests 表已迁移：新增 request_message 列")
+
+            # 阶段 N7（P2-7 审计日志）：敏感操作（删除用户/重置密码/发公告/
+            # 群组治理）记录表（旧库自动创建）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    operator TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    target TEXT NOT NULL DEFAULT '',
+                    detail TEXT NOT NULL DEFAULT '',
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
 
             conn.commit()
 
@@ -502,17 +524,18 @@ class Database:
 
     def save_offline_message(self, sender, receiver, message_type, content,
                              filename=None, message_id=None, file_path=None,
-                             reply_to=None, reply_preview=None):
+                             reply_to=None, reply_preview=None, group_id=None):
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO offline_messages
                         (message_id, sender, receiver, message_type, content,
-                         filename, file_path, status, reply_to, reply_preview)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'sent', ?, ?)
+                         filename, file_path, status, reply_to, reply_preview,
+                         group_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'sent', ?, ?, ?)
                 ''', (message_id, sender, receiver, message_type, content,
-                      filename, file_path, reply_to, reply_preview))
+                      filename, file_path, reply_to, reply_preview, group_id))
                 conn.commit()
                 logging.info(f"已保存离线消息：{sender} -> {receiver}, 类型={message_type}, 消息ID={message_id}")
         except Exception as e:
@@ -553,6 +576,24 @@ class Database:
 
             logging.info(f"获取聊天消息: 用户={receiver}, 共={len(messages)}条")
             return messages
+
+    def get_offline_group_ids(self, message_ids):
+        """平行查询离线消息的群组归属（阶段 N3b 修复：群文件按群路由）。
+
+        保持 get_offline_messages 的 9 元组形态不变（既有测试依赖），
+        群组归属经此处按 message_id 平行访问（仿 get_offline_extras 惯例）。
+        返回 {message_id: group_id}；非群消息不在结果中。
+        """
+        if not message_ids:
+            return {}
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" * len(message_ids))
+            cursor.execute(
+                f"SELECT message_id, group_id FROM offline_messages "
+                f"WHERE message_id IN ({placeholders}) AND group_id IS NOT NULL",
+                list(message_ids))
+            return {row[0]: row[1] for row in cursor.fetchall()}
 
     def cleanup_delivered_messages(self, receiver):
         try:
@@ -2193,6 +2234,49 @@ class Database:
             "message_count": self.get_message_count(),
             "pending_file_requests": self.get_pending_file_request_count(),
         }
+
+    # ============================================================
+    # 阶段 N7（P2-7 审计日志）：敏感操作记录与查询
+    # ============================================================
+
+    def record_audit_log(self, operator, action, target='', detail=''):
+        """记录一条审计日志（删除用户/重置密码/发公告/群组治理等敏感操作）。
+
+        timestamp 由数据库自动生成；返回新行 id。
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO audit_logs (operator, action, target, detail) "
+                "VALUES (?, ?, ?, ?)",
+                (operator, action, target or '', detail or ''))
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_audit_logs(self, limit=100, action=None):
+        """查询审计日志：最新在前（timestamp DESC，同秒按 id DESC）。
+
+        limit 限制返回条数（默认 100）；action 非空时仅返回该操作类型。
+        每项为 dict：{id, operator, action, target, detail, timestamp}。
+        """
+        with self._get_connection() as conn:
+            if action:
+                rows = conn.execute(
+                    "SELECT id, operator, action, target, detail, timestamp "
+                    "FROM audit_logs WHERE action = ? "
+                    "ORDER BY timestamp DESC, id DESC LIMIT ?",
+                    (action, limit)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, operator, action, target, detail, timestamp "
+                    "FROM audit_logs "
+                    "ORDER BY timestamp DESC, id DESC LIMIT ?",
+                    (limit,)).fetchall()
+        return [
+            {"id": r[0], "operator": r[1], "action": r[2], "target": r[3],
+             "detail": r[4], "timestamp": r[5]}
+            for r in rows
+        ]
 
     # ============================================================
     # 阶段 M8（P1-7 文件收发管理页）：文件历史查询

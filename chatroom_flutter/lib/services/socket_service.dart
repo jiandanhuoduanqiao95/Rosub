@@ -694,20 +694,23 @@ class SocketService {
         // 先添加历史消息气泡（进度条宿主），再流式接收
         if (isHistory && from != null) {
           final to = header['to'] as String?;
-          final chatKey = (from == state.username && to != null) ? to : from;
-          state.addMessage(
-            chatKey,
-            ChatMessage(
-              sender: from,
-              content: '[文件] $filename',
-              type: 'file',
-              messageId: initMsgId,
-              filename: filename,
-              timestamp: msgTimestamp,
-              isHistory: false,
-              status: msgStatus,
-            ),
+          // 阶段 N3b 修复：群文件按 group_id 路由到群聊
+          final gid = int.tryParse(header['group_id'] as String? ?? '');
+          final chatKey = gid != null
+              ? 'group_$gid'
+              : ((from == state.username && to != null) ? to : from);
+          final histMsg = ChatMessage(
+            sender: from,
+            content: '[文件] $filename',
+            type: 'file',
+            messageId: initMsgId,
+            filename: filename,
+            groupId: gid,
+            timestamp: msgTimestamp,
+            isHistory: false,
+            status: msgStatus,
           );
+          state.addMessage(chatKey, histMsg);
         }
         _receivingFile = true;
         // 接收期间 pong 会被服务端抑制：清掉未决 ping 状态，
@@ -765,22 +768,20 @@ class SocketService {
               final chatKey = (from != null && from == state.username)
                   ? (to ?? from)
                   : sender;
-              state.addMessage(
-                chatKey,
-                ChatMessage(
-                  sender: sender,
-                  content: text,
-                  type: 'chat',
-                  messageId: messageId,
-                  timestamp: msgTimestamp,
-                  isHistory: false,
-                  status: msgStatus,
-                  replyTo: replyTo,
-                  replyPreview: replyPreview,
-                  reactions:
-                      _parseReactionsHeader(header['reactions'] as String?),
-                ),
+              final histMsg = ChatMessage(
+                sender: sender,
+                content: text,
+                type: 'chat',
+                messageId: messageId,
+                timestamp: msgTimestamp,
+                isHistory: false,
+                status: msgStatus,
+                replyTo: replyTo,
+                replyPreview: replyPreview,
+                reactions:
+                    _parseReactionsHeader(header['reactions'] as String?),
               );
+              state.addMessage(chatKey, histMsg);
             }
           } else if (from != null) {
             // 实时消息在登录/重连初始数据窗口内到达：不得丢弃——
@@ -814,7 +815,11 @@ class SocketService {
           if (isHistory && from != null && body is Uint8List) {
             final filename = header['filename'] as String? ?? 'file';
             final to = header['to'] as String?;
-            final chatKey = (from == state.username && to != null) ? to : from;
+            // 阶段 N3b 修复：群文件按 group_id 路由到群聊
+            final gid = int.tryParse(header['group_id'] as String? ?? '');
+            final chatKey = gid != null
+                ? 'group_$gid'
+                : ((from == state.username && to != null) ? to : from);
             _saveReceivedFile(filename, body);
             state.addMessage(
               chatKey,
@@ -824,6 +829,7 @@ class SocketService {
                 type: 'file',
                 messageId: messageId,
                 filename: filename,
+                groupId: gid,
                 fileData: body,
                 timestamp: msgTimestamp,
                 isHistory: false,
@@ -835,15 +841,19 @@ class SocketService {
             // 不丢弃（见 'chat' 分支说明），添加气泡并提醒
             final filename = header['filename'] as String? ?? 'file';
             final to = header['to'] as String?;
-            final chatKey = (from == state.username && to != null) ? to : from;
+            final gid = int.tryParse(header['group_id'] as String? ?? '');
+            final chatKey = gid != null
+                ? 'group_$gid'
+                : ((from == state.username && to != null) ? to : from);
             final live = ChatMessage(
               sender: from,
               content: '[收到文件] $filename',
               type: 'file',
               messageId: messageId,
               filename: filename,
+              groupId: gid,
               timestamp: msgTimestamp,
-              status: 'delivered',
+              status: 'sent',
             );
             state.addMessage(chatKey, live);
             _notifyIncoming(live, chatKey);
@@ -855,23 +865,20 @@ class SocketService {
             final groupId = header['group_id'] as String?;
             final chatKey = groupId != null ? 'group_$groupId' : (from);
             final text = utf8.decode(body as Uint8List);
-            state.addMessage(
-              chatKey,
-              ChatMessage(
-                sender: from,
-                content: text,
-                type: 'group_chat',
-                messageId: messageId,
-                timestamp: msgTimestamp,
-                isHistory: false,
-                status: msgStatus,
-                groupId: groupId != null ? int.tryParse(groupId) : null,
-                replyTo: replyTo,
-                replyPreview: replyPreview,
-                reactions:
-                    _parseReactionsHeader(header['reactions'] as String?),
-              ),
+            final histMsg = ChatMessage(
+              sender: from,
+              content: text,
+              type: 'group_chat',
+              messageId: messageId,
+              timestamp: msgTimestamp,
+              isHistory: false,
+              status: msgStatus,
+              groupId: groupId != null ? int.tryParse(groupId) : null,
+              replyTo: replyTo,
+              replyPreview: replyPreview,
+              reactions: _parseReactionsHeader(header['reactions'] as String?),
             );
+            state.addMessage(chatKey, histMsg);
           } else if (from != null) {
             // 实时群聊消息在初始数据窗口内到达：不丢弃（见 'chat' 分支说明）
             final groupId = header['group_id'] as String?;
@@ -896,26 +903,41 @@ class SocketService {
 
         case 'file_request':
           if (from != null) {
-            state.addFileRequest(FileRequest(
-              messageId: messageId,
-              sender: from,
-              filename: header['filename'] as String? ?? 'file',
-              filesize: int.tryParse(header['filesize'] as String? ?? '0') ?? 0,
-            ));
+            final filename = header['filename'] as String? ?? 'file';
+            final filesize =
+                int.tryParse(header['filesize'] as String? ?? '0') ?? 0;
+            if (_shouldAutoAcceptImage(filename, filesize)) {
+              // 阶段 N3b：离线期间的图片文件请求登录后同样自动接收
+              respondFileRequest(messageId, from, true);
+            } else {
+              state.addFileRequest(FileRequest(
+                messageId: messageId,
+                sender: from,
+                filename: filename,
+                filesize: filesize,
+              ));
+            }
           }
           break;
 
         case 'group_file_request':
           if (from != null) {
             final groupId = header['group_id'] as String?;
-            if (state.markGroupFileProcessed(messageId)) {
+            final gid = groupId != null ? int.tryParse(groupId) : null;
+            final filename = header['filename'] as String? ?? 'file';
+            final filesize =
+                int.tryParse(header['filesize'] as String? ?? '0') ?? 0;
+            if (gid != null && _shouldAutoAcceptImage(filename, filesize)) {
+              if (state.markGroupFileProcessed(messageId)) {
+                respondGroupFileRequest(messageId, gid, true);
+              }
+            } else if (state.markGroupFileProcessed(messageId)) {
               state.addFileRequest(FileRequest(
                 messageId: messageId,
                 sender: from,
-                filename: header['filename'] as String? ?? 'file',
-                filesize:
-                    int.tryParse(header['filesize'] as String? ?? '0') ?? 0,
-                groupId: groupId != null ? int.tryParse(groupId) : null,
+                filename: filename,
+                filesize: filesize,
+                groupId: gid,
               ));
             }
           }
@@ -1126,11 +1148,16 @@ class SocketService {
     final sender = header['from'] ?? '未知';
     final messageId = header['message_id'] as String? ?? _generateMessageId();
     final isHistory = header['history'] == 'true';
+    // 阶段 N3b 修复：群文件按 group_id 路由到群聊（服务端推送/补发携带
+    // group_id 头；旧实现缺此头，群文件错落入与发送者的私聊）
+    final gid = int.tryParse(header['group_id'] as String? ?? '');
 
     if (isHistory) {
       // 离线文件历史（history=true）
       final to = header['to'] as String?;
-      final chatKey = (sender == state.username && to != null) ? to : sender;
+      final chatKey = gid != null
+          ? 'group_$gid'
+          : ((sender == state.username && to != null) ? to : sender);
       state.addMessage(
         chatKey,
         ChatMessage(
@@ -1139,6 +1166,8 @@ class SocketService {
           type: 'file',
           messageId: messageId,
           filename: filename,
+          filePath: filePath,
+          groupId: gid,
           isHistory: false,
           status: header['status'] as String? ?? 'delivered',
         ),
@@ -1146,17 +1175,22 @@ class SocketService {
       return;
     }
 
-    state.addMessage(
-      sender,
-      ChatMessage(
-        sender: sender,
-        content: '[收到文件] $filename',
-        type: 'file',
-        messageId: messageId,
-        filename: filename,
-        status: 'delivered',
-      ),
+    final chatKey = gid != null ? 'group_$gid' : sender;
+    final msg = ChatMessage(
+      sender: sender,
+      content: '[收到文件] $filename',
+      type: 'file',
+      messageId: messageId,
+      filename: filename,
+      filePath: filePath,
+      groupId: gid,
+      // 阶段 N3b 修复：实时收到的文件按新消息处理（status='sent' →
+      // 未读徽标计数 + _notifyIncoming 提示音/闪烁；P-47 已保证重登时
+      // 服务端以 delivered 重推，去重后不再计未读）
+      status: 'sent',
     );
+    state.addMessage(chatKey, msg);
+    _notifyIncoming(msg, chatKey);
   }
 
   /// 任务栏闪烁（阶段 H2，类微信）：新消息到达时交给 TaskbarNotifier
@@ -1254,24 +1288,32 @@ class SocketService {
       // ---- 文件请求通知 ----
       case 'file_request':
         if (from != null) {
-          state.addFileRequest(FileRequest(
-            messageId: messageId,
-            sender: from,
-            filename: header['filename'] as String? ?? 'file',
-            filesize: int.tryParse(header['filesize'] as String? ?? '0') ?? 0,
-          ));
-          // 桌面通知（阶段 H2）：未聚焦窗口时通知收到文件请求
-          _notifyIncoming(
-            ChatMessage(
-              sender: from,
-              content: '[文件请求] ${header['filename'] as String? ?? 'file'}',
-              type: 'file_request',
+          final filename = header['filename'] as String? ?? 'file';
+          final filesize =
+              int.tryParse(header['filesize'] as String? ?? '0') ?? 0;
+          if (_shouldAutoAcceptImage(filename, filesize)) {
+            // 阶段 N3b：小图片自动接收（跳过手动确认，复用 file_response）
+            respondFileRequest(messageId, from, true);
+          } else {
+            state.addFileRequest(FileRequest(
               messageId: messageId,
-              status: 'sent',
-              filename: header['filename'] as String?,
-            ),
-            from,
-          );
+              sender: from,
+              filename: filename,
+              filesize: filesize,
+            ));
+            // 桌面通知（阶段 H2）：未聚焦窗口时通知收到文件请求
+            _notifyIncoming(
+              ChatMessage(
+                sender: from,
+                content: '[文件请求] $filename',
+                type: 'file_request',
+                messageId: messageId,
+                status: 'sent',
+                filename: filename,
+              ),
+              from,
+            );
+          }
         }
         break;
 
@@ -1279,6 +1321,11 @@ class SocketService {
       case 'file':
         final filename = header['filename'] as String? ?? 'received_file';
         final sender = from ?? '未知';
+        // 阶段 N3b 修复：群文件按 group_id 路由（与 _handleFileMessage 一致）
+        final gid = int.tryParse(header['group_id'] as String? ?? '');
+        final chatKey = gid != null ? 'group_$gid' : sender;
+        // 保存文件到本地（阶段 N3b：返回路径供内联图片展示）
+        final savedPath = _saveReceivedFile(filename, body);
         final msg = ChatMessage(
           sender: sender,
           content: '[收到文件] $filename',
@@ -1286,13 +1333,13 @@ class SocketService {
           messageId: messageId,
           filename: filename,
           fileData: body,
-          status: 'delivered',
+          filePath: savedPath,
+          groupId: gid,
+          status: 'sent',
         );
-        state.addMessage(sender, msg);
+        state.addMessage(chatKey, msg);
         // 桌面通知（阶段 H2）：未聚焦窗口时通知收到文件
-        _notifyIncoming(msg, sender);
-        // 保存文件到本地
-        _saveReceivedFile(filename, body);
+        _notifyIncoming(msg, chatKey);
         break;
 
       // ---- 好友请求 ----
@@ -1306,6 +1353,18 @@ class SocketService {
       case 'presence':
         if (from != null) {
           state.updatePresence(from, header['online'] == '1');
+        }
+        break;
+
+      // ---- 设备会话列表（阶段 N6：P2-6 登录设备管理）----
+      case 'sessions_response':
+        try {
+          final List<dynamic> list = jsonDecode(utf8.decode(body));
+          state.setSessions(list
+              .map((e) => SessionInfo.fromJson(e as Map<String, dynamic>))
+              .toList());
+        } catch (e) {
+          state.log('解析会话列表失败: $e');
         }
         break;
 
@@ -1368,23 +1427,32 @@ class SocketService {
       case 'group_file_request':
         if (from != null) {
           final groupId = header['group_id'] as String?;
-          if (state.markGroupFileProcessed(messageId)) {
+          final gid = groupId != null ? int.tryParse(groupId) : null;
+          final filename = header['filename'] as String? ?? 'file';
+          final filesize =
+              int.tryParse(header['filesize'] as String? ?? '0') ?? 0;
+          if (gid != null && _shouldAutoAcceptImage(filename, filesize)) {
+            // 阶段 N3b：群内小图片自动接收（跳过手动确认）
+            if (state.markGroupFileProcessed(messageId)) {
+              respondGroupFileRequest(messageId, gid, true);
+            }
+          } else if (state.markGroupFileProcessed(messageId)) {
             state.addFileRequest(FileRequest(
               messageId: messageId,
               sender: from,
-              filename: header['filename'] as String? ?? 'file',
-              filesize: int.tryParse(header['filesize'] as String? ?? '0') ?? 0,
-              groupId: groupId != null ? int.tryParse(groupId) : null,
+              filename: filename,
+              filesize: filesize,
+              groupId: gid,
             ));
             // 桌面通知（阶段 H2）：未聚焦窗口时通知收到群文件请求
             _notifyIncoming(
               ChatMessage(
                 sender: from,
-                content: '[群文件请求] ${header['filename'] as String? ?? 'file'}',
+                content: '[群文件请求] $filename',
                 type: 'group_file_request',
                 messageId: messageId,
                 status: 'sent',
-                filename: header['filename'] as String?,
+                filename: filename,
               ),
               groupId != null ? 'group_$groupId' : from,
             );
@@ -1677,6 +1745,16 @@ class SocketService {
           } catch (_) {
             state.log('解析存储清理结果失败: $responseBody');
           }
+        } else if (responseType == 'audit_log') {
+          // 审计日志（阶段 N7：P2-7，仅管理员可查）
+          try {
+            final List<dynamic> list = jsonDecode(responseBody);
+            state.setAuditLogs(list
+                .map((e) => AuditLogEntry.fromJson(e as Map<String, dynamic>))
+                .toList());
+          } catch (_) {
+            state.log('解析审计日志失败: $responseBody');
+          }
         } else if (responseType == 'file_list_response') {
           // 文件收发记录（阶段 M8：P1-7）——注意：服务端以独立
           // file_list_response 类型推送，此处防御性兼容
@@ -1732,7 +1810,9 @@ class SocketService {
         try {
           final List<dynamic> list = jsonDecode(utf8.decode(body));
           state.setFileRecords(
-            list.map((e) => FileRecord.fromJson(e as Map<String, dynamic>)).toList(),
+            list
+                .map((e) => FileRecord.fromJson(e as Map<String, dynamic>))
+                .toList(),
           );
         } catch (_) {}
         break;
@@ -1989,6 +2069,7 @@ class SocketService {
           type: 'file',
           messageId: messageId,
           filename: filename,
+          filePath: filePath,
           status: 'sent',
         ),
       );
@@ -2090,6 +2171,11 @@ class SocketService {
       return false;
     }
   }
+
+  /// 是否应自动接受该文件请求（阶段 N3b：小图片自动接收）。
+  /// 判定：扩展名为图片（isImageFilename）且大小 ≤ autoAcceptImageMaxSize。
+  bool _shouldAutoAcceptImage(String filename, int filesize) =>
+      isImageFilename(filename) && filesize <= AppConfig.autoAcceptImageMaxSize;
 
   /// 响应文件请求
   Future<void> respondFileRequest(
@@ -2606,6 +2692,116 @@ class SocketService {
     }
   }
 
+  // ============================================================
+  // 阶段 N —— 日常使用便利性协议方法
+  // ============================================================
+
+  /// 拉取自己账号的全部在线会话（阶段 N6：P2-6 登录设备管理）。
+  /// 响应 sessions_response → state.sessions。
+  Future<void> fetchSessions() async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('list_sessions', '');
+    } catch (e) {
+      state.log('拉取会话列表失败: $e');
+    }
+  }
+
+  /// 远程下线指定设备（阶段 N6：P2-6；不能下线当前设备）。
+  /// 协议 kick_session {device_id}；结果由服务端 chat 确认（SnackBar）。
+  Future<void> kickSession(String deviceId) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('kick_session', '',
+          extraHeaders: {'device_id': deviceId});
+    } catch (e) {
+      state.log('远程下线失败: $e');
+    }
+  }
+
+  /// 拉取审计日志（阶段 N7：P2-7，仅管理员）。
+  /// 协议 admin_command action=audit_log → admin_response
+  /// response_type=audit_log → state.auditLogs。
+  Future<void> fetchAuditLogs({int? limit}) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('admin_command', '', extraHeaders: {
+        'action': 'audit_log',
+        if (limit != null) 'limit': limit.toString(),
+      });
+    } catch (e) {
+      state.log('拉取审计日志失败: $e');
+    }
+  }
+
+  /// 永久删除消息（阶段 N1：P2-2）：本地缓存中彻底移除
+  /// （内存 + MessageCache，重登后不恢复；与"仅我删除"的内存语义区分）。
+  /// 纯本地操作，断线/未连接同样生效。
+  Future<void> permanentlyDeleteMessage(
+      String chatKey, String messageId) async {
+    state.removeMessageLocally(chatKey, messageId);
+    final store = MessageCache.store;
+    if (store != null && store.isOpen) {
+      try {
+        await store.removeMessage(chatKey, messageId);
+      } catch (_) {
+        // 缓存删除失败不影响内存侧删除（尽力而为）
+      }
+    }
+  }
+
+  /// 字节直发（阶段 N3：P2-4 图片粘贴直发/拖拽发送）。
+  /// 与 sendFile 同一条上传通道（file 消息 + M8 大小分流逻辑由服务端
+  /// 依据 filesize 头决定）；未连接返回 false、无副作用。
+  Future<bool> sendFileBytes(
+      String to, Uint8List bytes, String filename) async {
+    if (_socket == null) return false;
+    final messageId = _generateMessageId();
+    try {
+      final size = bytes.length;
+      if (size > AppConfig.maxFileSize) {
+        final limitStr = AppConfig.maxFileSize >= 1024 * 1024 * 1024
+            ? '${(AppConfig.maxFileSize / (1024 * 1024 * 1024)).floor()} GB'
+            : '${(AppConfig.maxFileSize / (1024 * 1024)).floor()} MB';
+        state.showNotice('文件过大，超出大小限制（最大 $limitStr）');
+        return false;
+      }
+      state.addMessage(
+        to,
+        ChatMessage(
+          sender: state.username!,
+          content: '[发送文件] $filename',
+          type: 'file',
+          messageId: messageId,
+          filename: filename,
+          fileData: bytes,
+          status: 'sent',
+        ),
+      );
+      state.updateTransfer(messageId, 0, size, isSend: true);
+      await _enqueueSend(() => sendMessage(
+            _socket!,
+            'file',
+            bytes,
+            extraHeaders: {
+              'to': to,
+              'filename': filename,
+              'filesize': size.toString(),
+              'message_id': messageId,
+            },
+          ));
+      state.removeTransfer(messageId);
+      return true;
+    } catch (e) {
+      state.removeTransfer(messageId);
+      state.log('字节文件发送失败: $e');
+      if (e is SocketException || e is StateError) {
+        _onConnectionLost();
+      }
+      return false;
+    }
+  }
+
   /// 文件名安全过滤（阶段 G5）：去除路径分隔符，防止路径穿越。
   /// 返回 basename；空 / "." / ".." 时回退为 received_file。
   static String sanitizeFilename(String filename) {
@@ -2624,8 +2820,8 @@ class SocketService {
     return '${dir.path}/$safeName';
   }
 
-  /// 保存接收到的文件
-  void _saveReceivedFile(String filename, Uint8List data) {
+  /// 保存接收到的文件，返回落盘路径（失败返回 null）。
+  String? _saveReceivedFile(String filename, Uint8List data) {
     try {
       final safeName = sanitizeFilename(filename);
       final dir = Directory(AppConfig.receivedFilesDir);
@@ -2633,8 +2829,10 @@ class SocketService {
       final file = File('${dir.path}/$safeName');
       file.writeAsBytesSync(data);
       state.log('文件已保存: ${file.path}');
+      return file.path;
     } catch (e) {
       state.log('文件保存失败: $e');
+      return null;
     }
   }
 
@@ -2716,10 +2914,9 @@ class SocketService {
   Future<void> requestJoinGroup(int groupId, {String? message}) async {
     if (_socket == null) return;
     try {
-      await _sendMessage('request_join_group', '$groupId',
-          extraHeaders: {
-            if (message != null && message.isNotEmpty) 'message': message,
-          });
+      await _sendMessage('request_join_group', '$groupId', extraHeaders: {
+        if (message != null && message.isNotEmpty) 'message': message,
+      });
     } catch (e) {
       state.log('发送入群申请失败: $e');
     }
