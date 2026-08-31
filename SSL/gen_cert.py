@@ -7,7 +7,7 @@ from cryptography.hazmat.backends import default_backend
 import datetime
 import os
 
-def generate_cert(cert_file, key_file, pem_file, domains):
+def generate_cert(cert_file, key_file, pem_file, domains, days=365 * 10):
     # 生成 RSA 私钥
     key = rsa.generate_private_key(
         public_exponent=65537,
@@ -35,7 +35,7 @@ def generate_cert(cert_file, key_file, pem_file, domains):
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now)
-        .not_valid_after(now + datetime.timedelta(days=365 * 10))  # 10 年有效
+        .not_valid_after(now + datetime.timedelta(days=days))  # 默认 10 年有效
         .add_extension(san, critical=False)
         .sign(key, hashes.SHA256(), default_backend())
     )

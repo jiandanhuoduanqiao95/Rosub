@@ -12,9 +12,11 @@ import 'package:intl/intl.dart';
 
 import '../models/chat_models.dart';
 import 'raw_text_field.dart';
+import '../services/quick_reply_store.dart';
 import '../services/socket_service.dart';
 import '../services/state_manager.dart';
 import '../services/taskbar_notifier.dart';
+import '../services/theme_settings.dart';
 
 // ============================================================
 // 用户资料对话框（阶段 J：P0-2）
@@ -1281,6 +1283,8 @@ void showGroupMenuDialog(
   ValueChanged<bool>? onToggleMute,
   // 阶段 M1：群管理入口（仅群主提供回调时渲染）
   VoidCallback? onAdmin,
+  // 阶段 O1：群公告编辑入口（仅群主提供回调时渲染）
+  VoidCallback? onAnnouncement,
 }) {
   final state = AppState.instance;
   showDialog(
@@ -1336,6 +1340,16 @@ void showGroupMenuDialog(
                     onTap: () {
                       Navigator.pop(ctx);
                       onToggleMute(!muted);
+                    },
+                  ),
+                // 阶段 O1：群公告（仅群主提供回调时渲染）
+                if (onAnnouncement != null)
+                  ListTile(
+                    leading: const Icon(Icons.campaign_rounded),
+                    title: const Text('群公告'),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      onAnnouncement();
                     },
                   ),
                 // 阶段 M1：群管理（群主可见：踢人/转让/改名/审批/邀请）
@@ -1457,127 +1471,265 @@ void showSettingsDialog(BuildContext context) {
         final dndEnd = TaskbarNotifier.dndEndTime;
         return AlertDialog(
           title: const Text('设置'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SwitchListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                title: const Text('提示音'),
-                value: TaskbarNotifier.soundEnabled,
-                onChanged: (v) =>
-                    setState(() => TaskbarNotifier.soundEnabled = v),
-              ),
-              SwitchListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                title: const Text('免打扰'),
-                subtitle: TaskbarNotifier.dndEnabled
-                    ? Text(
-                        '至 ${DateFormat('yyyy-MM-dd HH:mm').format(dndEnd)} 自动结束',
-                        style: const TextStyle(fontSize: 12),
-                      )
-                    : null,
-                value: TaskbarNotifier.dndEnabled,
-                onChanged: (v) => setState(() {
-                  TaskbarNotifier.dndEnabled = v;
-                  if (v) TaskbarNotifier.ensureDndEndInFuture();
-                }),
-              ),
-              if (TaskbarNotifier.dndEnabled)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Column(
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Text('结束日期'),
-                          const SizedBox(width: 8),
-                          TextButton.icon(
-                            icon: const Icon(Icons.calendar_month_rounded,
-                                size: 18),
-                            label: Text(DateFormat('yyyy-MM-dd')
-                                .format(TaskbarNotifier.dndEndTime)),
-                            onPressed: () async {
-                              final now = DateTime.now();
-                              final firstDate =
-                                  DateTime(now.year, now.month, now.day);
-                              final lastDate =
-                                  DateTime(now.year + 1, now.month, now.day);
-                              final dndEnd = TaskbarNotifier.dndEndTime;
-                              final picked = await showDatePicker(
-                                context: ctx,
-                                // 防御：dndEndTime 早于今天（如跨天后未到期巡检）
-                                // 时钳制为今天，避免 initialDate < firstDate 断言崩溃
-                                initialDate: dndEnd.isBefore(firstDate)
-                                    ? firstDate
-                                    : dndEnd,
-                                firstDate: firstDate,
-                                lastDate: lastDate,
-                              );
-                              if (picked != null) {
-                                final old = TaskbarNotifier.dndEndTime;
-                                TaskbarNotifier.dndEndTime = DateTime(
-                                  picked.year,
-                                  picked.month,
-                                  picked.day,
-                                  old.hour,
-                                  old.minute,
-                                );
-                                if (ctx.mounted) setState(() {});
-                              }
-                            },
-                          ),
-                        ],
-                      ),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Text('结束时刻'),
-                          const SizedBox(width: 8),
-                          DropdownButton<int>(
-                            value: TaskbarNotifier.dndEndTime.hour,
-                            items: [
-                              for (var h = 0; h < 24; h++)
-                                DropdownMenuItem(value: h, child: Text('$h 时')),
-                            ],
-                            onChanged: (h) {
-                              if (h != null) {
-                                final old = TaskbarNotifier.dndEndTime;
-                                TaskbarNotifier.dndEndTime = DateTime(old.year,
-                                    old.month, old.day, h, old.minute);
-                                setState(() {});
-                              }
-                            },
-                          ),
-                          const SizedBox(width: 12),
-                          DropdownButton<int>(
-                            value: TaskbarNotifier.dndEndTime.minute,
-                            items: [
-                              for (var m = 0; m < 60; m++)
-                                DropdownMenuItem(value: m, child: Text('$m 分')),
-                            ],
-                            onChanged: (m) {
-                              if (m != null) {
-                                final old = TaskbarNotifier.dndEndTime;
-                                TaskbarNotifier.dndEndTime = DateTime(
-                                    old.year, old.month, old.day, old.hour, m);
-                                setState(() {});
-                              }
-                            },
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 4),
-                      const Text(
-                        '免打扰到期后自动关闭并提醒',
-                        style: TextStyle(fontSize: 12),
-                      ),
-                    ],
+          // 阶段 O7：设置项增多（深色模式/字体/主题色/背景），内容可滚动
+          // 避免免打扰时段展开后溢出（K3 回归保护）
+          content: SizedBox(
+            width: 380,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SwitchListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('提示音'),
+                    value: TaskbarNotifier.soundEnabled,
+                    onChanged: (v) =>
+                        setState(() => TaskbarNotifier.soundEnabled = v),
                   ),
-                ),
-            ],
+                  SwitchListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('免打扰'),
+                    subtitle: TaskbarNotifier.dndEnabled
+                        ? Text(
+                            '至 ${DateFormat('yyyy-MM-dd HH:mm').format(dndEnd)} 自动结束',
+                            style: const TextStyle(fontSize: 12),
+                          )
+                        : null,
+                    value: TaskbarNotifier.dndEnabled,
+                    onChanged: (v) => setState(() {
+                      TaskbarNotifier.dndEnabled = v;
+                      if (v) TaskbarNotifier.ensureDndEndInFuture();
+                    }),
+                  ),
+                  if (TaskbarNotifier.dndEnabled)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Column(
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Text('结束日期'),
+                              const SizedBox(width: 8),
+                              TextButton.icon(
+                                icon: const Icon(Icons.calendar_month_rounded,
+                                    size: 18),
+                                label: Text(DateFormat('yyyy-MM-dd')
+                                    .format(TaskbarNotifier.dndEndTime)),
+                                onPressed: () async {
+                                  final now = DateTime.now();
+                                  final firstDate =
+                                      DateTime(now.year, now.month, now.day);
+                                  final lastDate = DateTime(
+                                      now.year + 1, now.month, now.day);
+                                  final dndEnd = TaskbarNotifier.dndEndTime;
+                                  final picked = await showDatePicker(
+                                    context: ctx,
+                                    // 防御：dndEndTime 早于今天（如跨天后未到期巡检）
+                                    // 时钳制为今天，避免 initialDate < firstDate 断言崩溃
+                                    initialDate: dndEnd.isBefore(firstDate)
+                                        ? firstDate
+                                        : dndEnd,
+                                    firstDate: firstDate,
+                                    lastDate: lastDate,
+                                  );
+                                  if (picked != null) {
+                                    final old = TaskbarNotifier.dndEndTime;
+                                    TaskbarNotifier.dndEndTime = DateTime(
+                                      picked.year,
+                                      picked.month,
+                                      picked.day,
+                                      old.hour,
+                                      old.minute,
+                                    );
+                                    if (ctx.mounted) setState(() {});
+                                  }
+                                },
+                              ),
+                            ],
+                          ),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Text('结束时刻'),
+                              const SizedBox(width: 8),
+                              DropdownButton<int>(
+                                value: TaskbarNotifier.dndEndTime.hour,
+                                items: [
+                                  for (var h = 0; h < 24; h++)
+                                    DropdownMenuItem(
+                                        value: h, child: Text('$h 时')),
+                                ],
+                                onChanged: (h) {
+                                  if (h != null) {
+                                    final old = TaskbarNotifier.dndEndTime;
+                                    TaskbarNotifier.dndEndTime = DateTime(
+                                        old.year,
+                                        old.month,
+                                        old.day,
+                                        h,
+                                        old.minute);
+                                    setState(() {});
+                                  }
+                                },
+                              ),
+                              const SizedBox(width: 12),
+                              DropdownButton<int>(
+                                value: TaskbarNotifier.dndEndTime.minute,
+                                items: [
+                                  for (var m = 0; m < 60; m++)
+                                    DropdownMenuItem(
+                                        value: m, child: Text('$m 分')),
+                                ],
+                                onChanged: (m) {
+                                  if (m != null) {
+                                    final old = TaskbarNotifier.dndEndTime;
+                                    TaskbarNotifier.dndEndTime = DateTime(
+                                        old.year,
+                                        old.month,
+                                        old.day,
+                                        old.hour,
+                                        m);
+                                    setState(() {});
+                                  }
+                                },
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          const Text(
+                            '免打扰到期后自动关闭并提醒',
+                            style: TextStyle(fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                  // ---- 阶段 O7（P2-9 字体大小/聊天背景/自定义主题色）----
+                  ListenableBuilder(
+                    listenable: ThemeSettings.instance,
+                    builder: (ctx, _) {
+                      final settings = ThemeSettings.instance;
+                      Widget sectionLabel(String text) => SizedBox(
+                            width: 64,
+                            child: Text(text,
+                                style: const TextStyle(
+                                    fontSize: 13, fontWeight: FontWeight.w600)),
+                          );
+                      return Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Divider(),
+                          Row(
+                            children: [
+                              sectionLabel('深色模式'),
+                              Expanded(
+                                child: Wrap(
+                                  spacing: 8,
+                                  runSpacing: 4,
+                                  children: [
+                                    for (final entry in {
+                                      AppThemeMode.system: '跟随系统',
+                                      AppThemeMode.light: '浅色',
+                                      AppThemeMode.dark: '深色',
+                                    }.entries)
+                                      ChoiceChip(
+                                        label: Text(entry.value),
+                                        selected: settings.mode == entry.key,
+                                        onSelected: (_) =>
+                                            settings.mode = entry.key,
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                          Row(
+                            children: [
+                              sectionLabel('字体大小'),
+                              Expanded(
+                                child: Slider(
+                                  min: 0.8,
+                                  max: 1.5,
+                                  divisions: 14,
+                                  label: settings.fontScale.toStringAsFixed(2),
+                                  value: settings.fontScale,
+                                  onChanged: (v) => settings.fontScale = v,
+                                ),
+                              ),
+                            ],
+                          ),
+                          Row(
+                            children: [
+                              sectionLabel('主题色'),
+                              Expanded(
+                                child: Wrap(
+                                  spacing: 10,
+                                  children: [
+                                    for (final c in ThemeSettings.presetColors)
+                                      GestureDetector(
+                                        key: ValueKey('o7_theme_color_$c'),
+                                        onTap: () => settings.themeColor = c,
+                                        child: CircleAvatar(
+                                          radius: 13,
+                                          backgroundColor: Color(c),
+                                          child: settings.themeColor == c
+                                              ? const Icon(Icons.check_rounded,
+                                                  size: 15, color: Colors.white)
+                                              : null,
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                          Row(
+                            children: [
+                              sectionLabel('聊天背景'),
+                              Expanded(
+                                child: Wrap(
+                                  spacing: 8,
+                                  crossAxisAlignment: WrapCrossAlignment.center,
+                                  children: [
+                                    ChoiceChip(
+                                      label: const Text('无背景'),
+                                      selected: settings.chatBackground == null,
+                                      onSelected: (_) =>
+                                          settings.chatBackground = null,
+                                    ),
+                                    for (final c
+                                        in ThemeSettings.presetBackgrounds)
+                                      if (c != null)
+                                        GestureDetector(
+                                          key: ValueKey('o7_bg_$c'),
+                                          onTap: () =>
+                                              settings.chatBackground = c,
+                                          child: CircleAvatar(
+                                            radius: 13,
+                                            backgroundColor: Color(c),
+                                            child: settings.chatBackground == c
+                                                ? const Icon(
+                                                    Icons.check_rounded,
+                                                    size: 15,
+                                                    color: Colors.grey)
+                                                : null,
+                                          ),
+                                        ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
           ),
           actions: [
             TextButton(
@@ -1971,6 +2123,9 @@ void showServerStatusDialog(BuildContext context, SocketService service) {
         final s = state.serverStatus;
         final cleanup = state.storageCleanupResult;
         final logs = (s?['recent_logs'] as List?) ?? const [];
+        // 阶段 O8：证书过期自检（旧服务端无 cert 字段时不渲染，向后兼容）
+        final cert = s?['cert'];
+        final certMap = cert is Map ? cert : null;
         return AlertDialog(
           title: const Row(
             children: [
@@ -2013,6 +2168,16 @@ void showServerStatusDialog(BuildContext context, SocketService service) {
                                 ? '⚠ 剩余空间不足，请及时清理'
                                 : '正常'),
                         const Divider(),
+                        // 阶段 O8：证书剩余有效期与续期入口
+                        if (certMap != null) ...[
+                          _statusRow(
+                            '证书剩余天数',
+                            certMap['expired'] == true
+                                ? '已过期'
+                                : '${certMap['days_left'] ?? '?'} 天',
+                          ),
+                          const Divider(),
+                        ],
                         if (cleanup != null) ...[
                           Text(
                             '上次清理: 文件请求 ${cleanup['expired_file_requests']} '
@@ -2040,6 +2205,14 @@ void showServerStatusDialog(BuildContext context, SocketService service) {
               },
               child: const Text('存储清理'),
             ),
+            // 阶段 O8：证书一键续期（旧服务端无 cert 字段时不显示）
+            if (certMap != null)
+              TextButton(
+                onPressed: () {
+                  service.renewCert();
+                },
+                child: const Text('一键续期'),
+              ),
             // 2026-08-25 用户反馈：面板数据刷新（无需反复进入退出）
             TextButton(
               onPressed: () {
@@ -2372,4 +2545,495 @@ Future<void> _exportAuditLogs(
   } catch (e) {
     AppState.instance.showNotice('审计导出失败: $e');
   }
+}
+
+// ============================================================
+// 阶段 O —— 群组与消息增强对话框
+// ============================================================
+
+/// 阶段 O1（群公告）管理对话框（2026-08-30 用户反馈 #2）：
+/// 两个选项页——「发布公告」（输入文本确定发布；空文本语义已由独立清除取代）
+/// 与「清除公告」（查看全部公告历史并选择性删除；删除当前公告时横幅同步消失）。
+/// 发布经 [onConfirm]（上层 set_group_announcement）；
+/// 查看经 [onListAnnouncements]（上层 fetchGroupAnnouncements，结果在
+/// AppState.groupAnnouncements）；删除经 [onDelete]（上层 deleteGroupAnnouncement，
+/// 服务端删除当前公告会广播 list_groups 刷新）。
+void showGroupAnnouncementDialog(
+  BuildContext context, {
+  String? initial,
+  required ValueChanged<String> onConfirm,
+  required VoidCallback onListAnnouncements,
+  required ValueChanged<String> onDelete,
+}) {
+  final ctrl = TextEditingController(text: initial ?? '');
+  var tab = 0; // 0=发布公告 1=清除公告
+  var loadedList = false;
+
+  showDialog(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setState) => ListenableBuilder(
+        listenable: AppState.instance,
+        builder: (ctx, _) {
+          final state = AppState.instance;
+          if (tab == 1 && !loadedList) {
+            loadedList = true;
+            onListAnnouncements();
+          }
+          return AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.campaign_rounded),
+                SizedBox(width: 8),
+                Text('群公告'),
+              ],
+            ),
+            content: SizedBox(
+              width: 360,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      ChoiceChip(
+                        label: const Text('发布公告'),
+                        selected: tab == 0,
+                        onSelected: (_) => setState(() => tab = 0),
+                      ),
+                      const SizedBox(width: 8),
+                      ChoiceChip(
+                        label: const Text('清除公告'),
+                        selected: tab == 1,
+                        onSelected: (_) => setState(() => tab = 1),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  if (tab == 0) ...[
+                    const Text('公告将推送给全体成员',
+                        style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    const SizedBox(height: 8),
+                    RawTextField(
+                      controller: ctrl,
+                      hintText: '输入群公告内容...',
+                      showChineseInput: true,
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton(
+                      style: FilledButton.styleFrom(
+                          minimumSize: const Size(0, 40)),
+                      onPressed: () {
+                        final text = ctrl.text.trim();
+                        Navigator.pop(ctx);
+                        onConfirm(text);
+                      },
+                      child: const Text('发布'),
+                    ),
+                  ] else
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 300),
+                      child: state.groupAnnouncements.isEmpty
+                          ? const Padding(
+                              padding: EdgeInsets.all(16),
+                              child: Text('暂无公告历史',
+                                  style: TextStyle(color: Colors.grey)),
+                            )
+                          : ListView.builder(
+                              shrinkWrap: true,
+                              itemCount: state.groupAnnouncements.length,
+                              itemBuilder: (ctx, i) {
+                                final a = state.groupAnnouncements[i];
+                                final isCurrent = a.content == initial;
+                                return ListTile(
+                                  dense: true,
+                                  title: Text(
+                                    a.content,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  subtitle: Text(
+                                    isCurrent ? '当前公告' : a.timestamp,
+                                    style: const TextStyle(fontSize: 11),
+                                  ),
+                                  trailing: IconButton(
+                                    key: ValueKey(
+                                        'announcement_delete_${a.messageId}'),
+                                    icon: const Icon(
+                                        Icons.delete_outline_rounded,
+                                        size: 20),
+                                    tooltip: '删除',
+                                    onPressed: () {
+                                      onDelete(a.messageId);
+                                      setState(() {
+                                        loadedList = false;
+                                      });
+                                    },
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('取消'),
+              ),
+            ],
+          );
+        },
+      ),
+    ),
+  );
+}
+
+/// 阶段 O4（P2-3 快捷回复）：常用语面板——点击短语即 [onSend] 并关闭；
+/// 可添加/删除（经 QuickReplyStore 本地持久化，[onChanged] 通知列表变化）。
+void showQuickReplyPanel(
+  BuildContext context, {
+  required ValueChanged<String> onSend,
+  VoidCallback? onChanged,
+}) {
+  final addCtrl = TextEditingController();
+  List<String> phrases = const [];
+  var loaded = false;
+
+  Future<void> reload(void Function(void Function()) setState) async {
+    final list = await QuickReplyStore.load();
+    setState(() => phrases = list);
+  }
+
+  showDialog(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setState) {
+        if (!loaded) {
+          loaded = true;
+          reload(setState);
+        }
+        return AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.bolt_rounded),
+              SizedBox(width: 8),
+              Text('快捷回复'),
+            ],
+          ),
+          content: SizedBox(
+            width: 320,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 280),
+                  child: phrases.isEmpty
+                      ? const Padding(
+                          padding: EdgeInsets.all(16),
+                          child: Text('暂无常用语，先添加一条吧',
+                              style: TextStyle(color: Colors.grey)),
+                        )
+                      : ListView.builder(
+                          shrinkWrap: true,
+                          itemCount: phrases.length,
+                          itemBuilder: (ctx, i) {
+                            final phrase = phrases[i];
+                            return ListTile(
+                              dense: true,
+                              title: Text(phrase),
+                              onTap: () {
+                                Navigator.pop(ctx);
+                                onSend(phrase);
+                              },
+                              trailing: IconButton(
+                                key: ValueKey('quick_reply_delete_$phrase'),
+                                icon: const Icon(Icons.delete_outline_rounded,
+                                    size: 20),
+                                tooltip: '删除',
+                                onPressed: () async {
+                                  await QuickReplyStore.remove(phrase);
+                                  await reload(setState);
+                                  onChanged?.call();
+                                },
+                              ),
+                            );
+                          },
+                        ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: RawTextField(
+                        controller: addCtrl,
+                        hintText: '输入新常用语...',
+                        showChineseInput: true,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    TextButton(
+                      onPressed: () async {
+                        await QuickReplyStore.add(addCtrl.text);
+                        addCtrl.clear();
+                        await reload(setState);
+                        onChanged?.call();
+                      },
+                      child: const Text('添加'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('关闭'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
+
+/// 日期/时刻下拉组（阶段 O5/O9 定时对话框共用）。
+/// 返回控件；通过 [onChangedDate]/[onChangedTime] 回传选择结果。
+class _SchedulePickers extends StatelessWidget {
+  final DateTime selectedDate;
+  final int hour;
+  final int minute;
+  final ValueChanged<DateTime> onChangedDate;
+  final ValueChanged<int> onChangedHour;
+  final ValueChanged<int> onChangedMinute;
+
+  const _SchedulePickers({
+    required this.selectedDate,
+    required this.hour,
+    required this.minute,
+    required this.onChangedDate,
+    required this.onChangedHour,
+    required this.onChangedMinute,
+  });
+
+  static String _dayLabel(DateTime d) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final target = DateTime(d.year, d.month, d.day);
+    final diff = target.difference(today).inDays;
+    if (diff == 0) return '今天';
+    if (diff == 1) return '明天';
+    return '${d.month}-${d.day}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final base = DateTime(now.year, now.month, now.day);
+    final days = [
+      for (var i = 0; i <= 7; i++) base.add(Duration(days: i)),
+    ];
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        DropdownButton<DateTime>(
+          value: selectedDate,
+          items: [
+            for (final d in days)
+              DropdownMenuItem(
+                value: d,
+                child: Text(_dayLabel(d)),
+              ),
+          ],
+          onChanged: (d) {
+            if (d != null) onChangedDate(d);
+          },
+        ),
+        const SizedBox(width: 12),
+        DropdownButton<int>(
+          value: hour,
+          items: [
+            for (var h = 0; h < 24; h++)
+              DropdownMenuItem(value: h, child: Text('$h 时')),
+          ],
+          onChanged: (h) {
+            if (h != null) onChangedHour(h);
+          },
+        ),
+        const SizedBox(width: 12),
+        DropdownButton<int>(
+          value: minute,
+          items: [
+            for (var m = 0; m < 60; m++)
+              DropdownMenuItem(value: m, child: Text('$m 分')),
+          ],
+          onChanged: (m) {
+            if (m != null) onChangedMinute(m);
+          },
+        ),
+      ],
+    );
+  }
+}
+
+/// 阶段 O5（P2-5 定时消息）：定时发送对话框。
+/// 默认时刻 = 明天 09:00；空文本禁用确定；确认回调 [onSchedule](时刻, 文本)。
+
+/// 阶段 O5（P2-5 定时消息）：定时发送对话框。
+/// 默认时刻 = 明天 09:00；空文本禁用确定；确认回调 [onSchedule](时刻, 文本)。
+void showScheduleMessageDialog(
+  BuildContext context, {
+  required Future<void> Function(DateTime at, String text) onSchedule,
+}) {
+  final textCtrl = TextEditingController();
+  final now = DateTime.now();
+  var selectedDate = DateTime(now.year, now.month, now.day + 1);
+  var hour = 9;
+  var minute = 0;
+  var listenerBound = false;
+
+  showDialog(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setState) {
+        if (!listenerBound) {
+          listenerBound = true;
+          // RawTextField 无 onChanged：文本变化经 controller listener 触发重建
+          textCtrl.addListener(() => setState(() {}));
+        }
+        return AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.schedule_rounded),
+              SizedBox(width: 8),
+              Text('定时消息'),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              RawTextField(
+                controller: textCtrl,
+                hintText: '输入定时消息内容...',
+                showChineseInput: true,
+              ),
+              const SizedBox(height: 12),
+              _SchedulePickers(
+                selectedDate: selectedDate,
+                hour: hour,
+                minute: minute,
+                onChangedDate: (d) => setState(() => selectedDate = d),
+                onChangedHour: (h) => setState(() => hour = h),
+                onChangedMinute: (m) => setState(() => minute = m),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(minimumSize: const Size(0, 40)),
+              onPressed: textCtrl.text.trim().isEmpty
+                  ? null
+                  : () async {
+                      final at = DateTime(selectedDate.year, selectedDate.month,
+                          selectedDate.day, hour, minute);
+                      Navigator.pop(ctx);
+                      await onSchedule(at, textCtrl.text.trim());
+                    },
+              child: const Text('定时发送'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
+
+/// 阶段 O5（2026-08-30 用户反馈 #7）：定时管理对话框——列出本人全部
+/// pending 定时任务并选择性取消。打开时经 [onList]（fetchScheduled）
+/// 拉取，渲染 AppState.scheduledMessages；删除经 [onDelete]（cancelScheduled
+/// + 重新拉取）。
+void showScheduledManageDialog(
+  BuildContext context, {
+  required VoidCallback onList,
+  required ValueChanged<String> onDelete,
+}) {
+  var loaded = false;
+  showDialog(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setState) => ListenableBuilder(
+        listenable: AppState.instance,
+        builder: (ctx, _) {
+          final state = AppState.instance;
+          if (!loaded) {
+            loaded = true;
+            onList();
+          }
+          String two(int v) => v.toString().padLeft(2, '0');
+          return AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.schedule_rounded),
+                SizedBox(width: 8),
+                Text('定时任务管理'),
+              ],
+            ),
+            content: SizedBox(
+              width: 360,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 320),
+                child: state.scheduledMessages.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Text('暂无定时任务',
+                            style: TextStyle(color: Colors.grey.shade600)),
+                      )
+                    : ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: state.scheduledMessages.length,
+                        itemBuilder: (ctx, i) {
+                          final s = state.scheduledMessages[i];
+                          final target = s.isGroupMessage
+                              ? '群 ${s.groupId}'
+                              : '发给 ${s.receiver}';
+                          return ListTile(
+                            dense: true,
+                            title: Text(s.content,
+                                maxLines: 2, overflow: TextOverflow.ellipsis),
+                            subtitle: Text(
+                                '$target · '
+                                '${s.scheduleAt.month}-${s.scheduleAt.day} '
+                                '${two(s.scheduleAt.hour)}:${two(s.scheduleAt.minute)}',
+                                style: const TextStyle(fontSize: 11)),
+                            trailing: IconButton(
+                              key: ValueKey('scheduled_cancel_${s.messageId}'),
+                              icon: const Icon(Icons.cancel_outlined, size: 20),
+                              tooltip: '取消定时',
+                              onPressed: () {
+                                onDelete(s.messageId);
+                                setState(() => loaded = false);
+                              },
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('关闭'),
+              ),
+            ],
+          );
+        },
+      ),
+    ),
+  );
 }

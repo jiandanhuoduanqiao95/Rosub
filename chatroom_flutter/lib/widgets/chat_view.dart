@@ -12,6 +12,7 @@ import 'package:flutter/services.dart';
 
 import '../config.dart';
 import '../models/chat_models.dart';
+import '../services/theme_settings.dart';
 import 'raw_text_field.dart';
 
 class ChatView extends StatefulWidget {
@@ -53,6 +54,47 @@ class ChatView extends StatefulWidget {
   // 阶段 N2（P2-1 聊天记录导出）：工具栏导出按钮回调（非系统会话提供）
   final VoidCallback? onExportChat;
 
+  // ---- 阶段 O —— 群组与消息增强 ----
+
+  // 阶段 O1：群公告横幅（非空时显示；数据源 Group.announcement——最新一条，
+  // 兼容单条传参；多条公告经 announcements 参数传入）
+  final String? announcement;
+
+  // 阶段 O1 修订（2026-08-31 多公告并存）：全量公告文本列表（横幅逐条显示）
+  final List<String>? announcements;
+
+  // 阶段 O1 修订（R-O12 公告横幅删除按钮）：全量公告条目（含 id——
+  // 提供即公告横幅尾部显示 ✕ 删除按钮，仅群主传入；点击回调 onDeleteAnnouncement）
+  final List<GroupAnnouncement>? announcementItems;
+  final ValueChanged<String>? onDeleteAnnouncement;
+
+  // 阶段 O2：群置顶横幅（非空时显示；数据源 Group.pinnedPreview——兼容快照）
+  final String? pinnedPreview;
+
+  // 阶段 O2 修订（2026-08-31 多置顶并存）：全量置顶列表（横幅逐条显示，
+  // 点击条目定位到原消息；数据源 Group.pinnedMessages）
+  final List<GroupPinnedItem>? pinnedItems;
+
+  // 阶段 O2 修订：快捷取消单条置顶（提供即显示取消按钮；仅群主传入）
+  final ValueChanged<String>? onUnpinMessage;
+
+  // 阶段 O2：置顶群消息回调（提供即群消息菜单新增"置顶"入口；
+  // ChatScreen 仅对"群主 + 群会话"传入）
+  final ValueChanged<String>? onPinMessage;
+
+  // 阶段 O2（2026-08-30 用户反馈 #3）：当前已置顶的消息 id——菜单据此把
+  // 该消息的"置顶"显示为"取消置顶"
+  final String? pinnedMessageId;
+
+  // 阶段 O4：快捷回复入口（提供即输入行显示"快捷回复"按钮）
+  final VoidCallback? onQuickReply;
+
+  // 阶段 O5：定时发送入口（提供即输入行显示"定时发送"按钮）
+  final VoidCallback? onScheduleMessage;
+
+  // 阶段 O9：分享卡片入口（提供即输入行显示"分享卡片"按钮）
+  final VoidCallback? onShareCard;
+
   const ChatView({
     super.key,
     required this.chatKey,
@@ -82,6 +124,18 @@ class ChatView extends StatefulWidget {
     this.onImagePasted,
     this.onImageTap,
     this.onExportChat,
+    this.announcement,
+    this.announcements,
+    this.announcementItems,
+    this.onDeleteAnnouncement,
+    this.pinnedPreview,
+    this.pinnedItems,
+    this.onUnpinMessage,
+    this.onPinMessage,
+    this.pinnedMessageId,
+    this.onQuickReply,
+    this.onScheduleMessage,
+    this.onShareCard,
   });
 
   static void _noopSearch(String _) {}
@@ -329,108 +383,121 @@ class _ChatViewState extends State<ChatView> {
             ),
           ),
 
-        // 消息列表
+        // 阶段 O1/O2：群公告 / 群置顶横幅（消息区上方）。
+        // 2026-08-31 修订（多公告/多置顶并存）：逐条显示；置顶条目点击定位
+        // 到原消息（复用引用跳转的滚动+高亮），并提供快捷取消置顶按钮。
+        ..._buildNoticeBanners(context),
         Expanded(
-          child: widget.messages.isEmpty
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.forum_outlined,
-                        size: 56,
-                        color: Theme.of(context).colorScheme.outline,
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        widget.isSearchMode ? '无搜索结果' : '暂无消息',
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+          // 阶段 O7（2026-08-30 用户反馈 #8）：聊天背景色应用于消息区域
+          child: ColoredBox(
+            color: ThemeSettings.instance.chatBackground == null
+                ? Theme.of(context).colorScheme.surface
+                : Color(ThemeSettings.instance.chatBackground!),
+            child: widget.messages.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.forum_outlined,
+                          size: 56,
+                          color: Theme.of(context).colorScheme.outline,
                         ),
-                      ),
-                    ],
-                  ),
-                )
-              : Stack(
-                  children: [
-                    ListView.builder(
-                      controller: _scrollCtrl,
-                      reverse: true,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      itemCount: widget.messages.length,
-                      itemBuilder: (context, index) {
-                        final msgIndex = widget.messages.length - 1 - index;
-                        final msg = widget.messages[msgIndex];
-                        return _MessageBubble(
-                          message: msg,
-                          isSelf: msg.sender == widget.username,
-                          onRecall:
-                              msg.isRecalled || msg.sender != widget.username
-                                  ? null
-                                  : () => widget.onRecall(msg.messageId),
-                          transferFraction: msg.type == 'file'
-                              ? widget.transferFraction?.call(msg.messageId)
-                              : null,
-                          onRetrySend: msg.sender == widget.username
-                              ? widget.onRetrySend
-                              : null,
-                          kMenuEnabled: _kMenuEnabled,
-                          onReplyMessage: widget.onReplyMessage,
-                          onForwardMessage: widget.onForwardMessage,
-                          onAddReaction: widget.onAddReaction,
-                          onDeleteMessage: widget.onDeleteMessage,
-                          onDeletePermanently: widget.onDeletePermanently,
-                          onJumpToMessage: widget.onJumpToMessage,
-                          onImageTap: widget.onImageTap,
-                          // 跳转目标是被引用的原消息（P-30 修复）
-                          onJump: () =>
-                              _jumpToMessage(msg.replyTo ?? msg.messageId),
-                          highlighted: msg.messageId == _highlightMessageId,
-                        );
-                      },
+                        const SizedBox(height: 12),
+                        Text(
+                          widget.isSearchMode ? '无搜索结果' : '暂无消息',
+                          style: TextStyle(
+                            color:
+                                Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
                     ),
-                    // 加载指示器
-                    if (_isLoadingHistory)
-                      Positioned(
-                        top: 8,
-                        left: 0,
-                        right: 0,
-                        child: Center(
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 8),
-                            decoration: BoxDecoration(
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .surfaceContainerHighest,
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child:
-                                      CircularProgressIndicator(strokeWidth: 2),
-                                ),
-                                const SizedBox(width: 8),
-                                Text(
-                                  '加载中…',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    color: Theme.of(context)
-                                        .colorScheme
-                                        .onSurfaceVariant,
+                  )
+                : Stack(
+                    children: [
+                      ListView.builder(
+                        controller: _scrollCtrl,
+                        reverse: true,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        itemCount: widget.messages.length,
+                        itemBuilder: (context, index) {
+                          final msgIndex = widget.messages.length - 1 - index;
+                          final msg = widget.messages[msgIndex];
+                          return _MessageBubble(
+                            message: msg,
+                            isSelf: msg.sender == widget.username,
+                            onRecall:
+                                msg.isRecalled || msg.sender != widget.username
+                                    ? null
+                                    : () => widget.onRecall(msg.messageId),
+                            transferFraction: msg.type == 'file'
+                                ? widget.transferFraction?.call(msg.messageId)
+                                : null,
+                            onRetrySend: msg.sender == widget.username
+                                ? widget.onRetrySend
+                                : null,
+                            kMenuEnabled: _kMenuEnabled,
+                            onReplyMessage: widget.onReplyMessage,
+                            onForwardMessage: widget.onForwardMessage,
+                            onAddReaction: widget.onAddReaction,
+                            onDeleteMessage: widget.onDeleteMessage,
+                            onDeletePermanently: widget.onDeletePermanently,
+                            onJumpToMessage: widget.onJumpToMessage,
+                            onImageTap: widget.onImageTap,
+                            // 阶段 O2：群消息"置顶"入口（群主接线由上层控制）
+                            onPinMessage: widget.onPinMessage,
+                            pinnedMessageId: widget.pinnedMessageId,
+                            // 跳转目标是被引用的原消息（P-30 修复）
+                            onJump: () =>
+                                _jumpToMessage(msg.replyTo ?? msg.messageId),
+                            highlighted: msg.messageId == _highlightMessageId,
+                          );
+                        },
+                      ),
+                      // 加载指示器
+                      if (_isLoadingHistory)
+                        Positioned(
+                          top: 8,
+                          left: 0,
+                          right: 0,
+                          child: Center(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .surfaceContainerHighest,
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2),
                                   ),
-                                ),
-                              ],
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    '加载中…',
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .onSurfaceVariant,
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                  ],
-                ),
+                    ],
+                  ),
+          ),
         ),
 
         // 输入栏（搜索模式下隐藏，阶段 H5）
@@ -443,11 +510,78 @@ class _ChatViewState extends State<ChatView> {
             onSendFile: widget.onSendFile,
             canSend: widget.canSend,
             onImagePasted: widget.onImagePasted,
+            // 阶段 O：快捷回复 / 定时发送 / 分享卡片入口（提供即渲染）
+            onQuickReply: widget.onQuickReply,
+            onScheduleMessage: widget.onScheduleMessage,
+            onShareCard: widget.onShareCard,
           )
         else
           _ReadOnlyBar(chatTitle: widget.chatTitle),
       ],
     );
+  }
+
+  /// 阶段 O1/O2（2026-08-31 多公告/多置顶并存）：构建横幅列表。
+  /// 公告逐条展示；置顶逐条展示，条目点击定位原消息（_jumpToMessage：
+  /// 未加载时翻页加载 + 高亮 2s），条目尾部快捷取消按钮直接解除该条置顶。
+  List<Widget> _buildNoticeBanners(BuildContext context) {
+    final banners = <Widget>[];
+    // R-O12：announcementItems 提供时横幅带 ✕ 删除按钮（仅群主）
+    final hasDelete = widget.onDeleteAnnouncement != null;
+    if (widget.announcementItems != null) {
+      for (final a in widget.announcementItems!) {
+        if (a.content.isEmpty) continue;
+        banners.add(_NoticeBanner(
+          marker: '📢',
+          text: a.content,
+          trailing: hasDelete
+              ? IconButton(
+                  key: ValueKey('announcement_delete_${a.messageId}'),
+                  icon: const Icon(Icons.close_rounded, size: 16),
+                  tooltip: '删除公告',
+                  onPressed: () => widget.onDeleteAnnouncement!(a.messageId),
+                )
+              : null,
+        ));
+      }
+    } else {
+      final announcements = <String>[
+        if (widget.announcement != null && widget.announcement!.isNotEmpty)
+          widget.announcement!,
+        ...(widget.announcements ?? const <String>[]),
+      ];
+      for (final text in announcements) {
+        if (text.isEmpty) continue;
+        banners.add(_NoticeBanner(
+          marker: '📢',
+          text: text,
+        ));
+      }
+    }
+    // 兼容快照（pinnedPreview）：无 id 仅展示，不可定位/取消
+    final compatPreview = widget.pinnedPreview;
+    final pins = <GroupPinnedItem>[
+      if (compatPreview != null && compatPreview.isNotEmpty)
+        GroupPinnedItem(messageId: '', preview: compatPreview),
+      ...(widget.pinnedItems ?? const <GroupPinnedItem>[]),
+    ];
+    for (final pin in pins) {
+      if (pin.preview.isEmpty) continue;
+      banners.add(_NoticeBanner(
+        marker: '📌',
+        text: pin.preview,
+        onTap:
+            pin.messageId.isEmpty ? null : () => _jumpToMessage(pin.messageId),
+        trailing: widget.onUnpinMessage == null || pin.messageId.isEmpty
+            ? null
+            : IconButton(
+                icon: const Icon(Icons.close_rounded, size: 16),
+                tooltip: '取消置顶',
+                onPressed: () => widget.onUnpinMessage!(pin.messageId),
+              ),
+      ));
+    }
+    return banners;
   }
 }
 
@@ -458,12 +592,20 @@ class _InputBar extends StatelessWidget {
   final bool canSend; // 阶段 N3：系统会话只读不接收图片粘贴
   final ValueChanged<Uint8List>? onImagePasted;
 
+  // ---- 阶段 O：快捷回复（O4）/ 定时发送（O5）/ 分享卡片（O9）入口 ----
+  final VoidCallback? onQuickReply;
+  final VoidCallback? onScheduleMessage;
+  final VoidCallback? onShareCard;
+
   const _InputBar({
     required this.inputCtrl,
     required this.onSend,
     required this.onSendFile,
     this.canSend = true,
     this.onImagePasted,
+    this.onQuickReply,
+    this.onScheduleMessage,
+    this.onShareCard,
   });
 
   @override
@@ -483,6 +625,27 @@ class _InputBar extends StatelessWidget {
             tooltip: '发送文件',
             onPressed: onSendFile,
           ),
+          // 阶段 O4：快捷回复（常用语一键发送）
+          if (onQuickReply != null)
+            IconButton(
+              icon: const Icon(Icons.bolt_rounded),
+              tooltip: '快捷回复',
+              onPressed: onQuickReply,
+            ),
+          // 阶段 O5：定时发送（预约发送）
+          if (onScheduleMessage != null)
+            IconButton(
+              icon: const Icon(Icons.schedule_rounded),
+              tooltip: '定时发送',
+              onPressed: onScheduleMessage,
+            ),
+          // 阶段 O9：分享卡片（名片/位置/日程）
+          if (onShareCard != null)
+            IconButton(
+              icon: const Icon(Icons.style_rounded),
+              tooltip: '分享卡片',
+              onPressed: onShareCard,
+            ),
           Expanded(
             child: RawTextField(
               controller: inputCtrl,
@@ -499,6 +662,57 @@ class _InputBar extends StatelessWidget {
             tooltip: '发送',
             onPressed: onSend,
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class _NoticeBanner extends StatelessWidget {
+  final String marker;
+  final String text;
+  final VoidCallback? onTap; // 点击条目（置顶定位到原消息）
+  final Widget? trailing; // 条目尾部控件（快捷取消置顶按钮）
+
+  const _NoticeBanner({
+    required this.marker,
+    required this.text,
+    this.onTap,
+    this.trailing,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        color: Theme.of(context)
+            .colorScheme
+            .primaryContainer
+            .withValues(alpha: 0.45),
+        border: Border(
+          bottom:
+              BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: InkWell(
+              onTap: onTap,
+              child: Text(
+                '$marker $text',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ),
+          if (trailing != null) trailing!,
         ],
       ),
     );
@@ -550,6 +764,12 @@ class _MessageBubble extends StatelessWidget {
   final bool highlighted; // 引用跳转高亮（P-30）
   final ValueChanged<ChatMessage>? onImageTap; // 阶段 N3b：点击内联图片全屏
 
+  // 阶段 O2：置顶群消息回调（提供且为群聊消息时菜单出现"置顶"入口）
+  final ValueChanged<String>? onPinMessage;
+
+  // 当前已置顶消息 id（该消息菜单显示"取消置顶"）
+  final String? pinnedMessageId;
+
   const _MessageBubble({
     required this.message,
     required this.isSelf,
@@ -566,6 +786,8 @@ class _MessageBubble extends StatelessWidget {
     required this.onJump,
     this.highlighted = false,
     this.onImageTap,
+    this.onPinMessage,
+    this.pinnedMessageId,
   });
 
   /// 阶段 K5：文字/文件消息且提供 K5 回调时启用消息菜单
@@ -587,9 +809,13 @@ class _MessageBubble extends StatelessWidget {
         onAddReaction: onAddReaction,
         onDeleteMessage: onDeleteMessage,
         onDeletePermanently: onDeletePermanently,
+        onPinMessage: onPinMessage,
+        pinnedMessageId: pinnedMessageId,
       ),
     );
   }
+
+  // ---- 阶段 O1：群公告 / O9：卡片消息渲染 ----
 
   // ---- 阶段 N3b：小图片内联展示 ----
 
@@ -641,6 +867,30 @@ class _MessageBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     if (message.type == 'system') {
       return _SystemMessage(message: message);
+    }
+    // 阶段 O1：群公告以居中胶囊样式渲染（📢 + 公告文本）
+    if (message.type == 'group_announcement') {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 18),
+        child: Align(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            constraints: const BoxConstraints(maxWidth: 420),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Text(
+              '📢 ${message.content}',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 13,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ),
+      );
     }
     final isRecalled = message.isRecalled;
     final alignment =
@@ -980,6 +1230,8 @@ class _MessageMenuSheet extends StatefulWidget {
   final void Function(String messageId, String emoji)? onAddReaction;
   final ValueChanged<String>? onDeleteMessage; // 仅我删除（本地）
   final ValueChanged<String>? onDeletePermanently; // 永久删除（阶段 N1）
+  final ValueChanged<String>? onPinMessage; // 置顶群消息（阶段 O2，群主）
+  final String? pinnedMessageId; // 当前已置顶消息 id（文案切换"取消置顶"）
 
   const _MessageMenuSheet({
     required this.message,
@@ -990,6 +1242,8 @@ class _MessageMenuSheet extends StatefulWidget {
     this.onAddReaction,
     this.onDeleteMessage,
     this.onDeletePermanently,
+    this.onPinMessage,
+    this.pinnedMessageId,
   });
 
   @override
@@ -1025,6 +1279,18 @@ class _MessageMenuSheetState extends State<_MessageMenuSheet> {
         icon: Icons.copy_rounded,
         title: '复制',
         onTap: () => _invoke(_copyMessage),
+      ));
+    }
+    // 阶段 O2：置顶群消息（仅群聊消息且提供回调时——群主接线由上层控制）
+    if (!isFile &&
+        widget.onPinMessage != null &&
+        widget.message.type == 'group_chat') {
+      final isPinned = widget.pinnedMessageId == widget.message.messageId;
+      entries.add(_MenuTile(
+        icon: Icons.push_pin_outlined,
+        title: isPinned ? '取消置顶' : '置顶',
+        onTap: () =>
+            _invoke(() => widget.onPinMessage!(widget.message.messageId)),
       ));
     }
     if (!isFile && widget.onReplyMessage != null) {

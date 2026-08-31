@@ -86,7 +86,8 @@ class TaskbarNotifier {
   static String? _ensureChimeWav() {
     if (_chimeWavPath != null) return _chimeWavPath;
     try {
-      final file = File('${Directory.systemTemp.path}/chatroom_notify_chime.wav');
+      final file =
+          File('${Directory.systemTemp.path}/chatroom_notify_chime.wav');
       if (!file.existsSync()) {
         file.writeAsBytesSync(_generateChimeWav());
       }
@@ -117,7 +118,8 @@ class TaskbarNotifier {
         final double t = i / sampleRate;
         // 4ms 快速起音 + 指数衰减（衰减速率随音长归一化）
         final double attack = (rel / (sampleRate * 0.004)).clamp(0.0, 1.0);
-        final double decay = math.exp(-(rel / (sampleRate * (durMs / 1000.0))) * 4.2);
+        final double decay =
+            math.exp(-(rel / (sampleRate * (durMs / 1000.0))) * 4.2);
         final double env = attack * decay;
         double s = math.sin(2 * math.pi * freq * t);
         s += 0.35 * math.sin(2 * math.pi * freq * 2 * t);
@@ -244,13 +246,20 @@ class TaskbarNotifier {
       'file_request' ||
       'group_file_request' =>
         true,
+      // 阶段 O1/O9：群公告与名片/位置/日程卡片同文本消息提醒
+      'group_announcement' ||
+      'share_contact' ||
+      'share_location' ||
+      'schedule_card' =>
+        true,
       'system' => msg.sender == '[系统公告]',
       _ => false,
     };
     if (!matched) return;
     // 阶段 K3：静音会话永不提醒；免打扰时段内不提醒（置顶会话豁免）
     final muted = AppState.instance.isMuted(chatKey);
-    final inDnd = dndEnabled && inDndWindow() && !AppState.instance.isPinned(chatKey);
+    final inDnd =
+        dndEnabled && inDndWindow() && !AppState.instance.isPinned(chatKey);
     if (muted || inDnd) return;
     if (soundEnabled) playSound();
     if (FocusTracker.instance.focused) return;

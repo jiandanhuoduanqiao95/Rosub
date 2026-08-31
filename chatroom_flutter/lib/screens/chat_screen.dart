@@ -18,6 +18,7 @@ import '../services/file_drop.dart';
 import '../services/ime_bridge.dart';
 import '../services/session_store.dart';
 import '../services/socket_service.dart';
+import '../services/theme_settings.dart';
 import '../services/state_manager.dart';
 import '../services/taskbar_notifier.dart';
 import '../widgets/chat_view.dart';
@@ -56,6 +57,12 @@ class _ChatScreenState extends State<ChatScreen> {
     // 阶段 N3（P2-4 文件拖拽发送）：接收 GTK 拖入的文件路径
     FileDrop.instance.ensureListening();
     FileDrop.instance.setOnFilesDropped(_onFilesDropped);
+    // 阶段 O1 修订（2026-08-31 多公告并存）：进入聊天页时对当前会话
+    // （重连恢复场景）拉取群公告历史
+    final initial = _state.currentChat;
+    if (initial != null) {
+      _maybeFetchGroupAnnouncements(initial);
+    }
   }
 
   @override
@@ -159,6 +166,20 @@ class _ChatScreenState extends State<ChatScreen> {
     widget.socketService.saveConversationDraft(current, '');
   }
 
+  /// 阶段 O4（快捷回复）/ O5（定时消息前置）：向指定会话发送既定文本
+  /// （不经输入框，不清草稿）
+  void _sendTextTo(String chatKey, String text) {
+    if (text.trim().isEmpty) return;
+    if (chatKey.startsWith('group_')) {
+      final groupId = int.tryParse(chatKey.substring(6));
+      if (groupId != null) {
+        widget.socketService.sendGroupChat(groupId, text);
+      }
+    } else {
+      widget.socketService.sendChat(chatKey, text);
+    }
+  }
+
   void _sendFile() async {
     final current = _state.currentChat;
     if (current == null || current == '服务器') return;
@@ -212,6 +233,16 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// 选中会话时，仅当会话无消息时触发首次历史加载（阶段 E6）
   /// 已有消息（如离线消息）不重复加载，上滑加载由 ScrollController 负责
+  /// 阶段 O1 修订（2026-08-31 多公告并存）：选中群会话时拉取该群公告历史
+  /// （横幅逐条显示；实时推送经 addGroupAnnouncement 追加）
+  void _maybeFetchGroupAnnouncements(String chatKey) {
+    if (chatKey == '服务器' || !chatKey.startsWith('group_')) return;
+    final groupId = int.tryParse(chatKey.substring(6));
+    if (groupId != null) {
+      widget.socketService.fetchGroupAnnouncements(groupId);
+    }
+  }
+
   void _maybeLoadInitialHistory(String chatKey) {
     if (chatKey == '服务器') return;
     if (!_state.hasMoreHistory(chatKey)) return;
@@ -412,16 +443,125 @@ class _ChatScreenState extends State<ChatScreen> {
         // 阶段 M1：群主可见"群管理"入口（踢人/转让/改名/头像/审批/邀请）
         onAdmin: _state.isGroupOwner(groupId)
             ? () => showGroupAdminDialog(context, group, widget.socketService)
+            : null,
+        // 阶段 O1：群主可见"群公告"编辑入口
+        onAnnouncement: _state.isGroupOwner(groupId)
+            ? () => _showGroupAnnouncementDialog(group)
             : null);
+  }
+
+  /// 阶段 O1/O2：当前选中会话对应的群组（私聊/系统会话为 null）
+  Group? get _currentGroup {
+    final key = _state.currentChat;
+    if (key == null || !key.startsWith('group_')) return null;
+    final groupId = int.tryParse(key.substring(6));
+    if (groupId == null) return null;
+    return _state.groups.where((g) => g.id == groupId).firstOrNull;
+  }
+
+  /// 阶段 O2：当前用户可置顶当前群会话的消息（群主 + 群会话）
+  bool get _canPinCurrent {
+    final group = _currentGroup;
+    if (group == null) return false;
+    return _state.isGroupOwner(group.id);
+  }
+
+  /// 阶段 O1（群公告）：群主公告管理（发布公告 / 清除公告）
+  void _showGroupAnnouncementDialog(Group group) {
+    showGroupAnnouncementDialog(
+      context,
+      initial: group.announcement,
+      onConfirm: (text) {
+        widget.socketService.setGroupAnnouncement(group.id, text);
+      },
+      onListAnnouncements: () {
+        widget.socketService.fetchGroupAnnouncements(group.id);
+      },
+      onDelete: (messageId) {
+        widget.socketService.deleteGroupAnnouncement(group.id, messageId);
+        _state.removeGroupAnnouncement(messageId);
+        widget.socketService.fetchGroupAnnouncements(group.id);
+      },
+    );
+  }
+
+  /// 阶段 O4（快捷回复）：常用语面板，点击即发送到当前会话
+  void _showQuickReplyPanel() {
+    final current = _state.currentChat;
+    if (current == null || current == '服务器') return;
+    showQuickReplyPanel(
+      context,
+      onSend: (phrase) => _sendTextTo(current, phrase),
+    );
+  }
+
+  /// 阶段 O5（定时发送，2026-08-30 用户反馈 #7）：定时入口两选项——
+  /// 「定时设定」（预约对话框）/「取消定时设定」（定时任务管理列表）
+  void _showScheduleDialog() {
+    final current = _state.currentChat;
+    if (current == null || current == '服务器') return;
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.schedule_rounded),
+              title: const Text('定时设定'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _openScheduleMessageDialog(current);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.manage_history_rounded),
+              title: const Text('取消定时设定'),
+              onTap: () {
+                Navigator.pop(ctx);
+                showScheduledManageDialog(
+                  context,
+                  onList: () => widget.socketService.fetchScheduled(),
+                  onDelete: (messageId) {
+                    widget.socketService.cancelScheduled(messageId);
+                    widget.socketService.fetchScheduled();
+                  },
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 定时设定对话框：确定后预约到当前会话
+  void _openScheduleMessageDialog(String current) {
+    showScheduleMessageDialog(
+      context,
+      onSchedule: (at, text) async {
+        if (current.startsWith('group_')) {
+          final groupId = int.tryParse(current.substring(6));
+          if (groupId != null) {
+            await widget.socketService.scheduleGroupChat(groupId, text, at);
+          }
+        } else {
+          await widget.socketService.scheduleChat(current, text, at);
+        }
+      },
+    );
   }
 
   void _logout() {
     // 阶段 K2：退出前立即同步当前输入为草稿（防抖未触发时草稿不丢失）
     _flushDraft();
     widget.socketService.disconnect();
-    // 退出登录：清除 session（H3/H4 修复），否则登录页 _initSession
-    // 会读取残留 session 立即自动登录，把用户拉回聊天页导致无法退出
-    SessionStore.clear();
+    // 阶段 O7（用户反馈 #9）：退出登录回退全局默认主题设置
+    ThemeSettings.instance.bindUser(null);
+    // 退出登录（阶段 O6 修订）：仅清除当前凭据，**保留账号列表**——
+    // 回到登录页可从账号条目快速切换（不再用 clear() 全清）。
+    // 当前凭据仍会清除：登录页不会自动回填/自动登录（H3 语义不变）
+    SessionStore.clearCurrent();
     if (mounted) {
       Navigator.of(context).pushReplacementNamed('/login');
     }
@@ -804,6 +944,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       chatTargets: _state.chatTargets,
                       currentChat: _state.currentChat,
                       onSelectChat: (key) {
+                        _maybeFetchGroupAnnouncements(key);
                         // 阶段 K2：切换会话前同步保存旧会话草稿（本地 + 服务端），
                         // 再恢复新会话草稿到输入栏（先 selectChat，避免草稿回写
                         // 到旧会话）
@@ -913,6 +1054,62 @@ class _ChatScreenState extends State<ChatScreen> {
                                     onImageTap: _openImageViewer,
                                     // 阶段 N2（P2-1）：聊天记录导出（TXT/JSON）
                                     onExportChat: _exportChat,
+                                    // ---- 阶段 O 接线 ----
+                                    // O1/O2：群公告横幅 + 群置顶横幅
+                                    // （数据源 list_groups 推送的 Group 字段）
+                                    // 多公告/多置顶并存（2026-08-31 修订）：
+                                    // 公告横幅 = state.groupAnnouncements
+                                    //（选中群时拉取 + 实时推送追加）；
+                                    // 置顶横幅 = list_groups 的全量置顶列表
+                                    announcements: _state.groupAnnouncements
+                                        .map((a) => a.content)
+                                        .toList(),
+                                    // R-O12：公告横幅 ✕ 删除按钮（仅群主）
+                                    announcementItems:
+                                        _state.groupAnnouncements,
+                                    onDeleteAnnouncement: _canPinCurrent
+                                        ? (messageId) {
+                                            final group = _currentGroup!;
+                                            widget.socketService
+                                                .deleteGroupAnnouncement(
+                                                    group.id, messageId);
+                                            _state.removeGroupAnnouncement(
+                                                messageId);
+                                            widget.socketService
+                                                .fetchGroupAnnouncements(
+                                                    group.id);
+                                          }
+                                        : null,
+                                    pinnedItems: _currentGroup?.pinnedMessages,
+                                    // O2：群主置顶群消息入口
+                                    // （对已置顶消息菜单显示"取消置顶"）
+                                    pinnedMessageId:
+                                        _currentGroup?.pinnedMessageId,
+                                    onPinMessage: _canPinCurrent
+                                        ? (messageId) {
+                                            final group = _currentGroup!;
+                                            if (group.pinnedMessageId ==
+                                                messageId) {
+                                              widget.socketService
+                                                  .unpinGroupMessage(group.id);
+                                            } else {
+                                              widget.socketService
+                                                  .pinGroupMessage(
+                                                      group.id, messageId);
+                                            }
+                                          }
+                                        : null,
+                                    // O2 修订（多置顶并存）：横幅快捷取消
+                                    onUnpinMessage: _canPinCurrent
+                                        ? (messageId) => widget.socketService
+                                            .unpinGroupMessage(
+                                                _currentGroup!.id,
+                                                messageId: messageId)
+                                        : null,
+                                    // O4：快捷回复面板
+                                    onQuickReply: _showQuickReplyPanel,
+                                    // O5：定时发送对话框
+                                    onScheduleMessage: _showScheduleDialog,
                                   )
                                 : const Center(
                                     child: Column(

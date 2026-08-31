@@ -37,6 +37,7 @@ void resetState() {
 
 MockSocketService buildService() {
   final s = MockSocketService();
+  when(() => s.fetchGroupAnnouncements(any())).thenAnswer((_) async {});
   when(() => s.sendChat(any(), any())).thenAnswer((_) async => true);
   when(() => s.sendGroupChat(any(), any())).thenAnswer((_) async => true);
   when(() => s.fetchHistory(

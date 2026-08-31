@@ -129,6 +129,23 @@ class AdminHandler:
             self.server.guarded_send(ssock, "admin_response", json.dumps(logs),
                          extra_headers={"response_type": "audit_log"})
             logging.info(f"审计日志查询: 管理员={username}, 返回={len(logs)}条")
+        elif command == "renew_cert":
+            # 阶段 O8（P2-8 证书过期检测 + 一键续期）：重新自签名证书并覆写
+            # config server.ssl_cert / server.ssl_key 指向的文件。运行中的
+            # 旧连接不受影响，新 TLS 握手使用新证书。
+            try:
+                days = int(header.get("days", "") or 3650)
+            except (TypeError, ValueError):
+                days = 3650
+            info = self.server.renew_cert(days=days)
+            result = {
+                "ok": bool(info["exists"] and not info["expired"]),
+                "days_left": info["days_left"],
+                "cert_path": info["cert_path"],
+            }
+            self.server.guarded_send(ssock, "admin_response", json.dumps(result),
+                         extra_headers={"response_type": "renew_cert"})
+            logging.info(f"证书续期: 管理员={username}, 剩余天数={info['days_left']}")
         elif command == "reset_password":
             # 管理员重置密码（阶段 J：P0-5）
             target_user = data.decode("utf-8").strip()

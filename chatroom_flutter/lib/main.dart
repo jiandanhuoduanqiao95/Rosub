@@ -10,6 +10,7 @@ import 'services/focus_tracker.dart';
 import 'services/ime_bridge.dart';
 import 'services/message_cache.dart';
 import 'services/taskbar_notifier.dart';
+import 'services/theme_settings.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -60,16 +61,39 @@ class _ChatroomAppState extends State<ChatroomApp> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    const seedColor = Color(0xFF2563EB);
-    return MaterialApp(
-      title: '聊天室',
-      debugShowCheckedModeBanner: false,
-      theme: _buildTheme(Brightness.light, seedColor),
-      darkTheme: _buildTheme(Brightness.dark, seedColor),
-      themeMode: ThemeMode.system,
-      home: const LoginScreen(),
-      routes: {
-        '/login': (_) => const LoginScreen(),
+    // 阶段 O7（P2-9 字体大小/聊天背景/自定义主题色）：设置集中由
+    // ThemeSettings 管理，监听变化即全局重建（默认值即既有渲染）
+    final settings = ThemeSettings.instance;
+    return ListenableBuilder(
+      listenable: settings,
+      builder: (context, _) {
+        final seedColor = Color(settings.themeColor);
+        // mode 为 dark 时 theme 亦使用深色（测试锁定 theme.colorScheme 亮度
+        // 与 themeMode 一致）；system/light 下 theme 保持浅色
+        final themeBrightness = settings.mode == AppThemeMode.dark
+            ? Brightness.dark
+            : Brightness.light;
+        return MaterialApp(
+          title: '聊天室',
+          debugShowCheckedModeBanner: false,
+          theme: _buildTheme(themeBrightness, seedColor),
+          darkTheme: _buildTheme(Brightness.dark, seedColor),
+          themeMode: switch (settings.mode) {
+            AppThemeMode.system => ThemeMode.system,
+            AppThemeMode.light => ThemeMode.light,
+            AppThemeMode.dark => ThemeMode.dark,
+          },
+          // 阶段 O7：全局字体缩放（MediaQuery.textScaler 对全部路由生效）
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: TextScaler.linear(settings.fontScale)),
+            child: child!,
+          ),
+          home: const LoginScreen(),
+          routes: {
+            '/login': (_) => const LoginScreen(),
+          },
+        );
       },
     );
   }

@@ -120,6 +120,170 @@ class GroupHandler:
             logging.info(f"待审批入群申请查询: 群主={username}, 群组={group_id}, "
                          f"待审批={len(requests)}人")
 
+        elif msg_type == "set_group_announcement":
+            # 阶段 O1（群公告）：群主编辑 → 全员推送（复用公告离线补发链路）。
+            # 空文本 = 清除公告。时序沿用阶段 M 改名惯例：操作者确认 →
+            # 全员 group_announcement 推送（notify_group_members 对新 type
+            # 不跳过发送者，全员含群主）→ 全员 list_groups 刷新（携带
+            # announcement 字段）；公告本体落 message_history +
+            # 离线成员副本（group_id 路由，重登补发）。
+            try:
+                group_id = int(header.get("group_id"))
+            except (ValueError, TypeError):
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                return
+            text = data.decode("utf-8").strip()
+            message_id = header.get("message_id") or str(uuid.uuid4())
+            info = self.server.db.get_group_info(group_id)
+            if not info:
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                return
+            if info["created_by"] != username:
+                self.server.guarded_send(ssock, "error", "只有群主可以设置群公告")
+                return
+            if not self.server.db.is_group_member(group_id, username):
+                self.server.guarded_send(ssock, "error", "您不在此群组中")
+                return
+            if not self.server.db.set_group_announcement(
+                    group_id, username, text, message_id=message_id):
+                self.server.guarded_send(ssock, "error", "群公告设置失败")
+                return
+            # 公告本体落永久历史（fetch_history 可拉取）
+            self.server.db.save_message_history(
+                username, "", "group_announcement", text.encode("utf-8"),
+                group_id=group_id, message_id=message_id)
+            # 离线成员副本（message_id=f"{id}_{成员}"，补发剥离后缀还原）
+            for member in self.server.db.get_group_members(group_id):
+                if member != username:
+                    self.server.db.save_offline_message(
+                        username, member, "group_announcement",
+                        text.encode("utf-8"),
+                        message_id=f"{message_id}_{member}",
+                        group_id=group_id)
+            confirm = "群公告已清除" if text == "" else "群公告已更新"
+            self.server.guarded_send(ssock, "chat", confirm)
+            self.notify_group_members(group_id, "group_announcement", text,
+                                      from_user=username,
+                                      extra_headers={"message_id": message_id})
+            for member in self.server.db.get_group_members(group_id):
+                self.server.broadcast_to_user(
+                    member, "list_groups", self.server.group_list_json(member))
+            # 阶段 N7：群组治理敏感操作，成功即落库（清除 detail 为空）
+            self.server.db.record_audit_log(
+                username, "group_announcement", info["group_name"], detail=text)
+            logging.info(f"群公告已更新: 群组={group_id}, 操作者={username}, "
+                         f"清除={text == ''}")
+
+        elif msg_type == "pin_group_message":
+            # 阶段 O2（群置顶）：群主置顶本群消息（新增语义，区别于 K1 会话置顶）；
+            # 2026-08-31 修订：允许多条并存，重复置顶同一消息幂等成功
+            try:
+                group_id = int(header.get("group_id"))
+            except (ValueError, TypeError):
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                return
+            message_id = header.get("message_id") or ""
+            info = self.server.db.get_group_info(group_id)
+            if not info:
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                return
+            if info["created_by"] != username:
+                self.server.guarded_send(ssock, "error", "只有群主可以置顶群消息")
+                return
+            if not self.server.db.pin_group_message(group_id, username, message_id):
+                self.server.guarded_send(
+                    ssock, "error", "置顶失败：消息不存在、不属于该群或已被撤回")
+                return
+            self.server.guarded_send(ssock, "chat", "已置顶群消息")
+            for member in self.server.db.get_group_members(group_id):
+                self.server.broadcast_to_user(
+                    member, "list_groups", self.server.group_list_json(member))
+            logging.info(f"群消息已置顶: 群组={group_id}, 操作者={username}, "
+                         f"消息ID={message_id}")
+
+        elif msg_type == "unpin_group_message":
+            # 阶段 O2（群置顶）：群主取消置顶（未置顶时幂等成功）。
+            # 2026-08-31 修订（多置顶并存）：header message_id 非空时仅取消
+            # 该条，缺省取消全部置顶。
+            try:
+                group_id = int(header.get("group_id"))
+            except (ValueError, TypeError):
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                return
+            message_id = header.get("message_id") or None
+            info = self.server.db.get_group_info(group_id)
+            if not info:
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                return
+            if info["created_by"] != username:
+                self.server.guarded_send(ssock, "error", "只有群主可以取消置顶")
+                return
+            ok, removed = self.server.db.unpin_group_message(
+                group_id, username, message_id=message_id)
+            self.server.guarded_send(ssock, "chat", "已取消置顶群消息")
+            if removed:
+                for member in self.server.db.get_group_members(group_id):
+                    self.server.broadcast_to_user(
+                        member, "list_groups", self.server.group_list_json(member))
+            logging.info(f"群置顶已取消: 群组={group_id}, 操作者={username}, "
+                         f"消息ID={message_id or '全部'}, 移除={removed}")
+
+        elif msg_type == "list_group_announcements":
+            # 阶段 O1 公告管理（2026-08-30 用户反馈 #2）：查看全部公告历史
+            # （群成员均可查看）
+            try:
+                group_id = int(header.get("group_id"))
+            except (ValueError, TypeError):
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                return
+            if not self.server.db.is_group_member(group_id, username):
+                self.server.guarded_send(ssock, "error", "您不在此群组中")
+                return
+            entries = self.server.db.list_group_announcements(group_id)
+            self.server.guarded_send(ssock, "announcements_list_response",
+                                     json.dumps(entries),
+                                     extra_headers={"group_id": str(group_id)})
+            logging.info(f"群公告历史查询: 用户={username}, 群组={group_id}, "
+                         f"共 {len(entries)} 条")
+
+        elif msg_type == "delete_group_announcement":
+            # 阶段 O1 公告管理（2026-08-30 用户反馈 #2）：群主选择性删除公告；
+            # 删除的是当前公告时同步清空横幅并广播 list_groups 刷新
+            try:
+                group_id = int(header.get("group_id"))
+            except (ValueError, TypeError):
+                self.server.guarded_send(ssock, "error", "无效的群组ID")
+                return
+            message_id = header.get("message_id") or ""
+            info = self.server.db.get_group_info(group_id)
+            if not info:
+                self.server.guarded_send(ssock, "error", f"群组 {group_id} 不存在")
+                return
+            if info["created_by"] != username:
+                self.server.guarded_send(ssock, "error", "只有群主可以删除群公告")
+                return
+            ok, cleared_current = self.server.db.delete_group_announcement(
+                group_id, username, message_id)
+            if not ok:
+                self.server.guarded_send(ssock, "error", "公告不存在或删除失败")
+                return
+            self.server.guarded_send(ssock, "chat", "公告已删除")
+            # 2026-08-31 用户反馈（R-O12）：删除公告须全端同步——向全体成员
+            # 广播 announcement_deleted 推送（header group_id + message_id），
+            # 客户端据此移除横幅条目与聊天流中的该公告气泡（离线成员重登时
+            # 经公告历史拉取对账自愈）
+            for member in self.server.db.get_group_members(group_id):
+                self.server.broadcast_to_user(
+                    member, "announcement_deleted", "",
+                    extra_headers={"group_id": str(group_id),
+                                   "message_id": message_id})
+            if cleared_current:
+                for member in self.server.db.get_group_members(group_id):
+                    self.server.broadcast_to_user(
+                        member, "list_groups", self.server.group_list_json(member))
+            logging.info(f"群公告已删除: 群组={group_id}, 操作者={username}, "
+                         f"消息ID={message_id}, 清除当前公告={cleared_current}")
+
         if msg_type == "leave_group":
             try:
                 group_id_str = header.get("group_id", "")

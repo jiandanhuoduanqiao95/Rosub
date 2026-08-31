@@ -32,6 +32,7 @@ void resetState() {
 
 MockSocketService buildService() {
   final s = MockSocketService();
+  when(() => s.fetchGroupAnnouncements(any())).thenAnswer((_) async {});
   when(() => s.blockUser(any())).thenAnswer((_) async {});
   when(() => s.addFriend(any())).thenAnswer((_) async {});
   when(() => s.addFriend(any(), message: any(named: 'message')))

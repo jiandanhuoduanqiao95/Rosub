@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database import Database
 from server.server_client_handler import ClientHandler
+from server.server_group_handler import GroupHandler
 from config import config
 from protocol import send_message
 
@@ -26,6 +27,9 @@ class Server:
         self.db = Database()
         self.client_map_lock = threading.Lock()
         self.client_handler = ClientHandler(self)
+        # 群组处理器（Server 级引用，供定时消息投递等非会话路径复用；
+        # 与 MessageHandler 内的实例同为无状态薄封装）
+        self.group_handler = GroupHandler(self)
         # 最近日志环形缓冲（阶段 M4：P1-19 服务端状态面板 recent_logs）
         self.recent_logs = collections.deque(maxlen=200)
         self._attach_recent_log_handler()
@@ -74,16 +78,24 @@ class Server:
         logging.getLogger().addHandler(handler)
 
     def group_list_json(self, username):
-        """用户群组列表 JSON（含群主/头像/历史可见性，阶段 M1/M3 推送扩展）。
+        """用户群组列表 JSON（含群主/头像/历史可见性，阶段 M1/M3 推送扩展；
+        阶段 O1/O2 追加 announcement / pinned_message_id / pinned_preview）。
 
-        向后兼容：在既有 {"id", "group_name"} 基础上新增 created_by / avatar /
-        history_visible / history_limit 字段（旧客户端忽略新字段）。
+        向后兼容：在既有 {"id", "group_name"} 基础上新增字段（旧客户端忽略）；
+        新群组字段经 get_group_notices 平行访问器获取，
+        get_user_groups_detailed 保持 6 元组不变（阶段 M 红线）。
         """
         groups = self.db.get_user_groups_detailed(username)
+        notices = self.db.get_group_notices(username)
         return json.dumps([
             {"id": g[0], "group_name": g[1],
              "created_by": g[2], "avatar": g[3] or "",
-             "history_visible": g[4], "history_limit": g[5]}
+             "history_visible": g[4], "history_limit": g[5],
+             "announcement": notices.get(g[0], {}).get("announcement", ""),
+             "pinned_message_id": notices.get(g[0], {}).get("pinned_message_id", ""),
+             "pinned_preview": notices.get(g[0], {}).get("pinned_preview", ""),
+             # 阶段 O 修订（2026-08-31 用户反馈：多置顶并存）：全量置顶列表
+             "pinned_messages": self.db.get_group_pinned_messages(g[0])}
             for g in groups
         ])
 
@@ -106,6 +118,83 @@ class Server:
         warn = disk_total > 0 and (disk_free / disk_total) * 100 < threshold
         return {"disk_free": disk_free, "disk_total": disk_total,
                 "warn": bool(warn)}
+
+    # ============================================================
+    # 阶段 O8（P2-8）：证书过期检测 + 一键续期
+    # ============================================================
+
+    CERT_WARN_DAYS = 30  # 剩余天数低于该值触发预警（状态面板/日志提示）
+
+    def check_cert_expiry(self, cert_path=None, now=None):
+        """证书过期自检（O8）：解析 X.509 证书的 not_after。
+
+        cert_path 缺省取 config server.ssl_cert（与 build_listen 加载点一致）；
+        now 缺省取当前时间（epoch 秒）。返回：
+          {"cert_path", "exists", "not_after"(epoch 秒|None),
+           "days_left"(float|None), "expired", "warn"}
+        文件缺失/解析失败 → exists=False, expired=True, days_left=None；
+        warn：存在且未过期但 days_left <= CERT_WARN_DAYS。
+        """
+        if cert_path is None:
+            cert_path = config.get("server.ssl_cert", "SSL/tsetcn.crt")
+        if now is None:
+            now = time.time()
+        info = {"cert_path": cert_path, "exists": False, "not_after": None,
+                "days_left": None, "expired": True, "warn": False}
+        if not os.path.exists(cert_path):
+            return info
+        try:
+            from cryptography import x509
+            from cryptography.hazmat.primitives import serialization
+            with open(cert_path, "rb") as f:
+                cert = x509.load_pem_x509_certificate(f.read())
+            not_after = cert.not_valid_after_utc.timestamp()
+        except Exception as e:
+            logging.warning(f"证书解析失败: {cert_path}, 错误={e}")
+            return info
+        days_left = (not_after - now) / 86400.0
+        info["exists"] = True
+        info["not_after"] = not_after
+        info["days_left"] = days_left
+        info["expired"] = days_left <= 0
+        info["warn"] = (not info["expired"]
+                        and days_left <= self.CERT_WARN_DAYS)
+        return info
+
+    def renew_cert(self, days=3650):
+        """一键续期（O8）：重新自签名证书覆写 config 指向的证书/私钥路径。
+
+        复用 SSL/gen_cert.py:generate_cert（days 参数化，默认 3650 向后兼容）。
+        返回 check_cert_expiry 的新检查结果。运行中的旧连接不受影响，
+        新 TLS 握手使用新证书。
+        """
+        import ssl as _ssl
+        from SSL.gen_cert import generate_cert
+
+        cert_path = config.get("server.ssl_cert", "SSL/tsetcn.crt")
+        key_path = config.get("server.ssl_key", "SSL/tsetcn.pem")
+        hostname = config.get("client.server_hostname", "tset.cn")
+        os.makedirs(os.path.dirname(os.path.abspath(cert_path)) or ".",
+                    exist_ok=True)
+        generate_cert(cert_path, key_path, key_path, [hostname], days=days)
+        # 已加载证书链的运行中上下文重载（新握手即用新证书；旧会话不受影响）
+        context = getattr(self, "ssl_context", None)
+        if context is not None:
+            try:
+                context.load_cert_chain(cert_path, key_path)
+            except Exception as e:
+                logging.warning(f"运行中 SSL 上下文重载失败（重启后生效）: {e}")
+        logging.info(f"证书已续期: {cert_path}（有效期 {days} 天）")
+        return self.check_cert_expiry(cert_path=cert_path)
+
+    def _load_ssl_context(self):
+        """构建并加载 SSL 上下文（build_listen 复用；保留引用供续期重载）。"""
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        cert_path = config.get("server.ssl_cert", "SSL/tsetcn.crt")
+        key_path = config.get("server.ssl_key", "SSL/tsetcn.pem")
+        context.load_cert_chain(cert_path, key_path)
+        self.ssl_context = context
+        return context
 
     def run_storage_cleanup(self, days_file=7, days_delivered=30):
         """存储治理（P1-21）：过期文件请求清理 + 过期已读消息清理。
@@ -138,6 +227,8 @@ class Server:
                 "db_bytes": stats["db_bytes"],
             },
             "disk": self.check_disk_usage(),
+            # 阶段 O8：证书过期自检结果（管理面板提示；旧客户端忽略新字段）
+            "cert": self.check_cert_expiry(),
             "recent_logs": list(self.recent_logs)[-20:],
         }
 
@@ -360,6 +451,100 @@ class Server:
         self.watchdog_thread.start()
         logging.info(f"心跳守护已启动: 间隔={interval}s, 超时={timeout}s")
 
+    # ============================================================
+    # 阶段 O5（P2-5 定时消息）：预约发送定时器
+    # ============================================================
+
+    SCHEDULER_INTERVAL = 5.0  # 定时器扫描周期（秒）
+
+    def scheduler_scan(self, now=None):
+        """单次到期扫描（O5）：投递全部到点的 pending 定时消息。
+
+        可独立调用（测试直接驱动，仿 watchdog_scan）；
+        start_scheduler 周期性调用。返回已投递的 message_id 列表。
+        投递复用既有完整路径：
+          - 私聊 = chat 路径：offline 落库 + history 落库 + 会话级推送
+            （在线送达标记 delivered，接收方不在线则仅落库）
+          - 群聊 = group_chat 路径：history 一条 + 离线成员副本
+            （message_id=f"{id}_{成员}", group_id）+ notify_group_members
+            群推送（跳过发送者）
+        """
+        due = self.db.get_due_scheduled_messages(now)
+        delivered_ids = []
+        for item in due:
+            message_id = item["message_id"]
+            try:
+                content = item["content"]
+                if item["group_id"]:
+                    group_id = item["group_id"]
+                    for member in self.db.get_group_members(group_id):
+                        if member != item["sender"]:
+                            self.db.save_offline_message(
+                                item["sender"], member, "group_chat",
+                                json.dumps({"text": content,
+                                            "group_id": group_id}).encode("utf-8"),
+                                message_id=f"{message_id}_{member}",
+                                group_id=group_id)
+                    self.db.save_message_history(
+                        item["sender"], "", "group_chat", content.encode("utf-8"),
+                        group_id=group_id, message_id=message_id)
+                    self.group_handler.notify_group_members(
+                        group_id, "group_chat", content,
+                        from_user=item["sender"],
+                        extra_headers={"message_id": message_id})
+                    # 发送者回显（群消息发送者被 notify 跳过，且定时消息无
+                    # 本地即时回显——到点推一份给发送者全部会话，聊天流可见）
+                    self.broadcast_to_user(
+                        item["sender"], "group_chat", content,
+                        extra_headers={"from": item["sender"],
+                                       "group_id": str(group_id),
+                                       "message_id": message_id})
+                else:
+                    receiver = item["receiver"]
+                    self.db.save_offline_message(
+                        item["sender"], receiver, "chat",
+                        content.encode("utf-8"), message_id=message_id)
+                    self.db.save_message_history(
+                        item["sender"], receiver, "chat",
+                        content.encode("utf-8"), message_id=message_id)
+                    delivered = self.broadcast_to_user(
+                        receiver, "chat", content,
+                        extra_headers={"from": item["sender"],
+                                       "message_id": message_id})
+                    if delivered:
+                        self.db.update_message_status(message_id, "delivered")
+                    # 发送者回显（header 带 to，客户端路由到与接收方的会话）
+                    self.broadcast_to_user(
+                        item["sender"], "chat", content,
+                        extra_headers={"from": item["sender"],
+                                       "to": receiver,
+                                       "message_id": message_id})
+                self.db.mark_scheduled_message_sent(item["id"])
+                delivered_ids.append(message_id)
+                logging.info(f"定时消息已投递: 消息ID={message_id}, "
+                             f"发送者={item['sender']}")
+            except Exception as e:
+                # 单条投递异常隔离：不影响其余到期消息（阶段 I 惯例）
+                logging.error(f"定时消息投递异常（跳过）: 消息ID={message_id}, 错误={e}")
+        return delivered_ids
+
+    def start_scheduler(self, interval=None):
+        """启动定时消息投递线程（O5，build_listen 调用；间隔可覆盖便于测试）。"""
+        interval = interval if interval is not None else self.SCHEDULER_INTERVAL
+
+        def _schedule_watch():
+            while True:
+                time.sleep(interval)
+                try:
+                    self.scheduler_scan()
+                except Exception as e:
+                    logging.error(f"定时消息扫描异常: {e}")
+
+        self.scheduler_thread = threading.Thread(target=_schedule_watch,
+                                                 daemon=True)
+        self.scheduler_thread.start()
+        logging.info(f"定时消息调度器已启动: 间隔={interval}s")
+
     def broadcast_to_user(self, username, msg_type, content, extra_headers=None):
         """向某用户名所有在线会话推送消息（会话级推送，阶段 L1）。
 
@@ -423,11 +608,18 @@ class Server:
         cleaned = self.db.cleanup_expired_file_requests()
         if cleaned > 0:
             logging.info(f"启动时清理了 {cleaned} 个过期文件请求")
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(
-            config.get("server.ssl_cert", "SSL/tsetcn.crt"),
-            config.get("server.ssl_key", "SSL/tsetcn.pem")
-        )
+        # 阶段 O8：证书过期自检（启动即提示，过期/临近过期记 warning）
+        cert_info = self.check_cert_expiry()
+        if not cert_info["exists"]:
+            logging.warning(f"SSL 证书缺失或无法读取: {cert_info['cert_path']}"
+                            "（管理员可通过 renew_cert 一键续期）")
+        elif cert_info["expired"]:
+            logging.warning("SSL 证书已过期，客户端将无法建立新连接"
+                            "（管理员可通过 renew_cert 一键续期）")
+        elif cert_info["warn"]:
+            logging.warning(f"SSL 证书即将过期（剩余 "
+                            f"{cert_info['days_left']:.0f} 天），建议续期")
+        context = self._load_ssl_context()
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((self.host, self.port))
@@ -435,6 +627,8 @@ class Server:
         # 心跳守护：清理"无 FIN 断开"的幽灵会话（断网/进程异常），
         # 避免对方一直显示在线（阶段 L1，P-07 修复）
         self.start_connection_watchdog()
+        # 阶段 O5：定时消息投递线程（scheduler_scan 可测试直驱）
+        self.start_scheduler()
         logging.info(f"服务器启动，监听 {self.host}:{self.port}")
         while True:
             try:

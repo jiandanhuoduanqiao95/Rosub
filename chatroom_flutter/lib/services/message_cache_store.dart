@@ -43,8 +43,9 @@ class MessageCacheStore {
       path,
       version: 1,
       onCreate: (db, version) async {
+        // IF NOT EXISTS：旧格式库（user_version 0）打开时同样会走 onCreate
         await db.execute('''
-          CREATE TABLE messages (
+          CREATE TABLE IF NOT EXISTS messages (
             message_id  TEXT PRIMARY KEY,
             chat_key    TEXT NOT NULL,
             sender      TEXT NOT NULL,

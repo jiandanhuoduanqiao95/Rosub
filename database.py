@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from datetime import datetime
 import os
 import logging
+import time
 
 class Database:
     def __init__(self, db_name=None):
@@ -141,6 +142,10 @@ class Database:
                     avatar TEXT DEFAULT '',
                     history_visible INTEGER DEFAULT 1,
                     history_limit INTEGER DEFAULT 50,
+                    announcement TEXT NOT NULL DEFAULT '',
+                    announcement_message_id TEXT NOT NULL DEFAULT '',
+                    pinned_message_id TEXT NOT NULL DEFAULT '',
+                    pinned_preview TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY (created_by) REFERENCES users(username)
                 )
             ''')
@@ -330,6 +335,19 @@ class Database:
                     cursor.execute(f"ALTER TABLE groups ADD COLUMN {col} {ddl}")
                     logging.info(f"groups 表已迁移：新增 {col} 列")
 
+            # 迁移：groups 表新增阶段 O 列（O1 群公告 / O2 群置顶，
+            # 公告与置顶内容随群组持久化，list_groups 经 get_group_notices 推送）
+            for col, ddl in (("announcement", "TEXT NOT NULL DEFAULT ''"),
+                             ("announcement_message_id",
+                              "TEXT NOT NULL DEFAULT ''"),
+                             ("pinned_message_id", "TEXT NOT NULL DEFAULT ''"),
+                             ("pinned_preview", "TEXT NOT NULL DEFAULT ''")):
+                try:
+                    cursor.execute(f"SELECT {col} FROM groups LIMIT 1")
+                except sqlite3.OperationalError:
+                    cursor.execute(f"ALTER TABLE groups ADD COLUMN {col} {ddl}")
+                    logging.info(f"groups 表已迁移：新增 {col} 列")
+
             # 迁移：file 表新增 sha256 列（阶段 M8：P1-5 文件完整性校验）
             for table in ("file_requests", "group_file_requests"):
                 try:
@@ -379,6 +397,37 @@ class Database:
                     target TEXT NOT NULL DEFAULT '',
                     detail TEXT NOT NULL DEFAULT '',
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 阶段 O 修订（2026-08-31 用户反馈：多置顶并存）：
+            # 群置顶消息表（一群体多条置顶，groups.pinned_* 列保留为
+            # 兼容快照 = 最早置顶的一条；撤回/取消时同步维护）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS group_pinned_messages (
+                    group_id INTEGER NOT NULL,
+                    message_id TEXT NOT NULL,
+                    preview TEXT NOT NULL DEFAULT '',
+                    pinned_by TEXT NOT NULL DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (group_id, message_id)
+                )
+            ''')
+
+            # 阶段 O5（P2-5 定时消息）：预约发送队列表（旧库自动创建）。
+            # schedule_at 为 epoch 秒（UTC 中立，"注意时区"以 epoch 比较，
+            # 不做本地时区换算）；status: pending / sent / cancelled。
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS scheduled_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT UNIQUE NOT NULL,
+                    sender TEXT NOT NULL,
+                    receiver TEXT NOT NULL DEFAULT '',
+                    group_id INTEGER,
+                    content BLOB NOT NULL,
+                    schedule_at REAL NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
 
@@ -1358,6 +1407,268 @@ class Database:
             ''', (username,))
             return cursor.fetchall()
 
+    # ============================================================
+    # 阶段 O1/O2（群公告 / 群置顶）：群组通知元数据
+    # ============================================================
+
+    def set_group_announcement(self, group_id, operator, text, message_id=""):
+        """设置/清除群公告（O1）：仅群主可操作；text 为空 = 清除公告。
+
+        message_id 记录当前公告对应的历史行（公告管理-删除时判定是否
+        同时清除当前公告）。
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT created_by FROM groups WHERE id = ?", (group_id,))
+            row = cursor.fetchone()
+            if not row or row[0] != operator:
+                return False
+            if not text:
+                message_id = ""
+            cursor.execute(
+                "UPDATE groups SET announcement = ?, announcement_message_id = ? "
+                "WHERE id = ?", (text or "", message_id, group_id))
+            conn.commit()
+            return True
+
+    def list_group_announcements(self, group_id, limit=50):
+        """群公告历史（O1 公告管理-查看）：type=group_announcement 的历史行。
+
+        返回 [{"message_id", "sender", "content", "timestamp"}]，最新在前。
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT message_id, sender, content, timestamp "
+                "FROM message_history WHERE group_id = ? "
+                "AND message_type = 'group_announcement' "
+                "ORDER BY timestamp DESC, id DESC LIMIT ?",
+                (group_id, limit))
+            rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            content = row[2]
+            try:
+                text = (content.decode("utf-8")
+                        if isinstance(content, bytes) else str(content))
+            except Exception:
+                text = ""
+            result.append({
+                "message_id": row[0],
+                "sender": row[1],
+                "content": text,
+                "timestamp": row[3],
+            })
+        return result
+
+    def delete_group_announcement(self, group_id, operator, message_id):
+        """删除一条群公告（O1 公告管理-选择性删除）：仅群主。
+
+        删除该公告历史行；若删除的是当前公告，同步清空公告横幅字段。
+        返回 (ok, cleared_current)；群不存在/非群主/公告行不存在 → (False, False)。
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT created_by FROM groups WHERE id = ?", (group_id,))
+            row = cursor.fetchone()
+            if not row or row[0] != operator:
+                return False, False
+            cursor.execute(
+                "DELETE FROM message_history WHERE message_id = ? "
+                "AND message_type = 'group_announcement' AND group_id = ?",
+                (message_id, group_id))
+            deleted = cursor.rowcount > 0
+            if not deleted:
+                return False, False
+            cleared = False
+            cursor.execute(
+                "SELECT announcement_message_id FROM groups WHERE id = ?",
+                (group_id,))
+            current = cursor.fetchone()
+            if current and current[0] == message_id:
+                cursor.execute(
+                    "UPDATE groups SET announcement = '', "
+                    "announcement_message_id = '' WHERE id = ?", (group_id,))
+                cleared = True
+            conn.commit()
+            return True, cleared
+
+    def get_group_announcement(self, group_id):
+        """查询群公告文本（O1）；群不存在返回 ''。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT announcement FROM groups WHERE id = ?", (group_id,))
+            row = cursor.fetchone()
+        return (row[0] or "") if row else ""
+
+    def pin_group_message(self, group_id, operator, message_id):
+        """置顶群消息（O2；2026-08-31 修订：允许多条并存）：仅群主；
+        消息须属于该群且未撤回；重复置顶同一消息幂等成功。
+
+        groups.pinned_message_id/pinned_preview 兼容快照取**最早**置顶的
+        一条（多置顶并存时保持稳定，供 list_groups 旧字段使用）；
+        全量列表存 group_pinned_messages 表（get_group_pinned_messages）。
+        """
+        info = self.get_history_message(message_id)
+        if not info or info.get("group_id") != group_id:
+            return False
+        if info.get("status") == "recalled":
+            return False
+        content = (info.get("content") or "").strip()
+        filename = info.get("filename")
+        if content:
+            preview = content
+        elif filename:
+            preview = f"[文件] {filename}"
+        else:
+            preview = ""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT created_by FROM groups WHERE id = ?", (group_id,))
+            row = cursor.fetchone()
+            if not row or row[0] != operator:
+                return False
+            cursor.execute(
+                "INSERT OR IGNORE INTO group_pinned_messages "
+                "(group_id, message_id, preview, pinned_by) VALUES (?, ?, ?, ?)",
+                (group_id, message_id, preview, operator))
+            # 兼容快照 = 最早置顶的一条（无则取本次）
+            cursor.execute(
+                "SELECT message_id, preview FROM group_pinned_messages "
+                "WHERE group_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 1",
+                (group_id,))
+            first = cursor.fetchone()
+            compat_id = first[0] if first else message_id
+            compat_preview = first[1] if first else preview
+            cursor.execute(
+                "UPDATE groups SET pinned_message_id = ?, pinned_preview = ? "
+                "WHERE id = ?", (compat_id, compat_preview, group_id))
+            conn.commit()
+            return True
+
+    def unpin_group_message(self, group_id, operator, message_id=None):
+        """取消群置顶（O2；2026-08-31 修订：支持多条）。
+
+        message_id 非空 → 仅取消该条；为空 → 取消全部（兼容旧协议形态）。
+        未置顶时调用幂等成功。返回 (ok, removed_id_or_None)：
+        ok=False 仅在群不存在/非群主。
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT created_by FROM groups WHERE id = ?", (group_id,))
+            row = cursor.fetchone()
+            if not row or row[0] != operator:
+                return False, None
+            removed = None
+            if message_id:
+                cursor.execute(
+                    "DELETE FROM group_pinned_messages "
+                    "WHERE group_id = ? AND message_id = ?",
+                    (group_id, message_id))
+                removed = message_id if cursor.rowcount > 0 else None
+            else:
+                cursor.execute(
+                    "SELECT message_id FROM group_pinned_messages "
+                    "WHERE group_id = ? LIMIT 1", (group_id,))
+                first = cursor.fetchone()
+                removed = first[0] if first else None
+                cursor.execute(
+                    "DELETE FROM group_pinned_messages WHERE group_id = ?",
+                    (group_id,))
+            # 兼容快照同步：指向剩余最早一条（无则清空）
+            cursor.execute(
+                "SELECT message_id, preview FROM group_pinned_messages "
+                "WHERE group_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 1",
+                (group_id,))
+            first = cursor.fetchone()
+            if first:
+                cursor.execute(
+                    "UPDATE groups SET pinned_message_id = ?, pinned_preview = ? "
+                    "WHERE id = ?", (first[0], first[1], group_id))
+            else:
+                cursor.execute(
+                    "UPDATE groups SET pinned_message_id = '', "
+                    "pinned_preview = '' WHERE id = ?", (group_id,))
+            conn.commit()
+            return True, removed
+
+    def get_group_pinned_messages(self, group_id):
+        """群置顶消息全量列表（多置顶并存；list_groups pinned_messages 字段）。
+
+        返回 [{"message_id", "preview", "pinned_by", "created_at"}]，
+        按置顶时间升序。
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT message_id, preview, pinned_by, created_at "
+                "FROM group_pinned_messages WHERE group_id = ? "
+                "ORDER BY created_at ASC, rowid ASC", (group_id,))
+            rows = cursor.fetchall()
+        return [
+            {"message_id": r[0], "preview": r[1], "pinned_by": r[2],
+             "created_at": r[3]}
+            for r in rows
+        ]
+
+    def clear_group_pin_if_pinned(self, group_id, message_id):
+        """撤回联动（O2）：被置顶消息撤回时解除该条的置顶（多条语义下
+        仅移除该行）。返回是否发生了解除。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM group_pinned_messages "
+                "WHERE group_id = ? AND message_id = ?",
+                (group_id, message_id))
+            if cursor.fetchone()[0] == 0:
+                return False
+            cursor.execute(
+                "DELETE FROM group_pinned_messages "
+                "WHERE group_id = ? AND message_id = ?",
+                (group_id, message_id))
+            # 兼容快照同步
+            cursor.execute(
+                "SELECT message_id, preview FROM group_pinned_messages "
+                "WHERE group_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 1",
+                (group_id,))
+            first = cursor.fetchone()
+            if first:
+                cursor.execute(
+                    "UPDATE groups SET pinned_message_id = ?, "
+                    "pinned_preview = ? WHERE id = ?",
+                    (first[0], first[1], group_id))
+            else:
+                cursor.execute(
+                    "UPDATE groups SET pinned_message_id = '', "
+                    "pinned_preview = '' WHERE id = ?", (group_id,))
+            conn.commit()
+            return True
+
+    def get_group_notices(self, username):
+        """查询用户所属群组的通知元数据（O1/O2 list_groups 数据源）。
+
+        返回 {group_id: {"announcement", "pinned_message_id", "pinned_preview"}}；
+        平行访问器（仿 get_offline_extras 惯例），不改动
+        get_user_groups_detailed 的既有 6 元组形态（阶段 M 向后兼容红线）。
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT g.id, g.announcement, g.pinned_message_id, g.pinned_preview
+                FROM groups g
+                JOIN group_members gm ON g.id = gm.group_id
+                WHERE gm.username = ?
+            ''', (username,))
+            rows = cursor.fetchall()
+        return {
+            row[0]: {
+                "announcement": row[1] or "",
+                "pinned_message_id": row[2] or "",
+                "pinned_preview": row[3] or "",
+            }
+            for row in rows
+        }
+
     def search_groups(self, keyword, username=None, limit=50):
         """按群名 LIKE 搜索群组（阶段 M：群组搜索入口）。
 
@@ -2277,6 +2588,107 @@ class Database:
              "detail": r[4], "timestamp": r[5]}
             for r in rows
         ]
+
+    # ============================================================
+    # 阶段 O5（P2-5 定时消息）：预约发送队列
+    # ============================================================
+
+    _SCHEDULED_COLUMNS = (
+        "id, message_id, sender, receiver, group_id, content, schedule_at, status"
+    )
+
+    @staticmethod
+    def _scheduled_row_dict(row):
+        content = row[5]
+        try:
+            text = (content.decode("utf-8")
+                    if isinstance(content, bytes) else str(content))
+        except Exception:
+            text = ""
+        return {
+            "id": row[0],
+            "message_id": row[1],
+            "sender": row[2],
+            "receiver": row[3],
+            "group_id": row[4],
+            "content": text,
+            "schedule_at": row[6],
+            "status": row[7],
+        }
+
+    def add_scheduled_message(self, message_id, sender, content, schedule_at,
+                              receiver=None, group_id=None):
+        """新增定时消息（O5）：content 为 str（UTF-8 落库）；message_id 冲突幂等。
+
+        schedule_at 为 epoch 秒（UTC 中立）；到点前不写 message_history /
+        offline_messages（由服务端定时器到点投递时再落库）。
+        """
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO scheduled_messages
+                        (message_id, sender, receiver, group_id, content,
+                         schedule_at, status)
+                    VALUES (?, ?, ?, ?, ?, ?, 'pending')
+                ''', (message_id, sender, receiver or "", group_id,
+                      content, float(schedule_at)))
+                conn.commit()
+                return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def get_due_scheduled_messages(self, now=None):
+        """取到期待投递的定时消息（O5）：pending 且 schedule_at <= now，升序。
+
+        now 缺省取当前时间（epoch 秒）；已投递（sent）/已取消（cancelled）
+        永不返回。
+        """
+        if now is None:
+            now = time.time()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'''
+                SELECT {self._SCHEDULED_COLUMNS} FROM scheduled_messages
+                WHERE status = 'pending' AND schedule_at <= ?
+                ORDER BY schedule_at ASC, id ASC
+            ''', (now,))
+            rows = cursor.fetchall()
+        return [self._scheduled_row_dict(row) for row in rows]
+
+    def mark_scheduled_message_sent(self, scheduled_id):
+        """标记定时消息已投递（O5，幂等）。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE scheduled_messages SET status = 'sent' WHERE id = ?",
+                (scheduled_id,))
+            conn.commit()
+
+    def cancel_scheduled_message(self, message_id, sender):
+        """取消定时消息（O5）：仅本人可取消，仅 pending 可取消。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE scheduled_messages SET status = 'cancelled'
+                WHERE message_id = ? AND sender = ? AND status = 'pending'
+            ''', (message_id, sender))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def list_scheduled_messages(self, sender):
+        """列出本人 pending 定时消息（O5），按 schedule_at 升序。"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'''
+                SELECT {self._SCHEDULED_COLUMNS} FROM scheduled_messages
+                WHERE sender = ? AND status = 'pending'
+                ORDER BY schedule_at ASC, id ASC
+            ''', (sender,))
+            rows = cursor.fetchall()
+        return [self._scheduled_row_dict(row) for row in rows]
 
     # ============================================================
     # 阶段 M8（P1-7 文件收发管理页）：文件历史查询

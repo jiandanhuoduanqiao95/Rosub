@@ -279,6 +279,14 @@ class Group {
   final int historyLimit;
   // 阶段 M：群成员数（群组搜索结果 group_search_response 携带）
   final int memberCount;
+  // 阶段 O1：群公告（list_groups 推送扩展；空 = 无公告）
+  final String announcement;
+  // 阶段 O2：群置顶消息 id 与内容快照（list_groups 推送扩展；空 = 未置顶；
+  // 2026-08-31 多置顶并存后作为兼容快照 = 最早置顶的一条）
+  final String pinnedMessageId;
+  final String pinnedPreview;
+  // 阶段 O2 修订（2026-08-31 多置顶并存）：全量置顶列表
+  final List<GroupPinnedItem> pinnedMessages;
 
   Group({
     required this.id,
@@ -289,6 +297,10 @@ class Group {
     this.historyVisible = true,
     this.historyLimit = 50,
     this.memberCount = 0,
+    this.announcement = '',
+    this.pinnedMessageId = '',
+    this.pinnedPreview = '',
+    this.pinnedMessages = const [],
   });
 
   /// 聊天窗口中使用的 key
@@ -332,6 +344,27 @@ class Group {
     final memberCount = rawMemberCount is int
         ? rawMemberCount
         : (int.tryParse(rawMemberCount?.toString() ?? '') ?? 0);
+    // 阶段 O1/O2：公告与置顶（缺省兼容旧服务端推送）
+    final rawAnnouncement = json['announcement'];
+    final announcement = rawAnnouncement is String
+        ? rawAnnouncement
+        : (rawAnnouncement?.toString() ?? '');
+    final rawPinnedId = json['pinned_message_id'];
+    final pinnedMessageId =
+        rawPinnedId is String ? rawPinnedId : (rawPinnedId?.toString() ?? '');
+    final rawPinnedPreview = json['pinned_preview'];
+    final pinnedPreview = rawPinnedPreview is String
+        ? rawPinnedPreview
+        : (rawPinnedPreview?.toString() ?? '');
+    // 阶段 O2 修订（2026-08-31 多置顶并存）：全量置顶列表（缺省兼容旧推送）
+    final rawPinnedList = json['pinned_messages'];
+    final pinnedMessages = rawPinnedList is List
+        ? rawPinnedList
+            .whereType<Map>()
+            .map((e) =>
+                GroupPinnedItem.fromJson(e.cast<String, dynamic>()))
+            .toList()
+        : <GroupPinnedItem>[];
     return Group(
       id: id,
       name: name,
@@ -341,6 +374,111 @@ class Group {
       historyVisible: historyVisible,
       historyLimit: historyLimit,
       memberCount: memberCount,
+      announcement: announcement,
+      pinnedMessageId: pinnedMessageId,
+      pinnedPreview: pinnedPreview,
+      pinnedMessages: pinnedMessages,
+    );
+  }
+}
+
+/// 群置顶消息条目（阶段 O2 修订：多置顶并存，list_groups.pinned_messages）
+class GroupPinnedItem {
+  final String messageId;
+  final String preview;
+  final String pinnedBy;
+
+  const GroupPinnedItem({
+    required this.messageId,
+    this.preview = '',
+    this.pinnedBy = '',
+  });
+
+  factory GroupPinnedItem.fromJson(Map<String, dynamic> json) {
+    String asStr(dynamic v) => v?.toString() ?? '';
+    return GroupPinnedItem(
+      messageId: asStr(json['message_id']),
+      preview: asStr(json['preview']),
+      pinnedBy: asStr(json['pinned_by']),
+    );
+  }
+}
+
+/// 群公告历史条目（阶段 O1 公告管理：announcements_list_response 推送）
+class GroupAnnouncement {
+  final String messageId;
+  final String sender;
+  final String content;
+  final String timestamp;
+
+  const GroupAnnouncement({
+    required this.messageId,
+    this.sender = '',
+    required this.content,
+    this.timestamp = '',
+  });
+
+  factory GroupAnnouncement.fromJson(Map<String, dynamic> json) {
+    String asStr(dynamic v) => v?.toString() ?? '';
+    return GroupAnnouncement(
+      messageId: asStr(json['message_id']),
+      sender: asStr(json['sender']),
+      content: asStr(json['content']),
+      timestamp: asStr(json['timestamp']),
+    );
+  }
+}
+
+/// 定时消息（阶段 O5：P2-5 预约发送，scheduled_list_response 推送）
+class ScheduledMessageInfo {
+  final String messageId;
+  final String receiver; // 私聊目标（群消息为空）
+  final int? groupId; // 群消息的群组 ID（私聊为 null）
+  final String content;
+  final DateTime scheduleAt;
+  final String status; // pending / sent / cancelled
+
+  const ScheduledMessageInfo({
+    required this.messageId,
+    this.receiver = '',
+    this.groupId,
+    required this.content,
+    required this.scheduleAt,
+    this.status = 'pending',
+  });
+
+  /// 是否群定时消息
+  bool get isGroupMessage => groupId != null;
+
+  factory ScheduledMessageInfo.fromJson(Map<String, dynamic> json) {
+    // 防御性解析：服务端字段类型漂移（数字/字符串混用）时优雅降级，不抛异常
+    final rawId = json['message_id'];
+    final messageId = rawId is String ? rawId : (rawId?.toString() ?? '');
+    final rawReceiver = json['receiver'];
+    final receiver =
+        rawReceiver is String ? rawReceiver : (rawReceiver?.toString() ?? '');
+    final rawGroupId = json['group_id'];
+    final groupId = rawGroupId is int
+        ? rawGroupId
+        : int.tryParse(rawGroupId?.toString() ?? '');
+    final rawContent = json['content'];
+    final content =
+        rawContent is String ? rawContent : (rawContent?.toString() ?? '');
+    DateTime scheduleAt = DateTime.fromMillisecondsSinceEpoch(0);
+    final rawAt = json['schedule_at'];
+    final atSec = rawAt is int ? rawAt : int.tryParse(rawAt?.toString() ?? '');
+    if (atSec != null) {
+      scheduleAt = DateTime.fromMillisecondsSinceEpoch(atSec * 1000);
+    }
+    final rawStatus = json['status'];
+    final status = rawStatus is String ? rawStatus : '';
+    return ScheduledMessageInfo(
+      messageId: messageId,
+      receiver: receiver,
+      groupId: groupId,
+      content: content,
+      scheduleAt: scheduleAt,
+      status: status.isEmpty ? 'pending' : status,
     );
   }
 }

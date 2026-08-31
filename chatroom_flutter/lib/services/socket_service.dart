@@ -18,6 +18,7 @@ import '../config.dart';
 import '../models/chat_models.dart';
 import 'message_cache.dart';
 import 'taskbar_notifier.dart';
+import 'theme_settings.dart';
 import 'state_manager.dart';
 
 class SocketService {
@@ -373,6 +374,8 @@ class SocketService {
         // 重连 + 重登录成功
         _reconnecting = false;
         _reconnectAttempts = 0;
+        // 断线重连：重新绑定账号主题
+        ThemeSettings.instance.bindUser(_savedUsername!);
         state.setLoggedIn(_savedUsername!,
             _savedAdminSecret != null && _savedAdminSecret!.isNotEmpty);
         _startListening();
@@ -581,6 +584,8 @@ class SocketService {
     }
 
     final isAdmin = type == 'admin_auth';
+    // 阶段 O7（用户反馈 #9）：主题设置与账号绑定（加载该账号主题）
+    ThemeSettings.instance.bindUser(username);
     state.setLoggedIn(username, isAdmin);
 
     // 保存凭据以备重连（仅内存）
@@ -637,6 +642,8 @@ class SocketService {
     }
 
     final isAdmin = type == 'admin_auth';
+    // 阶段 O7（用户反馈 #9）：主题设置与账号绑定（加载该账号主题）
+    ThemeSettings.instance.bindUser(username);
     state.setLoggedIn(username, isAdmin);
 
     // 保存凭据以备重连（仅内存）
@@ -898,6 +905,27 @@ class SocketService {
             );
             state.addMessage(chatKey, live);
             _notifyIncoming(live, chatKey);
+          }
+          break;
+
+        case 'group_announcement':
+          // 阶段 O1：群公告（离线补发 history=true / 初始窗口实时推送）
+          if (from != null) {
+            final gidStr = header['group_id'] as String?;
+            final chatKey = gidStr != null ? 'group_$gidStr' : from;
+            final text = utf8.decode(body as Uint8List);
+            final msg = ChatMessage(
+              sender: from,
+              content: text,
+              type: 'group_announcement',
+              messageId: messageId,
+              timestamp: msgTimestamp,
+              isHistory: isHistory,
+              status: isHistory ? msgStatus : 'sent',
+              groupId: gidStr != null ? int.tryParse(gidStr) : null,
+            );
+            state.addMessage(chatKey, msg);
+            if (!isHistory) _notifyIncoming(msg, chatKey);
           }
           break;
 
@@ -1368,6 +1396,61 @@ class SocketService {
         }
         break;
 
+      case 'announcements_list_response':
+        // 阶段 O1 公告管理：群公告历史列表。
+        // R-O12：以服务端列表对账——聊天流中已被删除的公告气泡移除
+        // （内存 + 本地缓存；离线期间被删公告重登/切会话拉取后自愈）
+        final annGid = header['group_id'] as String?;
+        try {
+          final List<dynamic> list = jsonDecode(utf8.decode(body));
+          final announcements = list
+              .map((e) => GroupAnnouncement.fromJson(e as Map<String, dynamic>))
+              .toList();
+          if (annGid != null) {
+            final removed = state.syncGroupAnnouncements(
+                int.tryParse(annGid) ?? 0, announcements);
+            final store = MessageCache.store;
+            for (final mid in removed) {
+              if (store != null && store.isOpen) {
+                unawaited(store.removeMessage('group_$annGid', mid));
+              }
+            }
+          } else {
+            state.setGroupAnnouncements(announcements);
+          }
+        } catch (e) {
+          state.log('解析群公告历史失败: $e');
+        }
+        break;
+
+      case 'announcement_deleted':
+        // R-O12：公告被删除——移除横幅条目 + 聊天流中的公告气泡 + 本地缓存
+        final delGid = header['group_id'] as String?;
+        final delMid = header['message_id'] as String?;
+        if (delGid != null && delMid != null) {
+          state.removeGroupAnnouncement(delMid);
+          final chatKey = 'group_$delGid';
+          state.removeMessageLocally(chatKey, delMid);
+          final store = MessageCache.store;
+          if (store != null && store.isOpen) {
+            unawaited(store.removeMessage(chatKey, delMid));
+          }
+        }
+        break;
+
+      case 'scheduled_list_response':
+        // 阶段 O5：本人 pending 定时消息列表
+        try {
+          final List<dynamic> list = jsonDecode(utf8.decode(body));
+          state.setScheduledMessages(list
+              .map((e) =>
+                  ScheduledMessageInfo.fromJson(e as Map<String, dynamic>))
+              .toList());
+        } catch (e) {
+          state.log('解析定时消息列表失败: $e');
+        }
+        break;
+
       // ---- 用户资料响应（阶段 J1）----
       case 'profile_response':
         try {
@@ -1421,6 +1504,33 @@ class SocketService {
         state.addMessage(chatKey, msg);
         // 桌面通知（阶段 H2）：未聚焦窗口时通知群聊消息
         _notifyIncoming(msg, chatKey);
+        break;
+
+      // ---- 群公告（阶段 O1：群主编辑 → 全员推送）----
+      case 'group_announcement':
+        if (from != null) {
+          final gidStr = header['group_id'] as String?;
+          final chatKey = gidStr != null ? 'group_$gidStr' : from;
+          final text = utf8.decode(body);
+          final msg = ChatMessage(
+            sender: from,
+            content: text,
+            type: 'group_announcement',
+            messageId: messageId,
+            status: 'sent',
+            groupId: gidStr != null ? int.tryParse(gidStr) : null,
+          );
+          state.addMessage(chatKey, msg);
+          // 多公告并存（2026-08-31 修订）：实时追加到公告列表（横幅数据源）
+          if (gidStr != null) {
+            state.addGroupAnnouncement(GroupAnnouncement(
+              messageId: messageId,
+              sender: from,
+              content: text,
+            ));
+          }
+          _notifyIncoming(msg, chatKey);
+        }
         break;
 
       // ---- 群文件请求 ----
@@ -2731,6 +2841,147 @@ class SocketService {
       });
     } catch (e) {
       state.log('拉取审计日志失败: $e');
+    }
+  }
+
+  // ============================================================
+  // 阶段 O —— 群组与消息增强协议方法
+  // ============================================================
+
+  /// 设置/清除群公告（阶段 O1：仅群主；[text] 为空 = 清除公告）。
+  /// 协议 set_group_announcement {group_id}，body=公告文本。
+  Future<void> setGroupAnnouncement(int groupId, String text) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('set_group_announcement', text, extraHeaders: {
+        'group_id': groupId.toString(),
+      });
+    } catch (e) {
+      state.log('设置群公告失败: $e');
+    }
+  }
+
+  /// 拉取群公告历史（阶段 O1 公告管理：查看全部公告）。
+  /// 协议 list_group_announcements {group_id} → announcements_list_response
+  /// → state.groupAnnouncements。
+  Future<void> fetchGroupAnnouncements(int groupId) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('list_group_announcements', '',
+          extraHeaders: {'group_id': groupId.toString()});
+    } catch (e) {
+      state.log('拉取群公告历史失败: $e');
+    }
+  }
+
+  /// 删除一条群公告（阶段 O1 公告管理：选择性删除，仅群主）。
+  /// 协议 delete_group_announcement {group_id, message_id}；删除当前公告时
+  /// 服务端同步清空横幅并广播 list_groups 刷新。
+  Future<void> deleteGroupAnnouncement(int groupId, String messageId) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('delete_group_announcement', '', extraHeaders: {
+        'group_id': groupId.toString(),
+        'message_id': messageId,
+      });
+    } catch (e) {
+      state.log('删除群公告失败: $e');
+    }
+  }
+
+  /// 置顶群消息（阶段 O2：仅群主）。
+  /// 协议 pin_group_message {group_id, message_id}。
+  Future<void> pinGroupMessage(int groupId, String messageId) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('pin_group_message', '', extraHeaders: {
+        'group_id': groupId.toString(),
+        'message_id': messageId,
+      });
+    } catch (e) {
+      state.log('置顶群消息失败: $e');
+    }
+  }
+
+  /// 取消群置顶（阶段 O2：仅群主，幂等）。
+  /// 2026-08-31 修订（多置顶并存）：[messageId] 非空时仅取消该条；
+  /// 缺省取消全部置顶。协议 unpin_group_message {group_id, message_id?}。
+  Future<void> unpinGroupMessage(int groupId, {String? messageId}) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('unpin_group_message', '', extraHeaders: {
+        'group_id': groupId.toString(),
+        if (messageId != null) 'message_id': messageId,
+      });
+    } catch (e) {
+      state.log('取消置顶失败: $e');
+    }
+  }
+
+  /// 定时私聊消息（阶段 O5：P2-5）。[scheduleAt] 以 **epoch 秒** 上送
+  /// （UTC 中立，"注意时区"不做本地时区换算）。
+  /// 协议 schedule_message {to, schedule_at}。
+  Future<void> scheduleChat(
+      String to, String content, DateTime scheduleAt) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('schedule_message', content, extraHeaders: {
+        'to': to,
+        'schedule_at': (scheduleAt.millisecondsSinceEpoch ~/ 1000).toString(),
+      });
+    } catch (e) {
+      state.log('定时消息设置失败: $e');
+    }
+  }
+
+  /// 定时群聊消息（阶段 O5）。协议 schedule_message {group_id, schedule_at}。
+  Future<void> scheduleGroupChat(
+      int groupId, String content, DateTime scheduleAt) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('schedule_message', content, extraHeaders: {
+        'group_id': groupId.toString(),
+        'schedule_at': (scheduleAt.millisecondsSinceEpoch ~/ 1000).toString(),
+      });
+    } catch (e) {
+      state.log('定时消息设置失败: $e');
+    }
+  }
+
+  /// 取消定时消息（阶段 O5：仅本人）。
+  /// 协议 cancel_scheduled {message_id}。
+  Future<void> cancelScheduled(String messageId) async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('cancel_scheduled', '', extraHeaders: {
+        'message_id': messageId,
+      });
+    } catch (e) {
+      state.log('取消定时消息失败: $e');
+    }
+  }
+
+  /// 拉取本人 pending 定时消息（阶段 O5）。
+  /// 协议 list_scheduled → scheduled_list_response → state.scheduledMessages。
+  Future<void> fetchScheduled() async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('list_scheduled', '');
+    } catch (e) {
+      state.log('拉取定时消息列表失败: $e');
+    }
+  }
+
+  /// 证书一键续期（阶段 O8：P2-8，仅管理员）。
+  /// 协议 admin_command action=renew_cert → admin_response
+  /// response_type=renew_cert。
+  Future<void> renewCert() async {
+    if (_socket == null) return;
+    try {
+      await _sendMessage('admin_command', '',
+          extraHeaders: {'action': 'renew_cert'});
+    } catch (e) {
+      state.log('证书续期失败: $e');
     }
   }
 

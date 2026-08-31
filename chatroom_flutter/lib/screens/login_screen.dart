@@ -30,6 +30,8 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _adminMode = false;
   bool _loading = false;
   String? _error;
+  // 阶段 O6（P2-10 多账号切换）：已保存的账号列表（钥匙串）
+  List<StoredSession> _savedAccounts = [];
 
   /// 在下一帧请求用户名输入框焦点，确保 rebuild 已完成
   void _refocusUsername() {
@@ -47,14 +49,31 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   /// 读取已保存的 session（H3，记住我）：启动时自动回填用户名/密码，不自动登录。
+  /// 阶段 O6：同时读取账号列表（登录页渲染账号条目，点击回填快速切换）。
   /// 安全：管理员密钥不持久化，启动时**不**自动开启管理员模式、不回填密钥，
   /// 需管理员每次手动输入（密钥仅内存中用于重连，退出/重启后即消失）。
   Future<void> _initSession() async {
-    final session = await SessionStore.load();
-    if (session == null || !mounted) return;
+    final results = await Future.wait([
+      SessionStore.load(),
+      SessionStore.loadAccounts(),
+    ]);
+    final session = results[0] as StoredSession?;
+    final accounts = results[1] as List<StoredSession>;
+    if (!mounted) return;
+    setState(() => _savedAccounts = accounts);
+    if (session == null) return;
     setState(() {
       _usernameCtrl.text = session.username;
       _passwordCtrl.text = session.password;
+      _error = null;
+    });
+  }
+
+  /// 阶段 O6：点击账号条目 → 回填用户名/密码（不自动登录，H3 语义）
+  void _fillAccount(StoredSession account) {
+    setState(() {
+      _usernameCtrl.text = account.username;
+      _passwordCtrl.text = account.password;
       _error = null;
     });
   }
@@ -130,9 +149,10 @@ class _LoginScreenState extends State<LoginScreen> {
       _refocusUsername();
       _socketService.disconnect();
     } else {
-      // 登录成功：持久化 session（H3，记住我），下次启动回填用户名/密码。
+      // 登录成功：持久化 session（H3，记住我）并加入账号列表
+      // （阶段 O6：saveAccount 按 username upsert + 置为当前，登录页可切换）
       // 安全：管理员密钥不写入 session（不落盘），仅保留在内存中用于断线重连。
-      await SessionStore.save(StoredSession(
+      await SessionStore.saveAccount(StoredSession(
         username: username,
         password: password,
       ));
@@ -173,138 +193,162 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               child: Padding(
                 padding: const EdgeInsets.all(32),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    // 标题
-                    Icon(
-                      Icons.chat_bubble_rounded,
-                      size: 64,
-                      color: colorScheme.primary,
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      '聊天室',
-                      textAlign: TextAlign.center,
-                      style:
-                          Theme.of(context).textTheme.headlineMedium?.copyWith(
-                                fontWeight: FontWeight.bold,
-                              ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      _isLogin ? '登录' : '注册新账号',
-                      textAlign: TextAlign.center,
-                      style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                            color: colorScheme.onSurfaceVariant,
-                          ),
-                    ),
-                    const SizedBox(height: 24),
-
-                    // 用户名
-                    RawTextField(
-                      key: const ValueKey('username_field'),
-                      controller: _usernameCtrl,
-                      focusNode: _usernameFocus,
-                      hintText: '用户名（3-32位字母,数字,下划线,短横线）',
-                    ),
-
-                    const SizedBox(height: 16),
-
-                    // 密码
-                    RawTextField(
-                      key: const ValueKey('password_field'),
-                      controller: _passwordCtrl,
-                      hintText: '密码（至少6个字符）',
-                      obscureText: true,
-                      showVisibilityToggle: true,
-                      onSubmitted: (_) => _submit(),
-                    ),
-
-                    const SizedBox(height: 12),
-
-                    SwitchListTile(
-                      value: _adminMode,
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text('管理员模式'),
-                      subtitle: Text(
-                        _isLogin ? '管理员登录需要二次密钥' : '使用密钥注册管理员账号',
+                // 阶段 O7：字体缩放（最大 1.5x）下登录表单可滚动，不溢出
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // 标题
+                      Icon(
+                        Icons.chat_bubble_rounded,
+                        size: 64,
+                        color: colorScheme.primary,
                       ),
-                      onChanged: _loading
-                          ? null
-                          : (value) => setState(() {
-                                _adminMode = value;
-                                _error = null;
-                                if (!value) _adminSecretCtrl.clear();
-                              }),
-                    ),
+                      const SizedBox(height: 8),
+                      Text(
+                        '聊天室',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context)
+                            .textTheme
+                            .headlineMedium
+                            ?.copyWith(
+                              fontWeight: FontWeight.bold,
+                            ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        _isLogin ? '登录' : '注册新账号',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                              color: colorScheme.onSurfaceVariant,
+                            ),
+                      ),
+                      const SizedBox(height: 24),
 
-                    AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 180),
-                      child: _adminMode
-                          ? Padding(
-                              key: const ValueKey('admin_secret_field_wrap'),
-                              padding: const EdgeInsets.only(top: 4),
-                              child: RawTextField(
-                                key: const ValueKey('admin_secret_field'),
-                                controller: _adminSecretCtrl,
-                                hintText: '管理员密钥',
-                                obscureText: true,
-                                showVisibilityToggle: true,
-                                onSubmitted: (_) => _submit(),
+                      // 阶段 O6（P2-10 多账号切换）：已保存账号条目，点击回填
+                      if (_savedAccounts.isNotEmpty) ...[
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            for (final account in _savedAccounts)
+                              ActionChip(
+                                avatar: const Icon(Icons.person_outline_rounded,
+                                    size: 18),
+                                label: Text(account.username),
+                                tooltip: '使用 ${account.username} 登录',
+                                onPressed: () => _fillAccount(account),
                               ),
-                            )
-                          : const SizedBox.shrink(),
-                    ),
-
-                    const SizedBox(height: 16),
-
-                    // 错误提示
-                    if (_error != null)
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.red.shade50,
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(color: Colors.red.shade200),
+                          ],
                         ),
-                        child: Text(_error!,
-                            style: TextStyle(color: Colors.red.shade700)),
+                        const SizedBox(height: 16),
+                      ],
+
+                      // 用户名
+                      RawTextField(
+                        key: const ValueKey('username_field'),
+                        controller: _usernameCtrl,
+                        focusNode: _usernameFocus,
+                        hintText: '用户名（3-32位字母,数字,下划线,短横线）',
                       ),
 
-                    const SizedBox(height: 16),
+                      const SizedBox(height: 16),
 
-                    // 按钮
-                    SizedBox(
-                      height: 48,
-                      child: FilledButton(
-                        onPressed: _loading ? null : _submit,
-                        child: _loading
-                            ? const SizedBox(
-                                width: 24,
-                                height: 24,
-                                child:
-                                    CircularProgressIndicator(strokeWidth: 2),
+                      // 密码
+                      RawTextField(
+                        key: const ValueKey('password_field'),
+                        controller: _passwordCtrl,
+                        hintText: '密码（至少6个字符）',
+                        obscureText: true,
+                        showVisibilityToggle: true,
+                        onSubmitted: (_) => _submit(),
+                      ),
+
+                      const SizedBox(height: 12),
+
+                      SwitchListTile(
+                        value: _adminMode,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('管理员模式'),
+                        subtitle: Text(
+                          _isLogin ? '管理员登录需要二次密钥' : '使用密钥注册管理员账号',
+                        ),
+                        onChanged: _loading
+                            ? null
+                            : (value) => setState(() {
+                                  _adminMode = value;
+                                  _error = null;
+                                  if (!value) _adminSecretCtrl.clear();
+                                }),
+                      ),
+
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 180),
+                        child: _adminMode
+                            ? Padding(
+                                key: const ValueKey('admin_secret_field_wrap'),
+                                padding: const EdgeInsets.only(top: 4),
+                                child: RawTextField(
+                                  key: const ValueKey('admin_secret_field'),
+                                  controller: _adminSecretCtrl,
+                                  hintText: '管理员密钥',
+                                  obscureText: true,
+                                  showVisibilityToggle: true,
+                                  onSubmitted: (_) => _submit(),
+                                ),
                               )
-                            : Text(_isLogin ? '登录' : '注册'),
+                            : const SizedBox.shrink(),
                       ),
-                    ),
 
-                    const SizedBox(height: 12),
+                      const SizedBox(height: 16),
 
-                    TextButton(
-                      onPressed: _loading
-                          ? null
-                          : () => setState(() {
-                                _isLogin = !_isLogin;
-                                _error = null;
-                                _adminSecretCtrl.clear();
-                              }),
-                      child: Text(_isLogin ? '没有账号？注册' : '已有账号？登录'),
-                    ),
-                  ],
+                      // 错误提示
+                      if (_error != null)
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.red.shade50,
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: Colors.red.shade200),
+                          ),
+                          child: Text(_error!,
+                              style: TextStyle(color: Colors.red.shade700)),
+                        ),
+
+                      const SizedBox(height: 16),
+
+                      // 按钮
+                      SizedBox(
+                        height: 48,
+                        child: FilledButton(
+                          onPressed: _loading ? null : _submit,
+                          child: _loading
+                              ? const SizedBox(
+                                  width: 24,
+                                  height: 24,
+                                  child:
+                                      CircularProgressIndicator(strokeWidth: 2),
+                                )
+                              : Text(_isLogin ? '登录' : '注册'),
+                        ),
+                      ),
+
+                      const SizedBox(height: 12),
+
+                      TextButton(
+                        onPressed: _loading
+                            ? null
+                            : () => setState(() {
+                                  _isLogin = !_isLogin;
+                                  _error = null;
+                                  _adminSecretCtrl.clear();
+                                }),
+                        child: Text(_isLogin ? '没有账号？注册' : '已有账号？登录'),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),

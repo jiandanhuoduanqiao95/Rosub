@@ -234,6 +234,64 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ---- 阶段 O1 公告管理：群公告历史列表 ----
+  final List<GroupAnnouncement> _groupAnnouncements = [];
+  List<GroupAnnouncement> get groupAnnouncements =>
+      UnmodifiableListView(_groupAnnouncements);
+
+  void setGroupAnnouncements(List<GroupAnnouncement> list) {
+    _groupAnnouncements
+      ..clear()
+      ..addAll(list);
+    notifyListeners();
+  }
+
+  /// 追加一条群公告（实时推送；已存在同 id 则忽略——幂等）
+  void addGroupAnnouncement(GroupAnnouncement announcement) {
+    if (_groupAnnouncements.any((a) => a.messageId == announcement.messageId)) {
+      return;
+    }
+    _groupAnnouncements.add(announcement);
+    notifyListeners();
+  }
+
+  /// 移除一条群公告（公告管理删除后本地同步）
+  void removeGroupAnnouncement(String messageId) {
+    _groupAnnouncements.removeWhere((a) => a.messageId == messageId);
+    notifyListeners();
+  }
+
+  /// 群公告对账（2026-08-31 用户反馈 R-O12）：以服务端公告历史为准
+  /// 设置横幅列表，并从该群聊天流中移除**服务端已不存在**的公告气泡
+  /// （离线期间被删除的公告，重登/切会话拉取后自愈）。
+  /// 返回被移除的聊天流消息 id 列表（调用方据此同步本地缓存）。
+  List<String> syncGroupAnnouncements(
+      int groupId, List<GroupAnnouncement> list) {
+    setGroupAnnouncements(list);
+    final chatKey = 'group_$groupId';
+    final valid = list.map((a) => a.messageId).toSet();
+    final removed = <String>[];
+    for (final m in List<ChatMessage>.of(getMessages(chatKey))) {
+      if (m.type == 'group_announcement' && !valid.contains(m.messageId)) {
+        removeMessageLocally(chatKey, m.messageId);
+        removed.add(m.messageId);
+      }
+    }
+    return removed;
+  }
+
+  // ---- 阶段 O5（P2-5）：定时消息列表（scheduled_list_response 推送）----
+  final List<ScheduledMessageInfo> _scheduledMessages = [];
+  List<ScheduledMessageInfo> get scheduledMessages =>
+      UnmodifiableListView(_scheduledMessages);
+
+  void setScheduledMessages(List<ScheduledMessageInfo> messages) {
+    _scheduledMessages
+      ..clear()
+      ..addAll(messages);
+    notifyListeners();
+  }
+
   // ---- 阶段 N3（P2-4）：图片粘贴预览（剪贴板图片 → 预览 → 发送）----
   Uint8List? _pendingImagePreview;
   Uint8List? get pendingImagePreview => _pendingImagePreview;
@@ -615,6 +673,8 @@ class AppState extends ChangeNotifier {
     // 阶段 N：设备会话/审计日志/图片预览随登出清空（防跨账号泄漏）
     _sessions.clear();
     _auditLogs.clear();
+    _scheduledMessages.clear();
+    _groupAnnouncements.clear();
     _pendingImagePreview = null;
     _currentChat = null;
     _noticeQueue.clear();

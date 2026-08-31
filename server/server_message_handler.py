@@ -248,6 +248,23 @@ class MessageHandler:
                     except Exception as e:
                         logging.error(
                             f"处理群组消息失败: {str(e)}, 发送者={sender}, 接收者={username}, 消息ID={message_id}")
+                elif msg_type == "group_announcement":
+                    # 阶段 O1：群公告离线补发（复用群聊补发惯例：剥离
+                    # "_接收者" 后缀还原原始 message_id，group_id 路由）
+                    gid = offline_group_ids.get(message_id)
+                    if gid is not None and self.server.db.is_group_member(gid, username):
+                        suffix = f"_{msg_receiver}"
+                        original_id = (message_id[:-len(suffix)]
+                                       if message_id.endswith(suffix)
+                                       else message_id)
+                        self.server.guarded_send(
+                            ssock, "group_announcement", content.decode("utf-8"),
+                            extra_headers={"from": sender, "group_id": str(gid),
+                                           "history": "true",
+                                           "message_id": original_id,
+                                           "timestamp": str(msg_timestamp),
+                                           "status": status})
+                        logging.info(f"发送离线群公告: 群组ID={gid}, 消息ID={original_id}")
             except Exception as e:
                 # 阶段 I 修复：单条离线消息推送异常（如瞬时 SQLite 锁）不得中断登录流程
                 logging.error(f"推送离线消息异常（跳过）: 用户={username}, 消息ID={message_id}, 错误={e}")
@@ -645,6 +662,86 @@ class MessageHandler:
                         logging.info(f"用户 {target} 离线，消息已保存: 消息ID={message_id}")
                     if message.lower() == "quit":
                         break
+
+                elif msg_type == "schedule_message":
+                    # 阶段 O5（P2-5 定时消息）：预约发送——先入 pending 队列，
+                    # 服务端定时器（scheduler_scan）到点投递。schedule_at 统一
+                    # epoch 秒（UTC 中立，"注意时区"以 epoch 比较）。
+                    try:
+                        schedule_at = float(header.get("schedule_at"))
+                    except (TypeError, ValueError):
+                        self.server.guarded_send(ssock, "error", "无效的定时时间")
+                        continue
+                    if schedule_at <= time.time():
+                        self.server.guarded_send(ssock, "error",
+                                                 "定时时间必须晚于当前时间")
+                        logging.warning(f"定时消息被拒: 用户={username}, "
+                                        f"时间早于当前")
+                        continue
+                    message_id = header.get("message_id", str(uuid.uuid4()))
+                    text = data.decode("utf-8")
+                    group_id_header = header.get("group_id")
+                    if group_id_header is not None:
+                        try:
+                            group_id = int(group_id_header)
+                        except (ValueError, TypeError):
+                            self.server.guarded_send(ssock, "error", "无效的群组ID")
+                            continue
+                        if not self.server.db.is_group_member(group_id, username):
+                            self.server.guarded_send(ssock, "error", "您不在此群组中")
+                            continue
+                        if self.server.db.add_scheduled_message(
+                                message_id, username, text, schedule_at,
+                                group_id=group_id):
+                            self.server.guarded_send(ssock, "chat", "定时消息已设置")
+                            logging.info(f"群定时消息已登记: 用户={username}, "
+                                         f"群组={group_id}, 消息ID={message_id}")
+                        continue
+                    target = header.get("to")
+                    if not target:
+                        self.server.guarded_send(ssock, "error", "缺少接收者")
+                        continue
+                    if self.server.db.is_blocked(target, username):
+                        self.server.guarded_send(ssock, "error",
+                                                 "对方已将您拉黑，无法发送消息")
+                        continue
+                    if not self.server.db.is_friend(username, target):
+                        self.server.guarded_send(ssock, "error",
+                                                 f"错误：{target} 不是您的好友")
+                        continue
+                    if self.server.db.add_scheduled_message(
+                            message_id, username, text, schedule_at,
+                            receiver=target):
+                        self.server.guarded_send(ssock, "chat", "定时消息已设置")
+                        logging.info(f"定时消息已登记: 用户={username} -> "
+                                     f"{target}, 消息ID={message_id}")
+
+                elif msg_type == "cancel_scheduled":
+                    # 阶段 O5：取消本人 pending 定时消息
+                    message_id = header.get("message_id") or ""
+                    if self.server.db.cancel_scheduled_message(message_id, username):
+                        self.server.guarded_send(ssock, "chat", "已取消定时消息")
+                        logging.info(f"定时消息已取消: 用户={username}, "
+                                     f"消息ID={message_id}")
+                    else:
+                        self.server.guarded_send(
+                            ssock, "error", "定时消息不存在、已投递或无权取消")
+
+                elif msg_type == "list_scheduled":
+                    # 阶段 O5：列出本人 pending 定时消息（schedule_at 升序）
+                    rows = self.server.db.list_scheduled_messages(username)
+                    entries = [{
+                        "message_id": r["message_id"],
+                        "receiver": r["receiver"],
+                        "group_id": r["group_id"],
+                        "content": r["content"],
+                        "schedule_at": r["schedule_at"],
+                        "status": r["status"],
+                    } for r in rows]
+                    self.server.guarded_send(ssock, "scheduled_list_response",
+                                             json.dumps(entries))
+                    logging.info(f"定时消息列表查询: 用户={username}, "
+                                 f"共 {len(entries)} 条")
 
                 elif msg_type == "file_transfer_check":
                     # 大文件直传探测（阶段 G4b）：发送方先确认目标在线再传输
@@ -1241,6 +1338,22 @@ class MessageHandler:
                                 extra_headers={"message_id": message_id, "group_id": str(group_id)}
 
                             )
+
+                            # 阶段 O2（撤回联动）：被置顶的群消息撤回时自动解除
+                            # 置顶，并向全员广播 list_groups 刷新——横幅不得
+                            # 残留已撤回消息
+
+                            if self.server.db.clear_group_pin_if_pinned(group_id, message_id):
+
+                                for member in self.server.db.get_group_members(group_id):
+
+                                    self.server.broadcast_to_user(
+
+                                        member, "list_groups",
+
+                                        self.server.group_list_json(member))
+
+                                logging.info(f"被置顶消息已撤回，置顶自动解除: 群组={group_id}, 消息ID={message_id}")
 
                             # 为离线群成员保存撤回占位符（阶段 L1：无任何会话在线才算离线）
                             members = self.server.db.get_group_members(group_id)
@@ -1943,7 +2056,11 @@ class MessageHandler:
                                  "request_join_group", "approve_join_request",
                                  "reject_join_request", "invite_group_member",
                                  "accept_group_invite", "decline_group_invite",
-                                 "search_groups", "list_join_requests"):
+                                 "search_groups", "list_join_requests",
+                                 "set_group_announcement", "pin_group_message",
+                                 "unpin_group_message",
+                                 "list_group_announcements",
+                                 "delete_group_announcement"):
                     self.group_handler.handle_group_message(username, ssock, msg_type, header, data)
             except Exception as e:
                 # 阶段 I 修复：单条消息处理异常（如瞬时 SQLite 锁）不得断开整个连接，
