@@ -723,7 +723,7 @@ class _RawTextFieldState extends State<RawTextField> {
               border: Border.all(
                 color: _visuallyFocused
                     ? Theme.of(context).colorScheme.primary
-                    : Colors.grey.shade400,
+                    : Theme.of(context).colorScheme.outline,
                 width: _visuallyFocused ? 2.0 : 1.0,
               ),
               borderRadius: BorderRadius.circular(4),
@@ -741,7 +741,7 @@ class _RawTextFieldState extends State<RawTextField> {
                             ? Icons.visibility_off_rounded
                             : Icons.visibility_rounded,
                         size: 20,
-                        color: Colors.grey.shade600,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
                       ),
                       padding: EdgeInsets.zero,
                       onPressed: () => setState(() => _obscured = !_obscured),
@@ -759,7 +759,9 @@ class _RawTextFieldState extends State<RawTextField> {
     if (text.isEmpty && !_visuallyFocused) {
       return Text(
         widget.hintText ?? '',
-        style: TextStyle(color: Colors.grey.shade500, fontSize: 16),
+        style: TextStyle(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+            fontSize: 16),
       );
     }
     if (text.isEmpty && _visuallyFocused) {

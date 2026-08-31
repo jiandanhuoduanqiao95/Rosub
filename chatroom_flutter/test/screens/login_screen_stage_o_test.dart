@@ -21,7 +21,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:chatroom_flutter/screens/login_screen.dart';
+import 'package:chatroom_flutter/services/theme_settings.dart';
+
 import 'package:chatroom_flutter/widgets/raw_text_field.dart';
+
+ThemeSettings get settings => ThemeSettings.instance;
 
 Future<void> pumpLogin(WidgetTester tester) async {
   await tester.pumpWidget(const MaterialApp(home: LoginScreen()));
@@ -102,6 +106,50 @@ void main() {
       await pumpLogin(tester);
       expect(tester.takeException(), isNull);
       expect(find.text('alice'), findsNothing);
+    });
+  });
+
+  group('O 修订（2026-08-31 登录页专属主题）', () {
+    testWidgets('登录页主题独立于用户设置（R-O9 补充）：深色模式/字体缩放不影响', (tester) async {
+      // 用户设置：深色 + 1.3x 缩放
+      await settings.load();
+      settings.mode = AppThemeMode.dark;
+      settings.fontScale = 1.3;
+      await pumpLogin(tester);
+
+      // 登录页固定品牌深色主题 + 排版隔离（不受用户设置影响）
+      final ctx = tester.element(find.byType(RawTextField).first);
+      expect(Theme.of(ctx).brightness, Brightness.dark, reason: '登录页恒为品牌深色主题');
+      expect(MediaQuery.textScalerOf(ctx).scale(10.0), 10.0,
+          reason: '登录页排版不随用户字体缩放');
+    });
+
+    testWidgets('三段式布局（>=1280px）：品牌区 + 中部对话插画 + 表单', (tester) async {
+      tester.view.physicalSize = const Size(1600, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      // 中部插画含循环浮动动画：手动逐帧 pump，不用 pumpAndSettle
+      await tester.pumpWidget(const MaterialApp(home: LoginScreen()));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 700));
+
+      // 左：品牌区；中：对话插画（浮动卡片组）；右：表单
+      expect(find.text('私有化部署的即时通讯'), findsOneWidget, reason: '品牌展示区');
+      expect(find.text('明晚 8 点线上会议，记得参加 🎉'), findsOneWidget, reason: '中部对话插画');
+      expect(find.text('连接已加密'), findsOneWidget, reason: '加密系统卡');
+      expect(find.byType(RawTextField), findsNWidgets(2),
+          reason: '右侧表单（用户名/密码）');
+    });
+
+    testWidgets('登录页输入框融入深色主题（无白色内层框）', (tester) async {
+      await pumpLogin(tester);
+      // RawTextField 主题感知改造后：未聚焦描边 = colorScheme.outline
+      //（登录主题 #334155 深蓝灰），填充 = #0B1428——不再是灰白硬编码框
+      final ctx = tester.element(find.byType(RawTextField).first);
+      expect(Theme.of(ctx).colorScheme.outline, const Color(0xFF334155));
     });
   });
 }
