@@ -393,62 +393,67 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  /// 宽屏品牌展示区：产品标识 + 标语 + 特性亮点
+  /// 宽屏品牌展示区：产品标识 + 标语 + 特性亮点。
+  /// 2026-09-01 用户反馈 #3（调窗口高度 BOTTOM OVERFLOW）：可滚动且垂直居中——
+  /// Center 提供宽松约束，内容矮于视口居中、高于视口滚动，无溢出。
   Widget _buildBrandPane(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 72, vertical: 48),
+    return Align(
       alignment: Alignment.centerLeft,
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _brandMark(size: 72, radius: 22, iconSize: 40),
-          const SizedBox(height: 24),
-          const Text('聊天室',
-              style: TextStyle(
-                  fontSize: 40,
-                  fontWeight: FontWeight.bold,
-                  color: Color(0xFFF1F5F9))),
-          const SizedBox(height: 10),
-          const Text('私有化部署的即时通讯',
-              style: TextStyle(fontSize: 18, color: Color(0xFF94A3B8))),
-          const SizedBox(height: 40),
-          ...[
-            (Icons.forum_rounded, '实时群聊', '群组消息与文件，即发即达'),
-            (Icons.cloud_off_outlined, '离线暂存', '离线消息与公告，上线即同步'),
-            (Icons.verified_user_outlined, '私有部署', '数据完全自有，TLS 加密传输'),
-          ].map((e) => Padding(
-                padding: const EdgeInsets.only(bottom: 18),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF3B82F6).withValues(alpha: 0.14),
-                        borderRadius: BorderRadius.circular(12),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 72, vertical: 48),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _brandMark(size: 72, radius: 22, iconSize: 40),
+            const SizedBox(height: 24),
+            const Text('聊天室',
+                style: TextStyle(
+                    fontSize: 40,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFFF1F5F9))),
+            const SizedBox(height: 10),
+            const Text('私有化部署的即时通讯',
+                style: TextStyle(fontSize: 18, color: Color(0xFF94A3B8))),
+            const SizedBox(height: 40),
+            ...[
+              (Icons.forum_rounded, '实时群聊', '群组消息与文件，即发即达'),
+              (Icons.cloud_off_outlined, '离线暂存', '离线消息与公告，上线即同步'),
+              (Icons.verified_user_outlined, '私有部署', '数据完全自有，TLS 加密传输'),
+            ].map((e) => Padding(
+                  padding: const EdgeInsets.only(bottom: 18),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color:
+                              const Color(0xFF3B82F6).withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Icon(e.$1,
+                            size: 22, color: const Color(0xFF60A5FA)),
                       ),
-                      child:
-                          Icon(e.$1, size: 22, color: const Color(0xFF60A5FA)),
-                    ),
-                    const SizedBox(width: 14),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(e.$2,
-                            style: const TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w600,
-                                color: Color(0xFFE2E8F0))),
-                        Text(e.$3,
-                            style: const TextStyle(
-                                fontSize: 12, color: Color(0xFF94A3B8))),
-                      ],
-                    ),
-                  ],
-                ),
-              )),
-        ],
+                      const SizedBox(width: 14),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(e.$2,
+                              style: const TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFFE2E8F0))),
+                          Text(e.$3,
+                              style: const TextStyle(
+                                  fontSize: 12, color: Color(0xFF94A3B8))),
+                        ],
+                      ),
+                    ],
+                  ),
+                )),
+          ],
+        ),
       ),
     );
   }
@@ -672,23 +677,20 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   /// 登录页输入容器（深色填充 + 圆角描边）
-  Widget _loginField({required Widget child}) {
-    return Container(
-      decoration: BoxDecoration(
-        color: const Color(0xFF0B1428),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFF24314F)),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-      child: child,
-    );
-  }
+  // 2026-09-01 用户反馈（内外双层框）：移除额外输入容器——
+  // 单层框即 RawTextField 自身的主题描边（登录深色主题自动融入）
+  Widget _loginField({required Widget child}) => child;
 }
 
 /// 宽屏三段式（2026-08-31 用户反馈 #2）：中部对话插画——
 /// 三张玻璃质感气泡卡片（群消息 / 回复 / 加密系统提示）+ 缓慢浮动动画，
 /// 填充大屏中部留白；仅在 >=1280px 三段式布局挂载（循环动画不影响
 /// 单/双栏布局下的既有 pumpAndSettle 测试）。
+/// 中部对话插画（2026-09-01 用户反馈 #2 重设计）：**滚动播放的消息流**——
+/// 10 条玻璃质感消息卡片覆盖项目全部消息功能（群聊/私聊/图片/文件/引用回复/
+/// 表情回应/群公告/置顶/定时消息/加密系统提示），自下而上无缝循环滚动，
+/// 模拟"正在聊天"；仅在 >=1280px 三段式布局挂载（其动画为自驱循环，
+/// 不依赖 pumpAndSettle——默认 800x600 单列布局不挂载，既有测试不受影响）。
 class _FloatingChatArt extends StatefulWidget {
   const _FloatingChatArt();
 
@@ -696,11 +698,56 @@ class _FloatingChatArt extends StatefulWidget {
   State<_FloatingChatArt> createState() => _FloatingChatArtState();
 }
 
+/// 消息流条目（功能类型 → 展示文案/图标/徽标）
+class _ArtMessage {
+  final IconData icon;
+  final String kind; // 功能标签（群聊/私聊/图片/文件/回复/表情/公告/置顶/定时/加密）
+  final String name;
+  final String text;
+  final Color tint;
+  final bool self;
+
+  const _ArtMessage(this.icon, this.kind, this.name, this.text, this.tint,
+      {this.self = false});
+}
+
 class _FloatingChatArtState extends State<_FloatingChatArt>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller =
-      AnimationController(vsync: this, duration: const Duration(seconds: 5))
+      AnimationController(vsync: this, duration: const Duration(seconds: 16))
         ..repeat();
+
+  static const double _itemHeight = 84.0;
+  static const double _itemGap = 16.0;
+
+  double get _cycle => _messages.length * (_itemHeight + _itemGap);
+
+  /// 10 条消息：覆盖项目全部消息功能
+  static const List<_ArtMessage> _messages = [
+    _ArtMessage(Icons.groups_rounded, '群聊', '李', '明晚 8 点线上会议，记得参加 🎉',
+        Color(0xFF34D399)),
+    _ArtMessage(
+        Icons.chat_bubble_rounded, '私聊', 'A', '收到，准时参加 ✅', Color(0xFF60A5FA),
+        self: true),
+    _ArtMessage(
+        Icons.image_rounded, '图片', '王', '会议纪要截图.png', Color(0xFFF472B6)),
+    _ArtMessage(Icons.insert_drive_file_rounded, '文件', '张', '报告.pdf · 2.3 MB',
+        Color(0xFFFB923C)),
+    _ArtMessage(Icons.format_quote_rounded, '回复', '李', '引用回复：原方案可行，按此执行',
+        Color(0xFF34D399)),
+    _ArtMessage(
+        Icons.emoji_emotions_rounded, '表情', 'A', '哈哈 👍 ×3', Color(0xFF60A5FA),
+        self: true),
+    _ArtMessage(Icons.campaign_rounded, '公告', '群公告', '周五 18:00 团建，请准时参加',
+        Color(0xFFFACC15)),
+    _ArtMessage(
+        Icons.push_pin_rounded, '置顶', '系统', '已置顶：重要通知', Color(0xFF38BDF8)),
+    _ArtMessage(Icons.schedule_rounded, '定时', 'A', '定时提醒：今天 15:00 站会',
+        Color(0xFF60A5FA),
+        self: true),
+    _ArtMessage(Icons.verified_user_rounded, '加密', '系统', 'TLS 加密传输 · 消息已送达',
+        Color(0xFF34D399)),
+  ];
 
   @override
   void dispose() {
@@ -708,191 +755,117 @@ class _FloatingChatArtState extends State<_FloatingChatArt>
     super.dispose();
   }
 
-  /// 相位浮移（-6 ~ +6px）
-  double _float(double phase) =>
-      6 * math.sin((_controller.value + phase) * 2 * math.pi);
-
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) {
-        return Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            _chatBubble(
-              dy: _float(0.0),
-              align: CrossAxisAlignment.start,
-              avatarColor: const Color(0xFF34D399),
-              avatarText: '李',
-              text: '明晚 8 点线上会议，记得参加 🎉',
-              time: '刚刚',
-            ),
-            const SizedBox(height: 22),
-            _chatBubble(
-              dy: _float(0.35),
-              align: CrossAxisAlignment.end,
-              avatarColor: const Color(0xFF60A5FA),
-              avatarText: 'A',
-              text: '收到，准时参加 ✅',
-              time: '1 分钟前',
-              self: true,
-            ),
-            const SizedBox(height: 22),
-            _systemCard(dy: _float(0.7)),
-          ],
-        );
-      },
-    );
-  }
-
-  /// 对话气泡卡片（玻璃质感 + 头像 + 时间戳）
-  Widget _chatBubble({
-    required double dy,
-    required CrossAxisAlignment align,
-    required Color avatarColor,
-    required String avatarText,
-    required String text,
-    required String time,
-    bool self = false,
-  }) {
-    return Transform.translate(
-      offset: Offset(0, dy),
-      child: FractionallySizedBox(
-        widthFactor: 0.82,
-        child: Column(
-          crossAxisAlignment: align,
-          children: [
-            Row(
-              mainAxisAlignment:
-                  self ? MainAxisAlignment.end : MainAxisAlignment.start,
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                if (!self) ...[
-                  _avatar(avatarColor, avatarText),
-                  const SizedBox(width: 10)
-                ],
-                Flexible(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 12),
-                    decoration: BoxDecoration(
-                      color: self
-                          ? const Color(0xFF3B82F6).withValues(alpha: 0.30)
-                          : Colors.white.withValues(alpha: 0.05),
-                      borderRadius: BorderRadius.only(
-                        topLeft: const Radius.circular(16),
-                        topRight: const Radius.circular(16),
-                        bottomLeft: Radius.circular(self ? 16 : 4),
-                        bottomRight: Radius.circular(self ? 4 : 16),
-                      ),
-                      border: Border.all(
-                          color: Colors.white.withValues(alpha: 0.10)),
-                    ),
-                    child: Text(
-                      text,
-                      style: const TextStyle(
-                          fontSize: 14, color: Color(0xFFE2E8F0)),
+    return LayoutBuilder(builder: (context, cons) {
+      // 高度自适应：矮窗口取视口的 85%（不溢出，配合外层可滚动区域）
+      final h = math.min(430.0, math.max(0.0, cons.maxHeight * 0.88));
+      if (h < 60) return const SizedBox.shrink();
+      return SizedBox(
+        height: h,
+        child: AnimatedBuilder(
+          animation: _controller,
+          builder: (context, _) {
+            final offset = _controller.value * _cycle;
+            // Stack + Positioned：消息流自下而上平移，越界部分被裁剪
+            //（Stack 子级不受受限高度布局约束，无 BOTTOM OVERFLOW）；
+            // 双份列表保证滚动到末尾时无缝续接循环
+            return ClipRect(
+              child: Stack(
+                clipBehavior: Clip.hardEdge,
+                children: [
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    top: -offset,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        for (final m in [..._messages, ..._messages])
+                          _artCard(m),
+                      ],
                     ),
                   ),
-                ),
-                if (self) ...[
-                  const SizedBox(width: 10),
-                  _avatar(avatarColor, avatarText)
                 ],
+              ),
+            );
+          },
+        ),
+      );
+    });
+  }
+
+  /// 单张玻璃质感消息卡（统一高度，滚动稳定）
+  Widget _artCard(_ArtMessage m) {
+    return Container(
+      height: _itemHeight,
+      margin: const EdgeInsets.only(bottom: _itemGap),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      alignment: Alignment.centerLeft,
+      decoration: BoxDecoration(
+        color: (m.self ? const Color(0xFF3B82F6) : Colors.white)
+            .withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+            color: m.self
+                ? const Color(0xFF3B82F6).withValues(alpha: 0.35)
+                : Colors.white.withValues(alpha: 0.10)),
+      ),
+      child: Row(
+        children: [
+          // 功能图标徽标（彩色圆角方块）
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: m.tint.withValues(alpha: 0.16),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(m.icon, size: 20, color: m.tint),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(m.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF94A3B8))),
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: m.tint.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(m.kind,
+                          style: TextStyle(fontSize: 10, color: m.tint)),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(m.text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 13, color: Color(0xFFE2E8F0))),
               ],
             ),
-            const SizedBox(height: 6),
-            Padding(
-              padding: self
-                  ? const EdgeInsets.only(right: 46)
-                  : const EdgeInsets.only(left: 46),
-              child: Text(time,
-                  style:
-                      const TextStyle(fontSize: 11, color: Color(0xFF64748B))),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _avatar(Color color, String text) {
-    return Container(
-      width: 36,
-      height: 36,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: color.withValues(alpha: 0.22),
-        border: Border.all(color: color.withValues(alpha: 0.55)),
-      ),
-      alignment: Alignment.center,
-      child: Text(text,
-          style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-              color: color.withValues(alpha: 0.95))),
-    );
-  }
-
-  /// 加密系统提示卡（盾图标 + 呼吸绿点）
-  Widget _systemCard({required double dy}) {
-    return Transform.translate(
-      offset: Offset(0, dy),
-      child: FractionallySizedBox(
-        widthFactor: 0.82,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.04),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
           ),
-          child: Row(
-            children: [
-              Container(
-                width: 38,
-                height: 38,
-                decoration: BoxDecoration(
-                  color: const Color(0xFF34D399).withValues(alpha: 0.14),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: const Icon(Icons.verified_user_outlined,
-                    size: 20, color: Color(0xFF34D399)),
-              ),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('连接已加密',
-                        style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                            color: Color(0xFFE2E8F0))),
-                    SizedBox(height: 2),
-                    Text('TLS 加密传输 · 消息已送达',
-                        style:
-                            TextStyle(fontSize: 12, color: Color(0xFF94A3B8))),
-                  ],
-                ),
-              ),
-              Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: const Color(0xFF34D399),
-                  boxShadow: [
-                    BoxShadow(
-                        color: const Color(0xFF34D399).withValues(alpha: 0.5),
-                        blurRadius: 8),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
+          if (m.self)
+            const Icon(Icons.check_circle_rounded,
+                size: 14, color: Color(0xFF34D399)),
+        ],
       ),
     );
   }

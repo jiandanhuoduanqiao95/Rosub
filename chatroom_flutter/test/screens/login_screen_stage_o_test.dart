@@ -138,8 +138,9 @@ void main() {
 
       // 左：品牌区；中：对话插画（浮动卡片组）；右：表单
       expect(find.text('私有化部署的即时通讯'), findsOneWidget, reason: '品牌展示区');
-      expect(find.text('明晚 8 点线上会议，记得参加 🎉'), findsOneWidget, reason: '中部对话插画');
-      expect(find.text('连接已加密'), findsOneWidget, reason: '加密系统卡');
+      expect(find.text('明晚 8 点线上会议，记得参加 🎉'), findsWidgets,
+          reason: '中部对话插画（双份列表循环滚动，文案可出现多次）');
+      expect(find.textContaining('TLS 加密传输'), findsWidgets, reason: '加密系统卡');
       expect(find.byType(RawTextField), findsNWidgets(2),
           reason: '右侧表单（用户名/密码）');
     });
@@ -150,6 +151,53 @@ void main() {
       //（登录主题 #334155 深蓝灰），填充 = #0B1428——不再是灰白硬编码框
       final ctx = tester.element(find.byType(RawTextField).first);
       expect(Theme.of(ctx).colorScheme.outline, const Color(0xFF334155));
+      // 单层框（2026-09-01 用户反馈 #1）：RawTextField 路径上仅其自身一个
+      // AnimatedContainer（登录页不再包额外输入容器）
+      final boxes = find
+          .descendant(
+            of: find.byType(RawTextField).first,
+            matching: find.byType(AnimatedContainer),
+          )
+          .evaluate();
+      expect(boxes.length, 1, reason: '输入框应保持单层描边（无内外两层）');
+    });
+  });
+
+  group('2026-09-01 尺寸适配（BOTTOM OVERFLOW 回归）', () {
+    Future<void> pumpAt(WidgetTester tester, Size size) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(const MaterialApp(home: LoginScreen()));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 700));
+    }
+
+    testWidgets('三段式矮窗（1300x480）：无溢出异常', (tester) async {
+      await pumpAt(tester, const Size(1300, 480));
+      expect(tester.takeException(), isNull,
+          reason: '调窗口高度不得出现 BOTTOM OVERFLOW / 黄色条纹');
+      expect(find.byType(RawTextField), findsNWidgets(2));
+    });
+
+    testWidgets('双栏矮窗（1024x480）：无溢出异常', (tester) async {
+      await pumpAt(tester, const Size(1024, 480));
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('单列矮窗（420x600）：无溢出异常', (tester) async {
+      await pumpAt(tester, const Size(420, 600));
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('大屏三段式（1920x1080）：消息流滚动播放且无溢出', (tester) async {
+      await pumpAt(tester, const Size(1920, 1080));
+      expect(tester.takeException(), isNull);
+      expect(find.textContaining('会议纪要截图.png'), findsWidgets,
+          reason: '中部消息流滚动播放');
     });
   });
 }
