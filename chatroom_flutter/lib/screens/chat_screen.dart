@@ -8,21 +8,27 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 
 import '../config.dart';
+import '../l10n/app_strings.dart';
 import '../models/chat_models.dart';
 import '../services/chat_exporter.dart';
 import '../services/file_drop.dart';
 import '../services/ime_bridge.dart';
 import '../services/session_store.dart';
 import '../services/socket_service.dart';
+import '../services/sticker_store.dart';
 import '../services/theme_settings.dart';
 import '../services/state_manager.dart';
 import '../services/taskbar_notifier.dart';
 import '../widgets/chat_view.dart';
 import '../widgets/dialogs.dart';
+import '../widgets/image_annotation_editor.dart';
 import '../widgets/raw_text_field.dart';
 import '../widgets/sidebar.dart';
 
@@ -78,14 +84,24 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   /// 阶段 N3（P2-4 文件拖拽发送）：拖入文件 → 既有上传通道
-  /// （sendFile 依据大小自动走 M8 大文件分流；系统会话只读不发送）
-  void _onFilesDropped(List<String> paths) {
+  /// （sendFile 依据大小自动走 M8 大文件分流；系统会话只读不发送）。
+  /// R-P5 修订：图片文件自动进入标注编辑器（编辑后发送或直接发送原图）
+  Future<void> _onFilesDropped(List<String> paths) async {
     final key = _state.currentChat;
     if (key == null || key == '服务器' || paths.isEmpty) return;
     for (final path in paths) {
       final name = path.split(RegExp(r'[/\\]')).last;
       if (name.isEmpty || name == '.' || name == '..') continue;
-      widget.socketService.sendFile(key, path, name);
+      if (isImageFilename(name)) {
+        try {
+          final bytes = await File(path).readAsBytes();
+          await _sendImageWithEditor(bytes, filename: name, filePath: path);
+        } catch (_) {
+          widget.socketService.sendFile(key, path, name);
+        }
+      } else {
+        widget.socketService.sendFile(key, path, name);
+      }
     }
   }
 
@@ -180,13 +196,24 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void _sendFile() async {
+  Future<void> _sendFile() async {
     final current = _state.currentChat;
     if (current == null || current == '服务器') return;
 
     final result = await showFilePicker(context);
     if (result != null) {
-      widget.socketService.sendFile(current, result.path, result.name);
+      // R-P5 修订：图片文件自动进入标注编辑器（编辑后发送或直接发送原图）
+      if (isImageFilename(result.name)) {
+        try {
+          final bytes = await File(result.path).readAsBytes();
+          await _sendImageWithEditor(bytes,
+              filename: result.name, filePath: result.path);
+        } catch (_) {
+          widget.socketService.sendFile(current, result.path, result.name);
+        }
+      } else {
+        widget.socketService.sendFile(current, result.path, result.name);
+      }
     }
   }
 
@@ -558,6 +585,8 @@ class _ChatScreenState extends State<ChatScreen> {
     widget.socketService.disconnect();
     // 阶段 O7（用户反馈 #9）：退出登录回退全局默认主题设置
     ThemeSettings.instance.bindUser(null);
+    // R-P11：表情包清单键同步回退全局默认
+    StickerStore.instance.bindUser(null);
     // 退出登录（阶段 O6 修订）：仅清除当前凭据，**保留账号列表**——
     // 回到登录页可从账号条目快速切换（不再用 clear() 全清）。
     // 当前凭据仍会清除：登录页不会自动回填/自动登录（H3 语义不变）
@@ -592,55 +621,29 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// 阶段 N3（P2-4 图片粘贴直发）：剪贴板图片预览条
-  /// （发送图片 → sendFileBytes 复用既有上传通道；取消 → 清除预览）
-  Widget _buildImagePreviewBar() {
-    final bytes = _state.pendingImagePreview;
-    return Material(
-      color: Theme.of(context).colorScheme.surfaceContainerHighest,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Row(
-          children: [
-            const Icon(Icons.image_rounded, size: 20),
-            const SizedBox(width: 8),
-            const Expanded(
-              child: Text(
-                'pasted_image.png',
-                style: TextStyle(fontSize: 13),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            TextButton(
-              onPressed: () => _state.clearPendingImagePreview(),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              // 阶段 N3 修复（用户实测崩溃）：主题 filledButtonTheme 的
-              // minimumSize 为 Size.fromHeight(46)（= 宽度 infinity，
-              // 服务登录等拉伸场景）——FilledButton 放进 Row 会拿到
-              // 无界主轴约束，内部 ConstrainedBox 产生 w=Infinity，
-              // RenderPhysicalShape 布局直接抛异常。此处覆盖为有限尺寸。
-              style: FilledButton.styleFrom(minimumSize: const Size(0, 40)),
-              // 未选会话时禁用发送（预览保留，选会话后可发送）
-              onPressed: (bytes == null || _state.currentChat == null)
-                  ? null
-                  : _sendPastedImage,
-              child: const Text('发送图片'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// 发送剪贴板图片（阶段 N3）：复用 sendFileBytes（既有上传通道）
-  void _sendPastedImage() {
+  /// 阶段 N3 / R-P5（用户二轮反馈扩展）：粘贴/文件选择/拖拽图片 →
+  /// 自动进入标注编辑器（仿微信）。用户可编辑（涂鸦/裁剪）后"发送"，
+  /// 也可"直接发送"原图；取消则放弃。
+  /// 未编辑且携带落盘路径时仍走 sendFile（保留 M8 大文件分流语义）。
+  Future<void> _sendImageWithEditor(
+    Uint8List bytes, {
+    required String filename,
+    String? filePath,
+  }) async {
     final key = _state.currentChat;
-    final bytes = _state.pendingImagePreview;
-    if (key == null || key == '服务器' || bytes == null) return;
-    widget.socketService.sendFileBytes(key, bytes, 'pasted_image.png');
-    _state.clearPendingImagePreview();
+    if (key == null || key == '服务器') return;
+    await showImageAnnotationEditor(
+      context,
+      bytes,
+      onConfirm: (annotated) {
+        // compose 契约：无修改时原字节直通（同一实例）→ 走路径发送
+        if (identical(annotated, bytes) && filePath != null) {
+          widget.socketService.sendFile(key, filePath, filename);
+        } else {
+          widget.socketService.sendFileBytes(key, annotated, filename);
+        }
+      },
+    );
   }
 
   /// 阶段 N3b（P2-4 扩展）：点击内联图片 → 黑底全屏查看（参考微信）。
@@ -666,6 +669,138 @@ class _ChatScreenState extends State<ChatScreen> {
             child:
                 bytes != null ? Image.memory(bytes) : Image.file(File(path!)),
           ),
+        ),
+      ),
+    );
+  }
+
+  /// 阶段 P2（R-P3 修订）：表情面板——表情模块点击插入输入框（光标处），
+  /// 表情包模块点击贴纸按图片消息通道发送到当前会话。
+  void _showStickerPicker() {
+    final key = _state.currentChat;
+    if (key == null || key == '服务器') return;
+    showStickerPickerDialog(
+      context,
+      onPick: (sticker) {
+        final bytes = StickerStore.instance.stickerBytes(sticker.id);
+        if (bytes != null) {
+          widget.socketService.sendFileBytes(key, bytes, sticker.name);
+        }
+      },
+      onEmojiPicked: _insertEmoji,
+    );
+  }
+
+  /// 在输入框光标处插入表情（R-P3 表情模块），并同步会话草稿
+  void _insertEmoji(String emoji) {
+    final base = _inputCtrl.text;
+    final sel = _inputCtrl.selection;
+    final start = (sel.baseOffset < 0) ? base.length : sel.baseOffset;
+    final end = (sel.extentOffset < 0) ? start : sel.extentOffset;
+    final newText = base.replaceRange(start, end, emoji);
+    _inputCtrl.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: start + emoji.length),
+    );
+    final key = _state.currentChat;
+    if (key != null && key != '服务器') {
+      _state.setConversationDraft(key, newText);
+    }
+  }
+
+  /// R-P3：收藏图片消息到"我的表情包"（他人发送的表情据为己有）
+  Future<void> _saveMessageSticker(ChatMessage message) async {
+    Uint8List? bytes = message.fileData;
+    if (bytes == null) {
+      var path = message.filePath;
+      if (path == null && message.filename != null) {
+        final base = message.filename!.split(RegExp(r'[/\\]')).last;
+        path = '${AppConfig.receivedFilesDir}/$base';
+      }
+      if (path != null && File(path).existsSync()) {
+        bytes = await File(path).readAsBytes();
+      }
+    }
+    if (bytes == null || !isSupportedImage(bytes)) {
+      _state.showNotice('仅图片消息可添加到表情包');
+      return;
+    }
+    final sticker = await StickerStore.instance.addSticker(bytes);
+    if (sticker == null) {
+      // R-P11：不再静默失败（未 init/写入异常时给用户明确反馈）
+      _state.showNotice('添加失败（表情包目录不可用）');
+      return;
+    }
+    _state.showNotice('已添加到表情包');
+  }
+
+  /// R-P2：文件卡片点击 → 文件预览（信息 + 文本预览 + 系统打开）
+  void _openFilePreview(ChatMessage message) {
+    var path = message.filePath;
+    if (path == null && message.filename != null) {
+      final base = message.filename!.split(RegExp(r'[/\\]')).last;
+      path = '${AppConfig.receivedFilesDir}/$base';
+    }
+    showFilePreviewDialog(
+      context,
+      filename: message.filename ?? message.content,
+      path: path,
+      filesize: message.filesize,
+      sender: message.sender,
+      timestamp: message.timestamp,
+    );
+  }
+
+  /// 阶段 P3：高级搜索（关键词/发送者/时间组合，按会话路由）
+  void _showAdvancedSearch() {
+    final current = _state.currentChat;
+    if (current == null || current == '服务器') return;
+    showAdvancedSearchDialog(
+      context,
+      onSearch: (filter) {
+        final sender = filter.sender.isEmpty ? null : filter.sender;
+        if (current.startsWith('group_')) {
+          final groupId = int.tryParse(current.substring(6));
+          if (groupId != null) {
+            widget.socketService.searchHistory(
+              filter.keyword,
+              groupId: groupId,
+              sender: sender,
+              timeFrom: filter.from,
+              timeTo: filter.to,
+            );
+          }
+        } else {
+          widget.socketService.searchHistory(
+            filter.keyword,
+            to: current,
+            sender: sender,
+            timeFrom: filter.from,
+            timeTo: filter.to,
+          );
+        }
+      },
+    );
+  }
+
+  /// 阶段 P1（R-P1 修订）：视频气泡点击 → 全屏播放器。
+  /// media_kit（mpv）内嵌播放；初始化失败（缺库/测试环境）回退为
+  /// "使用系统播放器打开"。
+  void _openVideoViewer(ChatMessage message) {
+    var path = message.filePath;
+    if (path == null && message.filename != null) {
+      final base = message.filename!.split(RegExp(r'[/\\]')).last;
+      path = '${AppConfig.receivedFilesDir}/$base';
+    }
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black,
+      barrierDismissible: false,
+      builder: (ctx) => Dialog.fullscreen(
+        backgroundColor: Colors.black,
+        child: _VideoViewerPage(
+          filename: message.filename ?? message.content,
+          path: path,
         ),
       ),
     );
@@ -803,7 +938,7 @@ class _ChatScreenState extends State<ChatScreen> {
       builder: (context, _) {
         return Scaffold(
           appBar: AppBar(
-            title: Text('聊天室 - ${_state.username ?? ""}'),
+            title: Text('${t('appTitle')} - ${_state.username ?? ""}'),
             actions: [
               // 文件请求指示器
               if (_state.hasPendingFileRequests)
@@ -859,7 +994,7 @@ class _ChatScreenState extends State<ChatScreen> {
               // 设置（阶段 K3：提示音/免打扰）
               IconButton(
                 icon: const Icon(Icons.settings_rounded),
-                tooltip: '设置',
+                tooltip: t('settings'),
                 onPressed: () => showSettingsDialog(context),
               ),
 
@@ -896,7 +1031,7 @@ class _ChatScreenState extends State<ChatScreen> {
               // 退出
               IconButton(
                 icon: const Icon(Icons.logout),
-                tooltip: '退出',
+                tooltip: t('logout'),
                 onPressed: _logout,
               ),
             ],
@@ -980,11 +1115,6 @@ class _ChatScreenState extends State<ChatScreen> {
                     Expanded(
                       child: Column(
                         children: [
-                          // 阶段 N3（P2-4 图片粘贴直发）：剪贴板图片预览条
-                          // （发送复用既有上传通道；系统会话只读不显示）
-                          if (_state.pendingImagePreview != null &&
-                              _state.currentChat != '服务器')
-                            _buildImagePreviewBar(),
                           Expanded(
                             child: _state.currentChat != null
                                 ? ChatView(
@@ -1044,14 +1174,27 @@ class _ChatScreenState extends State<ChatScreen> {
                                                 key, messageId);
                                       }
                                     },
-                                    // 阶段 N3（P2-4）：剪贴板图片 → 预览条
+                                    // 阶段 N3（P2-4）/ R-P5 修订：剪贴板图片
+                                    // → 自动进入标注编辑器（可编辑后发送，
+                                    // 也可直接发送原图）
                                     onImagePasted: (bytes) {
                                       if (isSupportedImage(bytes)) {
-                                        _state.setPendingImagePreview(bytes);
+                                        _sendImageWithEditor(bytes,
+                                            filename: 'pasted_image.png');
                                       }
                                     },
                                     // 阶段 N3b：点击内联图片 → 全屏查看
                                     onImageTap: _openImageViewer,
+                                    // 阶段 P1：点击视频气泡 → 全屏查看
+                                    onVideoTap: _openVideoViewer,
+                                    // R-P2：点击文件卡片 → 文件预览
+                                    onFileTap: _openFilePreview,
+                                    // R-P3：图片消息菜单"添加到表情包"
+                                    onSaveSticker: _saveMessageSticker,
+                                    // 阶段 P2：贴纸面板入口
+                                    onShowStickerPicker: _showStickerPicker,
+                                    // 阶段 P3：高级搜索入口
+                                    onAdvancedSearch: _showAdvancedSearch,
                                     // 阶段 N2（P2-1）：聊天记录导出（TXT/JSON）
                                     onExportChat: _exportChat,
                                     // ---- 阶段 O 接线 ----
@@ -1111,16 +1254,16 @@ class _ChatScreenState extends State<ChatScreen> {
                                     // O5：定时发送对话框
                                     onScheduleMessage: _showScheduleDialog,
                                   )
-                                : const Center(
+                                : Center(
                                     child: Column(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        Icon(Icons.chat_rounded,
+                                        const Icon(Icons.chat_rounded,
                                             size: 64, color: Colors.grey),
-                                        SizedBox(height: 16),
+                                        const SizedBox(height: 16),
                                         Text(
-                                          '选择一个会话开始聊天',
-                                          style: TextStyle(
+                                          t('selectChatToStart'),
+                                          style: const TextStyle(
                                               color: Colors.grey, fontSize: 16),
                                         ),
                                       ],
@@ -1172,5 +1315,148 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
     });
+  }
+}
+
+/// 全屏视频播放器（R-P1）：media_kit 内嵌播放；顶栏文件名（点击关闭）；
+/// 播放器初始化失败时回退"使用系统播放器打开"（xdg-open）。
+class _VideoViewerPage extends StatefulWidget {
+  final String filename;
+  final String? path;
+
+  const _VideoViewerPage({required this.filename, this.path});
+
+  @override
+  State<_VideoViewerPage> createState() => _VideoViewerPageState();
+}
+
+class _VideoViewerPageState extends State<_VideoViewerPage> {
+  Player? _player;
+  VideoController? _controller;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initPlayer();
+  }
+
+  Future<void> _initPlayer() async {
+    final path = widget.path;
+    if (path == null || !File(path).existsSync()) {
+      if (mounted) setState(() => _failed = true);
+      return;
+    }
+    // 测试环境无法初始化原生播放（FakeAsync 下原生回调不返回），恒走回退，
+    // 保证查看器交互测试确定性（不引入 flutter_test 依赖，按绑定类型名判定）
+    if (WidgetsBinding.instance.runtimeType.toString() ==
+        'AutomatedTestWidgetsFlutterBinding') {
+      if (mounted) setState(() => _failed = true);
+      return;
+    }
+    try {
+      MediaKit.ensureInitialized();
+      final player = Player();
+      // R-P8（用户实测：有声无画）：强制 S/W 渲染（像素缓冲 Texture），
+      // 绕开 H/W 路径的 GL 上下文共享失败（虚拟机/llvmpipe/部分驱动下
+      // mpv_render_context 建成功但帧不上屏，音频正常画面全黑）；
+      // hwdec 同步关闭避免 VAAPI 初始化失败拖垮解码。
+      final controller = VideoController(
+        player,
+        configuration: const VideoControllerConfiguration(
+          enableHardwareAcceleration: false,
+          hwdec: 'no',
+        ),
+      );
+      await player.open(Media(path));
+      if (mounted) {
+        setState(() {
+          _player = player;
+          _controller = controller;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _failed = true);
+    }
+  }
+
+  @override
+  void dispose() {
+    _player?.dispose();
+    super.dispose();
+  }
+
+  void _openWithSystemPlayer() {
+    final path = widget.path;
+    if (path != null && File(path).existsSync()) {
+      Process.run('xdg-open', [path]);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final player = _player;
+    final controller = _controller;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Column(
+          children: [
+            // 顶栏：关闭 + 文件名（点击文件名同样关闭，兼容既有交互）
+            Row(
+              children: [
+                IconButton(
+                  tooltip: '关闭',
+                  icon: const Icon(Icons.close_rounded, color: Colors.white),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () => Navigator.of(context).pop(),
+                    child: Text(
+                      widget.filename,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Colors.white, fontSize: 14),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            Expanded(
+              child: (player != null && controller != null)
+                  ? Video(controller: controller)
+                  : Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.play_circle_rounded,
+                              size: 72, color: Colors.white70),
+                          const SizedBox(height: 12),
+                          Text(
+                            widget.filename,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 15),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 16),
+                          if (_failed && widget.path != null)
+                            TextButton.icon(
+                              onPressed: _openWithSystemPlayer,
+                              icon: const Icon(Icons.open_in_new_rounded,
+                                  size: 18, color: Colors.white70),
+                              label: const Text('使用系统播放器打开',
+                                  style: TextStyle(color: Colors.white70)),
+                            ),
+                        ],
+                      ),
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }

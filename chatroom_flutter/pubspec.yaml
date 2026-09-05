@@ -22,6 +22,12 @@ dependencies:
   # 阶段 L3（P0-4）：客户端本地消息缓存（sqflite + 桌面/测试 FFI 后端）
   sqflite: ^2.4.1
   sqflite_common_ffi: ^2.3.4
+  media_kit: 1.1.11
+  media_kit_video: 1.2.5
+  media_kit_libs_video: ^1.0.7
+  # R-P9（文件预览扩展）：docx/xlsx/pptx 为 ZIP+OOXML，archive 纯 Dart 解包
+  # 提取文本预览（零原生依赖）
+  archive: ^4.2.0
 
 dev_dependencies:
   flutter_test:

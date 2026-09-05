@@ -8,6 +8,8 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../config.dart';
+import '../l10n/app_strings.dart';
+import '../services/theme_settings.dart';
 import '../widgets/raw_text_field.dart';
 import '../models/chat_models.dart';
 import '../services/session_store.dart';
@@ -173,13 +175,18 @@ class _LoginScreenState extends State<LoginScreen> {
     // 登录/注册页使用固定的品牌深色沉浸主题：不受 ThemeSettings（深色模式/
     // 字体缩放/主题色/聊天背景）影响——用户设置登录后在主界面生效，登录页
     // 恒定为品牌形象，观感稳定且与主界面默认品牌蓝自然衔接。
-    return Theme(
-      data: _loginTheme(),
-      child: MediaQuery(
-        // 字号排版独立：用户字体缩放不影响登录页
-        data: MediaQuery.of(context)
-            .copyWith(textScaler: const TextScaler.linear(1.0)),
-        child: Builder(builder: (context) => _buildLoginBody(context)),
+    // 阶段 P6：监听 ThemeSettings（语言切换即时重建文案；其余主题项
+    // 被专属主题屏蔽，不影响观感）。
+    return ListenableBuilder(
+      listenable: ThemeSettings.instance,
+      builder: (context, _) => Theme(
+        data: _loginTheme(),
+        child: MediaQuery(
+          // 字号排版独立：用户字体缩放不影响登录页
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: const TextScaler.linear(1.0)),
+          child: Builder(builder: (context) => _buildLoginBody(context)),
+        ),
       ),
     );
   }
@@ -407,8 +414,8 @@ class _LoginScreenState extends State<LoginScreen> {
           children: [
             _brandMark(size: 72, radius: 22, iconSize: 40),
             const SizedBox(height: 24),
-            const Text('聊天室',
-                style: TextStyle(
+            Text(t('appTitle'),
+                style: const TextStyle(
                     fontSize: 40,
                     fontWeight: FontWeight.bold,
                     color: Color(0xFFF1F5F9))),
@@ -464,8 +471,8 @@ class _LoginScreenState extends State<LoginScreen> {
       children: [
         _brandMark(size: 56, radius: 18, iconSize: 32),
         const SizedBox(height: 12),
-        const Text('聊天室',
-            style: TextStyle(
+        Text(t('appTitle'),
+            style: const TextStyle(
                 fontSize: 24,
                 fontWeight: FontWeight.bold,
                 color: Color(0xFFF1F5F9))),
@@ -532,7 +539,7 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
           const SizedBox(height: 4),
           Text(
-            _isLogin ? '登录以继续' : '注册新账号',
+            _isLogin ? t('loginToContinue') : t('registerToCreate'),
             style: const TextStyle(fontSize: 13, color: Color(0xFF94A3B8)),
           ),
           const SizedBox(height: 20),
@@ -587,8 +594,9 @@ class _LoginScreenState extends State<LoginScreen> {
             child: SwitchListTile(
               value: _adminMode,
               contentPadding: EdgeInsets.zero,
-              title: const Text('管理员模式',
-                  style: TextStyle(fontSize: 14, color: Color(0xFFE2E8F0))),
+              title: Text(t('adminMode'),
+                  style:
+                      const TextStyle(fontSize: 14, color: Color(0xFFE2E8F0))),
               subtitle: Text(
                 _isLogin ? '管理员登录需要二次密钥' : '使用密钥注册管理员账号',
                 style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8)),

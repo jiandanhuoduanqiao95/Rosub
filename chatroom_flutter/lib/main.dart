@@ -4,18 +4,30 @@
 /// 全局状态由 AppState(ChangeNotifier 单例)管理。
 
 import 'package:flutter/material.dart';
+import 'package:media_kit/media_kit.dart';
 
 import 'screens/login_screen.dart';
 import 'services/focus_tracker.dart';
 import 'services/ime_bridge.dart';
 import 'services/message_cache.dart';
+import 'services/sticker_store.dart';
 import 'services/taskbar_notifier.dart';
 import 'services/theme_settings.dart';
+
+import 'config.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   // 阶段 L3（P0-4）：初始化本地消息缓存（启动秒开 + 离线可读）；失败不阻塞启动
   MessageCache.init().then((_) {}, onError: (_) {});
+  // R-P8（视频画面黑屏修复）：media_kit 要求在 runApp 前完成初始化
+  // （官方约定）；缺失 libmpv 环境不阻塞启动（查看器回退系统播放器）
+  try {
+    MediaKit.ensureInitialized();
+  } catch (_) {}
+  // R-P11（贴纸添加无反应修复）：生产入口注入贴纸落盘目录
+  // （未 init 时 addSticker/stickerBytes 静默返回 null——根因）
+  StickerStore.instance.init(baseDir: AppConfig.stickerStoreDir);
   runApp(const ChatroomApp());
 }
 

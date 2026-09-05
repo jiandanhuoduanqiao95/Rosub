@@ -17,6 +17,7 @@ import 'package:dart_protocol/protocol.dart';
 import '../config.dart';
 import '../models/chat_models.dart';
 import 'message_cache.dart';
+import 'sticker_store.dart';
 import 'taskbar_notifier.dart';
 import 'theme_settings.dart';
 import 'state_manager.dart';
@@ -76,6 +77,10 @@ class SocketService {
   /// 是否正在接收文件消息体（接收期间抑制心跳 ping，避免服务器回复
   /// pong 插入文件字节流导致 SSL 记录错乱）
   bool _receivingFile = false;
+
+  /// 非 file 消息消息体长度上限（阶段 P 防御）：聊天文本/列表推送 JSON
+  /// 远小于 1MB，超限即判定 TLS 流错位（见 _receiveInitialData/_listenLoop）
+  static const int _maxTextBodyLen = 1 * 1024 * 1024;
 
   /// 发送队列尾（dart:io Socket 写端为单写者：flush/addStream 挂起期间
   /// 其他 add 抛 "StreamSink is bound to a stream"，所有发送必须串行）
@@ -376,6 +381,8 @@ class SocketService {
         _reconnectAttempts = 0;
         // 断线重连：重新绑定账号主题
         ThemeSettings.instance.bindUser(_savedUsername!);
+        // R-P11：表情包清单键同步绑定（"<user>.stickers"，账号间隔离）
+        StickerStore.instance.bindUser(_savedUsername);
         state.setLoggedIn(_savedUsername!,
             _savedAdminSecret != null && _savedAdminSecret!.isNotEmpty);
         _startListening();
@@ -586,6 +593,8 @@ class SocketService {
     final isAdmin = type == 'admin_auth';
     // 阶段 O7（用户反馈 #9）：主题设置与账号绑定（加载该账号主题）
     ThemeSettings.instance.bindUser(username);
+    // R-P11：表情包清单键同步绑定（"<user>.stickers"，账号间隔离）
+    StickerStore.instance.bindUser(username);
     state.setLoggedIn(username, isAdmin);
 
     // 保存凭据以备重连（仅内存）
@@ -644,6 +653,8 @@ class SocketService {
     final isAdmin = type == 'admin_auth';
     // 阶段 O7（用户反馈 #9）：主题设置与账号绑定（加载该账号主题）
     ThemeSettings.instance.bindUser(username);
+    // R-P11：表情包清单键同步绑定（"<user>.stickers"，账号间隔离）
+    StickerStore.instance.bindUser(username);
     state.setLoggedIn(username, isAdmin);
 
     // 保存凭据以备重连（仅内存）
@@ -685,6 +696,15 @@ class SocketService {
 
       final type = header['type'] as String?;
       final bodyLen = (header['length'] as num?)?.toInt() ?? 0;
+      // 阶段 P 防御（流错位检测）：非 file 消息的 body 上限 1MB——
+      // 聊天/列表推送（好友/群组/会话元数据 JSON）远小于此值。读到
+      // 超限 length 说明 TLS 流已错位（服务器并发写竞态等），继续按
+      // 该 length 读会永久挂起且无任何报错。主动断开触发重连自愈。
+      if (type != 'file' && bodyLen > _maxTextBodyLen) {
+        state.log('协议流错位（type=$type length=$bodyLen 异常），判定连接断开');
+        _onConnectionLost();
+        return;
+      }
       final initMsgId = header['message_id'] as String? ?? '';
       final from = header['from'] as String?;
       final isHistory = header['history'] == 'true';
@@ -713,6 +733,7 @@ class SocketService {
             messageId: initMsgId,
             filename: filename,
             groupId: gid,
+            filesize: bodyLen,
             timestamp: msgTimestamp,
             isHistory: false,
             status: msgStatus,
@@ -837,6 +858,7 @@ class SocketService {
                 messageId: messageId,
                 filename: filename,
                 groupId: gid,
+                filesize: body.lengthInBytes,
                 fileData: body,
                 timestamp: msgTimestamp,
                 isHistory: false,
@@ -859,6 +881,8 @@ class SocketService {
               messageId: messageId,
               filename: filename,
               groupId: gid,
+              filesize:
+                  int.tryParse(header['filesize'] as String? ?? '') ?? bodyLen,
               timestamp: msgTimestamp,
               status: 'sent',
             );
@@ -1115,6 +1139,15 @@ class SocketService {
         }
         final type = header['type'] as String?;
         final bodyLen = (header['length'] as num?)?.toInt() ?? 0;
+        // 阶段 P 防御（流错位检测）：与 _receiveInitialData 同规则——
+        // 非 file 消息 body 超 1MB 即判定 TLS 流错位，主动断开重连自愈
+        if (type != 'file' && bodyLen > _maxTextBodyLen) {
+          state.log('协议流错位（type=$type length=$bodyLen 异常），判定连接断开');
+          if (_running && !_intentionalDisconnect) {
+            _onConnectionLost();
+          }
+          break;
+        }
         if (type == 'file' && bodyLen > 0) {
           final filename = header['filename'] as String? ?? 'received_file';
           final target = _prepareReceiveTarget(filename);
@@ -1196,6 +1229,7 @@ class SocketService {
           filename: filename,
           filePath: filePath,
           groupId: gid,
+          filesize: int.tryParse(header['filesize'] as String? ?? ''),
           isHistory: false,
           status: header['status'] as String? ?? 'delivered',
         ),
@@ -1212,6 +1246,7 @@ class SocketService {
       filename: filename,
       filePath: filePath,
       groupId: gid,
+      filesize: int.tryParse(header['filesize'] as String? ?? ''),
       // 阶段 N3b 修复：实时收到的文件按新消息处理（status='sent' →
       // 未读徽标计数 + _notifyIncoming 提示音/闪烁；P-47 已保证重登时
       // 服务端以 delivered 重推，去重后不再计未读）
@@ -1363,6 +1398,7 @@ class SocketService {
           fileData: body,
           filePath: savedPath,
           groupId: gid,
+          filesize: body.lengthInBytes,
           status: 'sent',
         );
         state.addMessage(chatKey, msg);
@@ -1947,11 +1983,15 @@ class SocketService {
           }
           _pendingFileChecks.clear();
         }
-        if (errorText.contains('已在其他地方登录')) {
-          // 重复登录被强制下线（阶段 G1）：不触发重连，通知后回登录页
-          state.log('已在其他地方登录，强制下线');
-          state.showNotice(errorText);
+        if (errorText.contains('已在其他地方登录') ||
+            errorText.contains('您已被其他设备远程下线') ||
+            errorText.contains('您的账户已被管理员删除')) {
+          // 被强制下线（阶段 G1 / N6 / 管理员删除）：不触发自动重连
+          //（R-P7：通知可能因 EOF 竞态丢失导致互踢重连风暴——服务端已
+          // 延迟关闭确保通知送达），通知后回登录页
+          state.log('已被强制下线: $errorText');
           disconnect();
+          state.showNotice(errorText);
         } else {
           state.log('错误: $errorText');
           state.showNotice('错误: $errorText');
@@ -2180,6 +2220,7 @@ class SocketService {
           messageId: messageId,
           filename: filename,
           filePath: filePath,
+          filesize: size,
           status: 'sent',
         ),
       );
@@ -2548,12 +2589,21 @@ class SocketService {
     }
   }
 
-  /// 搜索历史消息（阶段 H5）
+  /// 搜索历史消息（阶段 H5；阶段 P3 扩展复合条件）
   /// [to] 私聊对方用户名（可选，缺省全局搜索）
   /// [groupId] 群组 ID（可选，群聊范围搜索）
+  /// [sender] 发送者过滤（可选，P3）
+  /// [timeFrom]/[timeTo] 时间范围（可选，P3，协议头为 epoch 秒）
   /// [limit] 返回数量上限，默认 50
-  Future<void> searchHistory(String keyword,
-      {String? to, int? groupId, int limit = 50}) async {
+  Future<void> searchHistory(
+    String keyword, {
+    String? to,
+    int? groupId,
+    int limit = 50,
+    String? sender,
+    DateTime? timeFrom,
+    DateTime? timeTo,
+  }) async {
     if (_socket == null) return;
     final extra = <String, String>{
       'keyword': keyword,
@@ -2561,6 +2611,13 @@ class SocketService {
     };
     if (to != null) extra['to'] = to;
     if (groupId != null) extra['group_id'] = groupId.toString();
+    if (sender != null && sender.isNotEmpty) extra['sender'] = sender;
+    if (timeFrom != null) {
+      extra['time_from'] = (timeFrom.millisecondsSinceEpoch ~/ 1000).toString();
+    }
+    if (timeTo != null) {
+      extra['time_to'] = (timeTo.millisecondsSinceEpoch ~/ 1000).toString();
+    }
     try {
       await _sendMessage('search_history', '', extraHeaders: extra);
     } catch (e) {
@@ -3026,6 +3083,7 @@ class SocketService {
           messageId: messageId,
           filename: filename,
           fileData: bytes,
+          filesize: size,
           status: 'sent',
         ),
       );

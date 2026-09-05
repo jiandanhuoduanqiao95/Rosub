@@ -1416,6 +1416,10 @@ class Database:
 
         message_id 记录当前公告对应的历史行（公告管理-删除时判定是否
         同时清除当前公告）。
+
+        2026-09-04 修订（R-P6 用户实测反馈）：清除公告 = 彻底删除——
+        同步删除当前公告的历史行与 offline_messages 副本（原先仅清空
+        横幅字段，历史行残留导致成员端重新拉取时"已清除公告"复活）。
         """
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -1424,12 +1428,37 @@ class Database:
             if not row or row[0] != operator:
                 return False
             if not text:
+                cursor.execute(
+                    "SELECT announcement_message_id FROM groups WHERE id = ?",
+                    (group_id,))
+                prev = cursor.fetchone()
+                prev_id = prev[0] if prev else ""
+                if prev_id:
+                    cursor.execute(
+                        "DELETE FROM message_history WHERE message_id = ? "
+                        "AND message_type = 'group_announcement' AND group_id = ?",
+                        (prev_id, group_id))
+                    self._purge_offline_announcement(cursor, prev_id)
                 message_id = ""
             cursor.execute(
                 "UPDATE groups SET announcement = ?, announcement_message_id = ? "
                 "WHERE id = ?", (text or "", message_id, group_id))
             conn.commit()
             return True
+
+    @staticmethod
+    def _purge_offline_announcement(cursor, message_id):
+        """清除 offline_messages 中某公告的全部副本（R-P6）。
+
+        离线副本的 message_id 形如 "{原始id}_{成员}"（群聊补发惯例）；
+        status='delivered' 的行每次登录都会重推（P-47 设计），若不随
+        公告删除一并清除，已删公告会在成员重登/重连时复活。
+        """
+        cursor.execute(
+            "DELETE FROM offline_messages WHERE message_type = "
+            "'group_announcement' AND (message_id = ? OR "
+            "substr(message_id, 1, length(?)) = ?)",
+            (message_id, message_id, message_id))
 
     def list_group_announcements(self, group_id, limit=50):
         """群公告历史（O1 公告管理-查看）：type=group_announcement 的历史行。
@@ -1480,6 +1509,9 @@ class Database:
             deleted = cursor.rowcount > 0
             if not deleted:
                 return False, False
+            # R-P6：同步清除 offline_messages 副本，防止已删公告经
+            # 离线重推（delivered 行每次登录重发）复活
+            self._purge_offline_announcement(cursor, message_id)
             cleared = False
             cursor.execute(
                 "SELECT announcement_message_id FROM groups WHERE id = ?",
@@ -2351,48 +2383,58 @@ class Database:
             return cursor.fetchall()
 
     def search_message_history(self, user, keyword, with_user=None, group_id=None,
-                               limit=50):
-        """按关键字搜索历史消息（在 content 中做 LIKE 匹配）。
+                               limit=50, sender=None, time_from=None,
+                               time_to=None):
+        """按组合条件搜索历史消息（阶段 P3：关键词/发送者/时间范围组合）。
+
+        keyword 为空时仅按其余条件检索（允许"只按发送者/时间查"）。
 
         范围（互斥，group_id 优先）：
         - group_id：群聊消息（群组内全部历史，与 fetch_history 的 group 分支一致）
         - with_user：与指定用户的私聊（双向）
         - 缺省：该用户参与的全部消息（全局）
+
+        可选过滤（AND 组合，全部参数化查询）：
+        - sender：发送者等值
+        - time_from / time_to：timestamp 下/上界（含边界，'YYYY-MM-DD HH:MM:SS'
+          UTC 字符串——与存储格式一致，字典序比较即时间序比较）
         """
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            like_pattern = f"%{keyword}%"
+            conditions = []
+            args = []
             if group_id is not None:
-                cursor.execute('''
-                    SELECT sender, receiver, message_type, content, message_id,
-                           filename, timestamp, group_id, status
-                    FROM message_history
-                    WHERE group_id = ?
-                      AND CAST(content AS TEXT) LIKE ?
-                    ORDER BY timestamp DESC, id DESC
-                    LIMIT ?
-                ''', (group_id, like_pattern, limit))
+                conditions.append("group_id = ?")
+                args.append(group_id)
             elif with_user is not None:
-                cursor.execute('''
-                    SELECT sender, receiver, message_type, content, message_id,
-                           filename, timestamp, group_id, status
-                    FROM message_history
-                    WHERE ((sender = ? AND receiver = ?)
-                       OR (sender = ? AND receiver = ?))
-                      AND CAST(content AS TEXT) LIKE ?
-                    ORDER BY timestamp DESC, id DESC
-                    LIMIT ?
-                ''', (user, with_user, with_user, user, like_pattern, limit))
+                conditions.append(
+                    "((sender = ? AND receiver = ?)"
+                    " OR (sender = ? AND receiver = ?))")
+                args.extend([user, with_user, with_user, user])
             else:
-                cursor.execute('''
+                conditions.append("(sender = ? OR receiver = ?)")
+                args.extend([user, user])
+            if keyword:
+                conditions.append("CAST(content AS TEXT) LIKE ?")
+                args.append(f"%{keyword}%")
+            if sender:
+                conditions.append("sender = ?")
+                args.append(sender)
+            if time_from is not None:
+                conditions.append("timestamp >= ?")
+                args.append(time_from)
+            if time_to is not None:
+                conditions.append("timestamp <= ?")
+                args.append(time_to)
+            args.append(limit)
+            cursor.execute(f'''
                     SELECT sender, receiver, message_type, content, message_id,
                            filename, timestamp, group_id, status
                     FROM message_history
-                    WHERE (sender = ? OR receiver = ?)
-                      AND CAST(content AS TEXT) LIKE ?
+                    WHERE {" AND ".join(conditions)}
                     ORDER BY timestamp DESC, id DESC
                     LIMIT ?
-                ''', (user, user, like_pattern, limit))
+                ''', args)
             return cursor.fetchall()
 
     def get_message_history_count(self, user, with_user=None, group_id=None):

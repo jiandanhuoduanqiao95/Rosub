@@ -51,6 +51,15 @@ class ChatView extends StatefulWidget {
   // 阶段 N3b（P2-4 扩展）：点击内联图片 → 全屏查看回调
   final ValueChanged<ChatMessage>? onImageTap;
 
+  // 阶段 P1（富媒体消息气泡）：点击视频气泡 → 全屏查看回调
+  final ValueChanged<ChatMessage>? onVideoTap;
+
+  // R-P2（文件预览）：点击文件卡片 → 预览回调
+  final ValueChanged<ChatMessage>? onFileTap;
+
+  // R-P3（收藏表情）：图片消息菜单"添加到表情包"回调（提供即显示入口）
+  final ValueChanged<ChatMessage>? onSaveSticker;
+
   // 阶段 N2（P2-1 聊天记录导出）：工具栏导出按钮回调（非系统会话提供）
   final VoidCallback? onExportChat;
 
@@ -88,6 +97,12 @@ class ChatView extends StatefulWidget {
 
   // 阶段 O4：快捷回复入口（提供即输入行显示"快捷回复"按钮）
   final VoidCallback? onQuickReply;
+
+  // 阶段 P2（表情包体系）：表情包入口（提供即输入行显示"表情包"按钮）
+  final VoidCallback? onShowStickerPicker;
+
+  // 阶段 P3（复合条件消息搜索）：高级搜索入口（搜索栏展开时显示）
+  final VoidCallback? onAdvancedSearch;
 
   // 阶段 O5：定时发送入口（提供即输入行显示"定时发送"按钮）
   final VoidCallback? onScheduleMessage;
@@ -136,6 +151,11 @@ class ChatView extends StatefulWidget {
     this.onQuickReply,
     this.onScheduleMessage,
     this.onShareCard,
+    this.onVideoTap,
+    this.onFileTap,
+    this.onSaveSticker,
+    this.onShowStickerPicker,
+    this.onAdvancedSearch,
   });
 
   static void _noopSearch(String _) {}
@@ -150,6 +170,7 @@ class _ChatViewState extends State<ChatView> {
   final TextEditingController _searchCtrl = TextEditingController();
   bool _isLoadingHistory = false;
   bool _searchInputVisible = false;
+  bool _showScrollToBottom = false;
 
   /// 阶段 K5（P1-2 修复）：引用跳转的目标消息高亮（点击后闪烁约 2s）
   String? _highlightMessageId;
@@ -166,7 +187,8 @@ class _ChatViewState extends State<ChatView> {
       widget.onForwardMessage != null ||
       widget.onAddReaction != null ||
       widget.onDeleteMessage != null ||
-      widget.onDeletePermanently != null;
+      widget.onDeletePermanently != null ||
+      widget.onSaveSticker != null;
 
   /// 提交搜索（空关键字不触发回调）
   void _submitSearch(String keyword) {
@@ -200,6 +222,11 @@ class _ChatViewState extends State<ChatView> {
 
   void _onScroll() {
     if (!_scrollCtrl.hasClients || _isLoadingHistory) return;
+    // 阶段 P5：离开底部（reverse 列表 pixels > 阈值）时显示"回到底部"按钮
+    final away = _scrollCtrl.position.pixels > 240;
+    if (away != _showScrollToBottom) {
+      setState(() => _showScrollToBottom = away);
+    }
     if (!widget.hasMoreHistory(widget.chatKey)) return;
     // reverse: true 的 ListView：
     //   pixels = 0 → 底部（最新消息）
@@ -374,6 +401,13 @@ class _ChatViewState extends State<ChatView> {
                   tooltip: '搜索',
                   onPressed: () => _submitSearch(_searchCtrl.text),
                 ),
+                // 阶段 P3：高级搜索（复合条件：发送者/时间/关键词组合）
+                if (widget.onAdvancedSearch != null)
+                  IconButton(
+                    icon: const Icon(Icons.filter_list_rounded),
+                    tooltip: '高级搜索',
+                    onPressed: widget.onAdvancedSearch,
+                  ),
                 IconButton(
                   icon: const Icon(Icons.close_rounded),
                   tooltip: '关闭搜索',
@@ -386,7 +420,9 @@ class _ChatViewState extends State<ChatView> {
         // 阶段 O1/O2：群公告 / 群置顶横幅（消息区上方）。
         // 2026-08-31 修订（多公告/多置顶并存）：逐条显示；置顶条目点击定位
         // 到原消息（复用引用跳转的滚动+高亮），并提供快捷取消置顶按钮。
-        ..._buildNoticeBanners(context),
+        // R-P6 修订（用户实测溢出）：横幅整体限高 35% 视口并可滚动——
+        // 横幅条数不定，无界铺开会撑爆主 Column（RenderFlex overflowed）。
+        ..._buildNoticeBannersBounded(context),
         Expanded(
           // 阶段 O7（2026-08-30 用户反馈 #8）：聊天背景色应用于消息区域
           child: ColoredBox(
@@ -424,7 +460,9 @@ class _ChatViewState extends State<ChatView> {
                         itemBuilder: (context, index) {
                           final msgIndex = widget.messages.length - 1 - index;
                           final msg = widget.messages[msgIndex];
-                          return _MessageBubble(
+                          // 阶段 P5：新消息（非历史）淡入 + 上移入场；
+                          // 历史消息直接渲染（翻页/搜索结果不闪烁）
+                          Widget bubble = _MessageBubble(
                             message: msg,
                             isSelf: msg.sender == widget.username,
                             onRecall:
@@ -445,6 +483,9 @@ class _ChatViewState extends State<ChatView> {
                             onDeletePermanently: widget.onDeletePermanently,
                             onJumpToMessage: widget.onJumpToMessage,
                             onImageTap: widget.onImageTap,
+                            onVideoTap: widget.onVideoTap,
+                            onFileTap: widget.onFileTap,
+                            onSaveSticker: widget.onSaveSticker,
                             // 阶段 O2：群消息"置顶"入口（群主接线由上层控制）
                             onPinMessage: widget.onPinMessage,
                             pinnedMessageId: widget.pinnedMessageId,
@@ -453,8 +494,63 @@ class _ChatViewState extends State<ChatView> {
                                 _jumpToMessage(msg.replyTo ?? msg.messageId),
                             highlighted: msg.messageId == _highlightMessageId,
                           );
+                          if (msg.isHistory) return bubble;
+                          return TweenAnimationBuilder<double>(
+                            tween: Tween(begin: 0.0, end: 1.0),
+                            duration: const Duration(milliseconds: 250),
+                            curve: Curves.easeOut,
+                            builder: (context, opacity, child) =>
+                                FadeTransition(
+                              opacity: AlwaysStoppedAnimation(opacity),
+                              child: child,
+                            ),
+                            child: TweenAnimationBuilder<Offset>(
+                              tween: Tween(
+                                  begin: const Offset(0, 0.08),
+                                  end: Offset.zero),
+                              duration: const Duration(milliseconds: 250),
+                              curve: Curves.easeOut,
+                              builder: (context, offset, child) =>
+                                  SlideTransition(
+                                position: AlwaysStoppedAnimation(offset),
+                                child: child,
+                              ),
+                              child: bubble,
+                            ),
+                          );
                         },
                       ),
+                      // 阶段 P5：滚动到底部悬浮按钮（离开底部时出现）
+                      if (_showScrollToBottom)
+                        Positioned(
+                          bottom: 16,
+                          right: 16,
+                          child: Material(
+                            color:
+                                Theme.of(context).colorScheme.primaryContainer,
+                            shape: const CircleBorder(),
+                            elevation: 2,
+                            child: IconButton(
+                              tooltip: '回到底部',
+                              icon: Icon(
+                                Icons.arrow_downward_rounded,
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onPrimaryContainer,
+                              ),
+                              onPressed: () async {
+                                await _scrollCtrl.animateTo(
+                                  0,
+                                  duration: const Duration(milliseconds: 300),
+                                  curve: Curves.easeOut,
+                                );
+                                if (mounted) {
+                                  setState(() => _showScrollToBottom = false);
+                                }
+                              },
+                            ),
+                          ),
+                        ),
                       // 加载指示器
                       if (_isLoadingHistory)
                         Positioned(
@@ -514,11 +610,32 @@ class _ChatViewState extends State<ChatView> {
             onQuickReply: widget.onQuickReply,
             onScheduleMessage: widget.onScheduleMessage,
             onShareCard: widget.onShareCard,
+            // 阶段 P2：表情包入口
+            onShowStickerPicker: widget.onShowStickerPicker,
           )
         else
           _ReadOnlyBar(chatTitle: widget.chatTitle),
       ],
     );
+  }
+
+  /// R-P6：横幅限高 + 可滚动包装（防多横幅撑爆主布局）
+  List<Widget> _buildNoticeBannersBounded(BuildContext context) {
+    final banners = _buildNoticeBanners(context);
+    if (banners.isEmpty) return const [];
+    return [
+      ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.35,
+        ),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: banners,
+          ),
+        ),
+      ),
+    ];
   }
 
   /// 阶段 O1/O2（2026-08-31 多公告/多置顶并存）：构建横幅列表。
@@ -597,6 +714,9 @@ class _InputBar extends StatelessWidget {
   final VoidCallback? onScheduleMessage;
   final VoidCallback? onShareCard;
 
+  // ---- 阶段 P2：表情包入口 ----
+  final VoidCallback? onShowStickerPicker;
+
   const _InputBar({
     required this.inputCtrl,
     required this.onSend,
@@ -606,6 +726,7 @@ class _InputBar extends StatelessWidget {
     this.onQuickReply,
     this.onScheduleMessage,
     this.onShareCard,
+    this.onShowStickerPicker,
   });
 
   @override
@@ -625,6 +746,13 @@ class _InputBar extends StatelessWidget {
             tooltip: '发送文件',
             onPressed: onSendFile,
           ),
+          // 阶段 P2：表情包入口
+          if (onShowStickerPicker != null)
+            IconButton(
+              icon: const Icon(Icons.mood_rounded),
+              tooltip: '表情包',
+              onPressed: onShowStickerPicker,
+            ),
           // 阶段 O4：快捷回复（常用语一键发送）
           if (onQuickReply != null)
             IconButton(
@@ -763,6 +891,9 @@ class _MessageBubble extends StatelessWidget {
   final VoidCallback onJump; // 内部跳转（引用块点击）
   final bool highlighted; // 引用跳转高亮（P-30）
   final ValueChanged<ChatMessage>? onImageTap; // 阶段 N3b：点击内联图片全屏
+  final ValueChanged<ChatMessage>? onVideoTap; // 阶段 P1：点击视频气泡全屏
+  final ValueChanged<ChatMessage>? onFileTap; // R-P2：点击文件卡片预览
+  final ValueChanged<ChatMessage>? onSaveSticker; // R-P3：图片添加到表情包
 
   // 阶段 O2：置顶群消息回调（提供且为群聊消息时菜单出现"置顶"入口）
   final ValueChanged<String>? onPinMessage;
@@ -786,6 +917,9 @@ class _MessageBubble extends StatelessWidget {
     required this.onJump,
     this.highlighted = false,
     this.onImageTap,
+    this.onVideoTap,
+    this.onFileTap,
+    this.onSaveSticker,
     this.onPinMessage,
     this.pinnedMessageId,
   });
@@ -811,6 +945,7 @@ class _MessageBubble extends StatelessWidget {
         onDeletePermanently: onDeletePermanently,
         onPinMessage: onPinMessage,
         pinnedMessageId: pinnedMessageId,
+        onSaveSticker: _isInlineImage ? onSaveSticker : null,
       ),
     );
   }
@@ -840,6 +975,96 @@ class _MessageBubble extends StatelessWidget {
     if (name == null) return null;
     final base = name.split(RegExp(r'[/\\]')).last;
     return '${AppConfig.receivedFilesDir}/$base';
+  }
+
+  /// 阶段 P1：是否为可内嵌展示的视频文件消息（未撤回 + 视频扩展名 +
+  /// 传输完成——同 N3b 破图门控）
+  bool get _isInlineVideo {
+    if (message.type != 'file' || message.isRecalled) return false;
+    if (!isVideoFilename(message.filename ?? '')) return false;
+    if (transferFraction != null) return false;
+    return true;
+  }
+
+  /// 阶段 P1：视频气泡（深色卡片 + 播放图标 + 文件名 + 可选大小行）
+  Widget _buildVideoCard(BuildContext context) {
+    final sizeLine =
+        message.filesize != null ? formatFileSize(message.filesize!) : null;
+    return Container(
+      width: 240,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.82),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.play_arrow_rounded, size: 40, color: Colors.white),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  message.filename ?? '',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 13, color: Colors.white),
+                ),
+                if (sizeLine != null)
+                  Text(
+                    sizeLine,
+                    style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.white.withValues(alpha: 0.7)),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 阶段 P1：非媒体文件卡片（通用文件图标 + 原文案 + 可选大小行）
+  Widget _buildFileCard(BuildContext context) {
+    final sizeLine =
+        message.filesize != null ? formatFileSize(message.filesize!) : null;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Icon(Icons.insert_drive_file_rounded, size: 26),
+        const SizedBox(width: 8),
+        Flexible(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                message.content,
+                style: TextStyle(
+                  color: isSelf
+                      ? Colors.white
+                      : Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+              if (sizeLine != null)
+                Text(
+                  sizeLine,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: isSelf
+                        ? Colors.white.withValues(alpha: 0.8)
+                        : Colors.grey[600],
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 
   /// 构建内联缩略图（字节优先 Image.memory，否则 Image.file）
@@ -906,17 +1131,36 @@ class _MessageBubble extends StatelessWidget {
     final imageTap = _isInlineImage && onImageTap != null
         ? () => onImageTap!(message)
         : null;
+    // 阶段 P1：视频文件消息点击打开全屏查看器
+    final videoTap = _isInlineVideo && onVideoTap != null
+        ? () => onVideoTap!(message)
+        : null;
+    // R-P2：非媒体文件卡片点击打开预览（传输中/已撤回不响应）
+    final fileTap = message.type == 'file' &&
+            !_isInlineImage &&
+            !_isInlineVideo &&
+            !isRecalled &&
+            transferFraction == null &&
+            onFileTap != null
+        ? () => onFileTap!(message)
+        : null;
     // 阶段 K5：菜单启用时文字消息改用菜单；否则保持既有直接撤回交互（回归）
     final VoidCallback? menuOrRecall =
         _showMenu ? () => _openMenu(context) : onRecall;
     return MouseRegion(
-      cursor: onRecall == null && !_showMenu && imageTap == null
+      cursor: onRecall == null &&
+              !_showMenu &&
+              imageTap == null &&
+              videoTap == null &&
+              fileTap == null
           ? MouseCursor.defer
           : SystemMouseCursors.click,
       child: GestureDetector(
         onLongPress: menuOrRecall,
         onSecondaryTap: menuOrRecall,
         onTap: imageTap ??
+            videoTap ??
+            fileTap ??
             (retryable ? () => onRetrySend?.call(message.messageId) : null),
         child: Container(
           width: double.infinity,
@@ -1025,15 +1269,22 @@ class _MessageBubble extends StatelessWidget {
                         borderRadius: BorderRadius.circular(8),
                         child: _buildInlineImage(),
                       )
+                    else if (_isInlineVideo)
+                      // 阶段 P1：视频文件消息内嵌视频气泡
+                      _buildVideoCard(context)
+                    else if (message.type == 'file')
+                      // 阶段 P1：非媒体文件卡片（保留原文案，N 系列回归）
+                      _buildFileCard(context)
                     else
                       Text(
-                        message.type == 'system'
-                            ? message.content
-                            : message.content,
+                        message.content,
                         style: TextStyle(
                           color: isSelf
                               ? Theme.of(context).colorScheme.onPrimary
                               : Theme.of(context).colorScheme.onSurfaceVariant,
+                          // R-P10：消息正文的 emoji 兜底到内置 COLRv1 彩色
+                          // 字体（缺省时 fontconfig 可能命中黑白字形）
+                          fontFamilyFallback: const ['NotoColorEmoji'],
                         ),
                       ),
                     // 阶段 I1：发送中/发送失败状态标记（仅自己的文字消息；
@@ -1232,6 +1483,7 @@ class _MessageMenuSheet extends StatefulWidget {
   final ValueChanged<String>? onDeletePermanently; // 永久删除（阶段 N1）
   final ValueChanged<String>? onPinMessage; // 置顶群消息（阶段 O2，群主）
   final String? pinnedMessageId; // 当前已置顶消息 id（文案切换"取消置顶"）
+  final ValueChanged<ChatMessage>? onSaveSticker; // R-P3：添加到表情包（图片消息）
 
   const _MessageMenuSheet({
     required this.message,
@@ -1244,6 +1496,7 @@ class _MessageMenuSheet extends StatefulWidget {
     this.onDeletePermanently,
     this.onPinMessage,
     this.pinnedMessageId,
+    this.onSaveSticker,
   });
 
   @override
@@ -1291,6 +1544,14 @@ class _MessageMenuSheetState extends State<_MessageMenuSheet> {
         title: isPinned ? '取消置顶' : '置顶',
         onTap: () =>
             _invoke(() => widget.onPinMessage!(widget.message.messageId)),
+      ));
+    }
+    // R-P3：图片消息"添加到表情包"（收藏他人表情）
+    if (widget.onSaveSticker != null) {
+      entries.add(_MenuTile(
+        icon: Icons.favorite_border_rounded,
+        title: '添加到表情包',
+        onTap: () => _invoke(() => widget.onSaveSticker!(widget.message)),
       ));
     }
     if (!isFile && widget.onReplyMessage != null) {
@@ -1357,16 +1618,41 @@ class _MessageMenuSheetState extends State<_MessageMenuSheet> {
               if (_showEmojiPalette)
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Wrap(
-                    spacing: 8,
+                  // 阶段 P2：扩展常用表情集（按分类分组；'常用' 完整包含
+                  // 阶段 K 默认盘）
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      for (final emoji in defaultReactionEmojis)
-                        ActionChip(
-                          label: Text(emoji,
-                              style: const TextStyle(
-                                  fontFamily: 'NotoColorEmoji')),
-                          onPressed: () => _invoke(() => widget.onAddReaction!(
-                              widget.message.messageId, emoji)),
+                      for (final (name, emojis) in emojiPickerCategories)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                name,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey[600],
+                                ),
+                              ),
+                              Wrap(
+                                spacing: 8,
+                                children: [
+                                  for (final emoji in emojis)
+                                    ActionChip(
+                                      label: Text(emoji,
+                                          style: const TextStyle(
+                                              fontFamily: 'NotoColorEmoji')),
+                                      onPressed: () => _invoke(() =>
+                                          widget.onAddReaction!(
+                                              widget.message.messageId, emoji)),
+                                    ),
+                                ],
+                              ),
+                            ],
+                          ),
                         ),
                     ],
                   ),

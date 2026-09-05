@@ -58,6 +58,15 @@ class Server:
         # 连接（登录/注册流程中）：guarded_send 活性校验对其放行，
         # 保证"密码错误"等认证前错误响应能送达；finally 中移除。
         self.pending_socks = set()
+        # per-socket 写互斥锁（sock -> Lock）：SSL 对象非线程安全，任何
+        # 并发的两次 sendall 会交错 TLS 记录（对端 BAD_LENGTH/EOF、双向
+        # 流错位）。guarded_send（小消息，单次原子写）与文件长写
+        # （send_file_message / 续传推送，逐块写）经此锁对同一 socket
+        # 串行化——长写期间到来的推送在锁上排队，不丢失不交错。
+        # （阶段 P 缺陷修复：离线 22MB 文件补发裸 sendall 与其他会话
+        # 线程的 presence/聊天推送并发写同一 SSL socket → 登录初始数据
+        # 阶段流错位 → 客户端断线重连死循环。）
+        self.sock_write_locks = {}
 
     def _attach_recent_log_handler(self):
         """把最近日志接入环形缓冲（阶段 M4：状态面板 recent_logs）。"""
@@ -244,6 +253,31 @@ class Server:
                 or any(v is sock for v in self.client_map.values())
                 or any(v is sock for v in self.transfer_sockets.values()))
 
+    def _sock_write_lock(self, sock):
+        """取（或创建）socket 的写互斥锁。锁字典经 client_map_lock 维护。"""
+        with self.client_map_lock:
+            lock = self.sock_write_locks.get(sock)
+            if lock is None:
+                lock = threading.Lock()
+                self.sock_write_locks[sock] = lock
+            return lock
+
+    def with_sock_write(self, sock, write_fn):
+        """在 per-socket 写锁内执行 [write_fn]（任意发送序列）。
+
+        前置引用 socket（P-07：发送期间 fd 不被释放/复用），锁内不获取
+        client_map_lock（等待写锁的线程不得持主锁，防死锁）。返回
+        (acquired, result)：socket 已下线时 acquired=False。
+        write_fn 抛出的异常向上传播（调用方按既有错误路径处理）。
+        """
+        if not self.acquire_send_sock(sock):
+            return False, None
+        try:
+            with self._sock_write_lock(sock):
+                return True, write_fn()
+        finally:
+            self.release_send_sock(sock)
+
     def guarded_send(self, sock, msg_type, content, extra_headers=None, chunk_size=None):
         """向客户端发送消息；若该连接正在接收大文件直传转发，则抑制写入。
 
@@ -251,23 +285,27 @@ class Server:
         （ping/pong、kick 通知、聊天推送等）都会插入文件字节流导致 SSL 记录
         错乱（BAD_LENGTH）与文件损坏。
 
-        P-07 缺陷修复（fd 复用竞态）：活性校验 + sendall 全程持锁——
-        旧实现解锁后 sendall，与关闭操作（踢出/看门狗/线程 finally）竞态：
-        关闭释放 fd → sqlite 打开数据库文件复用该 fd → sendall 把 SSL 字节
-        写进数据库文件（"file is not a database"）→ 后续 presence 广播的
-        is_blocked 抛错被吞 → 对方一直显示在线（重登才恢复）。
+        P-07 缺陷修复（fd 复用竞态）：活性校验 + 引用计数——发送期间
+        close_sock 延迟关闭，杜绝 sendall 落在被 sqlite 复用的 fd 上。
+
+        阶段 P 缺陷修复（并发写交错）：发送经 per-socket 写锁串行——
+        与文件长写（load_offline_data 补发/文件推送/续传，见 with_sock_write
+        调用点）互斥，杜绝两个线程并发 sendall 同一 SSL socket 造成的
+        TLS 记录交错（对端流错位 → 断线重连死循环）。长写期间本调用
+        在写锁上排队等待，消息不丢失（活性失效则跳过）。
         """
-        with self.client_map_lock:
+        def _write():
             if sock in self.active_forward_socks:
                 logging.info(f"抑制发送到转发中的连接: 类型={msg_type}")
-                return
-            if not self._is_live_sock(sock):
-                logging.info(f"跳过发送到已下线连接: 类型={msg_type}")
                 return
             if chunk_size is not None:
                 send_message(sock, msg_type, content, extra_headers=extra_headers, chunk_size=chunk_size)
             else:
                 send_message(sock, msg_type, content, extra_headers=extra_headers)
+
+        acquired, _ = self.with_sock_write(sock, _write)
+        if not acquired:
+            logging.info(f"跳过发送到已下线连接: 类型={msg_type}")
 
     def acquire_send_sock(self, sock):
         """长发送（文件推送/直传转发）前引用 socket。
@@ -292,6 +330,7 @@ class Server:
             self.sock_refs.pop(sock, None)
             if sock in self.sock_pending_close:
                 self.sock_pending_close.discard(sock)
+                self.sock_write_locks.pop(sock, None)
                 try:
                     sock.close()
                 except Exception:
@@ -300,18 +339,19 @@ class Server:
     def close_sock(self, sock):
         """关闭会话 socket（内部取锁）：存在在途发送时延迟到引用清零。
 
-        与 guarded_send 的锁内发送互斥：发送要么先于关闭完成（真实
+        与 guarded_send 的写锁内发送互斥：发送要么先于关闭完成（真实
         socket），要么被活性校验跳过——任何 sendall 都不会落到已关闭
         且被数据库文件复用的 fd 上（P-07 fd 复用竞态修复）。
         """
         with self.client_map_lock:
             if self.sock_refs.get(sock, 0) > 0:
                 self.sock_pending_close.add(sock)
-            else:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
+                return
+            self.sock_write_locks.pop(sock, None)
+            try:
+                sock.close()
+            except Exception:
+                pass
 
     # ============================================================
     # 阶段 L（P0-7）：多会话并存 —— client_map 双键化 (username, device_id)

@@ -430,7 +430,8 @@ class TestAdminResetPassword:
                        message_id=str(uuid.uuid4()))
         except OSError:
             pass
-        h3, d3 = alice.recv(timeout=0.6)
+        # R-P7：延迟关闭（200ms）确保下线通知先送达，EOF 等待窗口相应放宽
+        h3, d3 = alice.recv(timeout=3.0)
         assert h3 is None, "密码重置后旧会话应被强制关闭（连接 EOF）"
 
     def test_reset_password_broadcasts_offline_presence(self, harness):

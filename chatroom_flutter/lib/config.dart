@@ -39,6 +39,10 @@ class AppConfig {
   /// 接收文件保存目录
   static const String receivedFilesDir = 'received_files';
 
+  /// 自定义表情包落盘目录（R-P11：与 received_files 同级的相对目录，
+  /// main() 启动时注入 StickerStore 并确保存在）
+  static const String stickerStoreDir = 'stickers';
+
   /// 文件发送目录（用于测试）
   static const String filesDir = '../files';
 

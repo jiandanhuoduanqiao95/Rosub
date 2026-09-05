@@ -342,7 +342,10 @@ class _RawTextFieldState extends State<RawTextField> {
     final text = widget.controller.text;
     final display = _obscured ? '●' * text.length : text;
     if (display.isEmpty) return 0;
-    final baseStyle = DefaultTextStyle.of(context).style.copyWith(fontSize: 16);
+    final baseStyle = DefaultTextStyle.of(context).style.copyWith(
+          fontSize: 16,
+          fontFamilyFallback: const ['NotoColorEmoji'],
+        );
     final tp = TextPainter(
       text: TextSpan(style: baseStyle, text: display),
       textDirection: TextDirection.ltr,
@@ -776,7 +779,11 @@ class _RawTextFieldState extends State<RawTextField> {
     final high = _clampIndex(_selHigh, display.length);
     final cursor = _clampIndex(_cursorPos, display.length);
     final spans = <InlineSpan>[];
-    final baseStyle = DefaultTextStyle.of(context).style.copyWith(fontSize: 16);
+    // R-P10：emoji 兜底内置 COLRv1 彩色字体（与 _charIndexAtGlobal 测量样式一致）
+    final baseStyle = DefaultTextStyle.of(context).style.copyWith(
+          fontSize: 16,
+          fontFamilyFallback: const ['NotoColorEmoji'],
+        );
 
     // P-68（缺陷修复）：光标在任意位置均渲染细条 '|'（与末尾光标同样式：
     // primary 色 + w100 字重），字符本身正常渲染——不再把光标处字符反色

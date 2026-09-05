@@ -188,8 +188,16 @@ class MessageHandler:
                     if gid is not None:
                         extra_headers["group_id"] = str(gid)
                     if file_path and os.path.exists(file_path):
-                        # 大文件：流式分块发送，不读入内存
-                        send_file_message(ssock, "file", file_path, extra_headers=extra_headers)
+                        # 大文件：流式分块发送，不读入内存。
+                        # 阶段 P 修复：经 per-socket 写锁发送——与其它线程
+                        # 的 guarded_send（presence/聊天推送）串行，杜绝
+                        # 并发 sendall 交错 TLS 记录（登录初始数据阶段
+                        # 流错位 → 客户端断线重连死循环）
+                        self.server.with_sock_write(
+                            ssock,
+                            lambda: send_file_message(
+                                ssock, "file", file_path,
+                                extra_headers=extra_headers))
                     else:
                         self.server.guarded_send(ssock, "file", content, extra_headers=extra_headers)
                 elif msg_type == "group_chat":
@@ -843,13 +851,17 @@ class MessageHandler:
                         for r_sock in receiver_sessions:
                             # P-07 修复：长文件推送前引用接收方 socket——
                             # 推送期间接收方会话被关闭时 fd 不被释放（延迟关闭），
-                            # 杜绝 SSL 字节写进被 sqlite 复用 fd 的竞态
+                            # 杜绝 SSL 字节写进被 sqlite 复用 fd 的竞态。
+                            # 阶段 P 修复：写锁内发送（与 guarded_send 串行）。
                             if history_path and not self.server.acquire_send_sock(r_sock):
                                 continue
                             try:
                                 if history_path:
-                                    send_file_message(r_sock, "file", history_path,
-                                                      extra_headers=file_headers)
+                                    self.server.with_sock_write(
+                                        r_sock,
+                                        lambda r=r_sock: send_file_message(
+                                            r, "file", history_path,
+                                            extra_headers=file_headers))
                                 else:
                                     self.server.guarded_send(r_sock, "file", file_data,
                                                              extra_headers=file_headers)
@@ -987,17 +999,35 @@ class MessageHandler:
                     logging.info(f"历史消息拉取: 用户={username}, 会话={with_user or group_id}, 返回={len(batch)}条")
 
                 elif msg_type == "search_history":
-                    # 消息搜索（阶段 H5）
-                    # header: keyword（必填）/ to（可选私聊限定）/ group_id（可选群聊限定）
-                    #         / limit（可选，默认 50）
+                    # 消息搜索（阶段 H5；阶段 P3 扩展复合条件）
+                    # header: keyword（条件全空时报错）/ to（可选私聊限定）
+                    #         / group_id（可选群聊限定）/ limit（可选，默认 50）
+                    #         / sender（可选发送者过滤）/ time_from / time_to
+                    #         （可选时间范围，epoch 秒）
                     # 服务端返回最新在前（timestamp DESC, id DESC），客户端负责翻转展示顺序
                     keyword = (header.get("keyword") or "").strip()
-                    if not keyword:
+                    with_user = header.get("to")
+                    group_id = header.get("group_id")
+                    sender = header.get("sender") or None
+
+                    def _epoch_to_db_ts(raw):
+                        if raw in (None, ""):
+                            return None
+                        try:
+                            from datetime import datetime, timezone
+                            return datetime.fromtimestamp(
+                                int(raw), tz=timezone.utc).strftime(
+                                "%Y-%m-%d %H:%M:%S")
+                        except (ValueError, TypeError, OSError):
+                            return None
+
+                    time_from = _epoch_to_db_ts(header.get("time_from"))
+                    time_to = _epoch_to_db_ts(header.get("time_to"))
+                    if not keyword and not sender \
+                            and time_from is None and time_to is None:
                         self.server.guarded_send(ssock, "error", "搜索关键字不能为空")
                         logging.warning(f"搜索失败: 用户={username}, 缺少搜索关键字")
                         continue
-                    with_user = header.get("to")
-                    group_id = header.get("group_id")
                     limit = header.get("limit", "50")
                     try:
                         limit_int = int(limit)
@@ -1005,7 +1035,8 @@ class MessageHandler:
                         limit_int = 50
                     rows = self.server.db.search_message_history(
                         username, keyword, with_user=with_user, group_id=group_id,
-                        limit=limit_int)
+                        limit=limit_int, sender=sender,
+                        time_from=time_from, time_to=time_to)
                     batch = []
                     for r in rows:
                         sender, receiver, mtype, content, mid, fname, ts, gid, mstatus = r
@@ -1945,24 +1976,30 @@ class MessageHandler:
                         self.server.guarded_send(ssock, "error", "偏移超出文件大小")
                         logging.warning(f"文件续传失败: 偏移 {resume_offset} 超出 {filesize}")
                         continue
-                    # 从 offset 起推送剩余部分（header 携带 offset 供客户端识别续传）
+                    # 从 offset起推送剩余部分（header 携带 offset 供客户端识别续传）
                     remaining = filesize - resume_offset
                     from protocol import send_message_header_only as _send_hdr
-                    send_message_header_only(
-                        ssock, "file", remaining,
-                        extra_headers={"from": row[0], "filename": row[2] or "",
-                                       "filesize": str(filesize),
-                                       "message_id": message_id,
-                                       "offset": str(resume_offset)})
-                    with open(row[3], "rb") as f:
-                        f.seek(resume_offset)
-                        sent = 0
-                        while sent < remaining:
-                            chunk = f.read(1024 * 1024 * 4)
-                            if not chunk:
-                                break
-                            ssock.sendall(chunk)
-                            sent += len(chunk)
+
+                    def _resume_push(_sock=ssock):
+                        _send_hdr(
+                            _sock, "file", remaining,
+                            extra_headers={"from": row[0], "filename": row[2] or "",
+                                           "filesize": str(filesize),
+                                           "message_id": message_id,
+                                           "offset": str(resume_offset)})
+                        with open(row[3], "rb") as f:
+                            f.seek(resume_offset)
+                            sent = 0
+                            while sent < remaining:
+                                chunk = f.read(1024 * 1024 * 4)
+                                if not chunk:
+                                    break
+                                _sock.sendall(chunk)
+                                sent += len(chunk)
+
+                    # 阶段 P 修复：header+分块 body 全程持 per-socket 写锁——
+                    # 与其它线程的 guarded_send 串行，防 TLS 记录交错
+                    self.server.with_sock_write(ssock, _resume_push)
                     logging.info(f"文件续传完成: 消息ID={message_id}, "
                                  f"offset={resume_offset}, 剩余={remaining} 字节")
 

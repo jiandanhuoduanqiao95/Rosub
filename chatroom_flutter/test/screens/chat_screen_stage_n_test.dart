@@ -21,6 +21,7 @@ import 'package:chatroom_flutter/models/chat_models.dart';
 import 'package:chatroom_flutter/services/socket_service.dart';
 import 'package:chatroom_flutter/services/state_manager.dart';
 import 'package:chatroom_flutter/screens/chat_screen.dart';
+import 'package:chatroom_flutter/widgets/raw_text_field.dart';
 
 class MockSocketService extends Mock implements SocketService {}
 
@@ -51,100 +52,88 @@ void main() {
 
   setUp(resetState);
 
-  group('N3 —— 图片粘贴预览（pendingImagePreview）', () {
-    testWidgets('有预览 → 输入栏上方显示预览条（文件名 + 发送图片/取消）', (tester) async {
-      final socket = MockSocketService();
-      state.setLoggedIn('alice', false);
-      state.setFriends(['bob']);
-      state.selectChat('bob');
-      state.setPendingImagePreview(pngBytes);
-
-      await pumpScreen(tester, socket);
-
-      expect(find.text('pasted_image.png'), findsOneWidget,
-          reason: '预览条显示图片文件名');
-      expect(find.text('发送图片'), findsOneWidget);
-      expect(find.text('取消'), findsOneWidget);
-    });
-
-    testWidgets('点击"发送图片" → sendFileBytes(会话, 字节, 文件名) 并清除预览', (tester) async {
+  group('N3/R-P5 —— 图片粘贴 → 自动进入标注编辑器（编辑后发送/直接发送）', () {
+    testWidgets('粘贴图片 → 自动进入标注编辑器（不再显示预览条）', (tester) async {
       final socket = MockSocketService();
       when(() => socket.sendFileBytes(any(), any(), any()))
           .thenAnswer((_) async => true);
       state.setLoggedIn('alice', false);
       state.setFriends(['bob']);
       state.selectChat('bob');
-      state.setPendingImagePreview(pngBytes);
 
       await pumpScreen(tester, socket);
-      await tester.tap(find.text('发送图片'));
+
+      final input =
+          tester.widget<RawTextField>(find.byType(RawTextField).first);
+      input.onImagePasted?.call(pngBytes);
+      await tester.pumpAndSettle();
+
+      expect(find.text('pasted_image.png'), findsNothing, reason: 'R-P5：预览条移除');
+      expect(find.byKey(const ValueKey('annotation_canvas')), findsOneWidget,
+          reason: '自动进入标注编辑器');
+    });
+
+    testWidgets('不编辑直接"发送" → sendFileBytes（直通原字节）', (tester) async {
+      final socket = MockSocketService();
+      when(() => socket.sendFileBytes(any(), any(), any()))
+          .thenAnswer((_) async => true);
+      state.setLoggedIn('alice', false);
+      state.setFriends(['bob']);
+      state.selectChat('bob');
+
+      await pumpScreen(tester, socket);
+
+      final input =
+          tester.widget<RawTextField>(find.byType(RawTextField).first);
+      input.onImagePasted?.call(pngBytes);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('发送'));
       await tester.pumpAndSettle();
 
       verify(() => socket.sendFileBytes('bob', pngBytes, 'pasted_image.png'))
           .called(1);
-      expect(state.pendingImagePreview, isNull, reason: '发送后清除预览');
     });
 
-    testWidgets('点击"取消" → 清除预览且不发送', (tester) async {
+    testWidgets('"取消" → 不发送', (tester) async {
       final socket = MockSocketService();
       when(() => socket.sendFileBytes(any(), any(), any()))
           .thenAnswer((_) async => true);
       state.setLoggedIn('alice', false);
       state.setFriends(['bob']);
       state.selectChat('bob');
-      state.setPendingImagePreview(pngBytes);
 
       await pumpScreen(tester, socket);
+
+      final input =
+          tester.widget<RawTextField>(find.byType(RawTextField).first);
+      input.onImagePasted?.call(pngBytes);
+      await tester.pumpAndSettle();
       await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();
 
       verifyNever(() => socket.sendFileBytes(any(), any(), any()));
-      expect(state.pendingImagePreview, isNull);
     });
 
-    testWidgets('无当前会话时"发送图片"不可用（不调用 sendFileBytes）', (tester) async {
-      final socket = MockSocketService();
-      when(() => socket.sendFileBytes(any(), any(), any()))
-          .thenAnswer((_) async => true);
-      state.setLoggedIn('alice', false);
-      state.setPendingImagePreview(pngBytes);
-
-      await pumpScreen(tester, socket);
-
-      final sendBtn = tester.widget<FilledButton>(
-        find.ancestor(
-          of: find.text('发送图片'),
-          matching: find.byType(FilledButton),
-        ),
-      );
-      expect(sendBtn.onPressed, isNull, reason: '未选会话时发送按钮禁用');
-      expect(state.pendingImagePreview, isNotNull, reason: '预览保留');
-    });
-
-    testWidgets('系统会话（服务器）不显示图片预览条', (tester) async {
+    testWidgets('系统会话（服务器）粘贴不打开编辑器（只读会话不注入回调）', (tester) async {
       final socket = MockSocketService();
       state.setLoggedIn('alice', false);
       state.selectChat('服务器');
-      state.setPendingImagePreview(pngBytes);
 
       await pumpScreen(tester, socket);
 
-      expect(find.text('pasted_image.png'), findsNothing,
-          reason: '系统会话只读，无图片预览');
+      expect(find.byType(RawTextField), findsNothing,
+          reason: '只读会话无输入框（无粘贴入口）');
+      expect(find.byKey(const ValueKey('annotation_canvas')), findsNothing,
+          reason: '不打开编辑器');
     });
 
-    testWidgets('N3 回归（用户实测崩溃）：应用主题下预览条不抛布局异常', (tester) async {
-      // 真实应用主题（main.dart _buildTheme）的 filledButtonTheme
-      // minimumSize = Size.fromHeight(46)（宽度 infinity）——默认主题
-      // 测试下不崩溃，应用主题下 FilledButton 在 Row 中拿到无界主轴
-      // 约束产生 w=Infinity 抛异常。此处用同款主题复现并锁定修复。
+    testWidgets('N3 回归（用户实测崩溃）：应用主题下编辑器不抛布局异常', (tester) async {
       final socket = MockSocketService();
       when(() => socket.sendFileBytes(any(), any(), any()))
           .thenAnswer((_) async => true);
       state.setLoggedIn('alice', false);
       state.setFriends(['bob']);
       state.selectChat('bob');
-      state.setPendingImagePreview(pngBytes);
 
       await tester.pumpWidget(MaterialApp(
         theme: ThemeData(
@@ -163,12 +152,15 @@ void main() {
         home: ChatScreen(socketService: socket),
         routes: {'/login': (_) => const Scaffold(body: Text('LOGIN'))},
       ));
-      // 无异常即通过；预览条正常渲染
-      expect(tester.takeException(), isNull);
       await tester.pumpAndSettle();
-      expect(tester.takeException(), isNull,
-          reason: '应用主题（FilledButton minWidth=infinity）下预览条不得抛布局异常');
-      expect(find.text('pasted_image.png'), findsOneWidget);
+
+      final input =
+          tester.widget<RawTextField>(find.byType(RawTextField).first);
+      input.onImagePasted?.call(pngBytes);
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull, reason: '应用主题下编辑器不抛布局异常');
+      expect(find.byKey(const ValueKey('annotation_canvas')), findsOneWidget);
     });
   });
 }

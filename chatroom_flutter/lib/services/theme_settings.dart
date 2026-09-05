@@ -14,6 +14,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// 深色模式选项
 enum AppThemeMode { system, light, dark }
 
+/// 界面语言选项（阶段 P6：多语言界面）。
+/// 默认 zh——不做任何设置时全部界面中文（既有渲染零回归）。
+enum AppLocale { zh, en, system }
+
 class ThemeSettings extends ChangeNotifier {
   ThemeSettings._();
 
@@ -26,6 +30,7 @@ class ThemeSettings extends ChangeNotifier {
   static const String _kThemeColor = 'theme_color';
   static const String _kChatBackground = 'chat_background';
   static const String _kThemeMode = 'theme_mode';
+  static const String _kLocale = 'locale';
 
   /// 主题色色板（设置页色板；首个为既有品牌蓝）
   static const List<int> presetColors = [
@@ -48,6 +53,7 @@ class ThemeSettings extends ChangeNotifier {
   int _themeColor = 0xFF2563EB;
   int? _chatBackground;
   AppThemeMode _mode = AppThemeMode.system;
+  AppLocale _locale = AppLocale.zh;
 
   /// 待落盘写队列：setter 只入队（同步、无 zone 依赖），由 _drain 在
   /// **当前调用方 zone** 逐条落盘。直接 await 跨 zone 的写 future 会因
@@ -62,7 +68,6 @@ class ThemeSettings extends ChangeNotifier {
   String _user = '';
 
   String _key(String base) => _user.isEmpty ? base : '$_user.$base';
-
 
   /// 全局文本缩放（0.8 ~ 1.5）
   double get fontScale => _fontScale;
@@ -90,7 +95,8 @@ class ThemeSettings extends ChangeNotifier {
   set chatBackground(int? value) {
     _chatBackground = value;
     notifyListeners();
-    _pendingWrites.add({'key': _key(_kChatBackground), 'chatBackground': value});
+    _pendingWrites
+        .add({'key': _key(_kChatBackground), 'chatBackground': value});
     _drain();
   }
 
@@ -100,6 +106,15 @@ class ThemeSettings extends ChangeNotifier {
     _mode = value;
     notifyListeners();
     _pendingWrites.add({'key': _key(_kThemeMode), 'mode': value});
+    _drain();
+  }
+
+  /// 界面语言（阶段 P6，账号绑定键 `<user>.locale`）
+  AppLocale get locale => _locale;
+  set locale(AppLocale value) {
+    _locale = value;
+    notifyListeners();
+    _pendingWrites.add({'key': _key(_kLocale), 'locale': value});
     _drain();
   }
 
@@ -128,6 +143,10 @@ class ThemeSettings extends ChangeNotifier {
       final mode = w['mode'];
       if (mode != null) {
         await prefs.setString(key, (mode as AppThemeMode).name);
+      }
+      final locale = w['locale'];
+      if (locale != null) {
+        await prefs.setString(key, (locale as AppLocale).name);
       }
     }
   }
@@ -165,6 +184,7 @@ class ThemeSettings extends ChangeNotifier {
     _themeColor = 0xFF2563EB;
     _chatBackground = null;
     _mode = AppThemeMode.system;
+    _locale = AppLocale.zh;
     final prefs = await SharedPreferences.getInstance();
     final scale = _readDouble(prefs, _key(_kFontScale));
     if (scale != null) {
@@ -181,6 +201,15 @@ class ThemeSettings extends ChangeNotifier {
         _mode = AppThemeMode.dark;
       default:
         _mode = AppThemeMode.system;
+    }
+    final locale = _readString(prefs, _key(_kLocale));
+    switch (locale) {
+      case 'en':
+        _locale = AppLocale.en;
+      case 'system':
+        _locale = AppLocale.system;
+      default:
+        _locale = AppLocale.zh;
     }
     notifyListeners();
   }

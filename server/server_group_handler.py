@@ -473,13 +473,17 @@ class GroupHandler:
                 for u_sock in self.server.sessions_of(username):
                     # P-07 修复：长文件推送前引用接收方 socket——
                     # 推送期间接收方会话被关闭时 fd 不被释放（延迟关闭），
-                    # 杜绝 SSL 字节写进被 sqlite 复用 fd 的竞态
+                    # 杜绝 SSL 字节写进被 sqlite 复用 fd 的竞态。
+                    # 阶段 P 修复：写锁内发送（与 guarded_send 串行）。
                     if history_path and not self.server.acquire_send_sock(u_sock):
                         continue
                     try:
                         if history_path:
-                            send_file_message(u_sock, "file", history_path,
-                                              extra_headers=file_headers)
+                            self.server.with_sock_write(
+                                u_sock,
+                                lambda s=u_sock: send_file_message(
+                                    s, "file", history_path,
+                                    extra_headers=file_headers))
                         else:
                             self.server.guarded_send(u_sock, "file", file_data,
                                                      extra_headers=file_headers)

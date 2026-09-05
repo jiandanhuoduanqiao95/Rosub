@@ -5,15 +5,19 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../models/chat_models.dart';
+import '../l10n/app_strings.dart';
 import 'raw_text_field.dart';
+import '../services/doc_preview.dart';
 import '../services/quick_reply_store.dart';
 import '../services/socket_service.dart';
+import '../services/sticker_store.dart';
 import '../services/state_manager.dart';
 import '../services/taskbar_notifier.dart';
 import '../services/theme_settings.dart';
@@ -1723,6 +1727,30 @@ void showSettingsDialog(BuildContext context) {
                               ),
                             ],
                           ),
+                          // 阶段 P6（多语言界面）：语言选择
+                          Row(
+                            children: [
+                              sectionLabel(t('language')),
+                              Expanded(
+                                child: DropdownButton<AppLocale>(
+                                  value: settings.locale,
+                                  items: const [
+                                    DropdownMenuItem(
+                                        value: AppLocale.zh, child: Text('中文')),
+                                    DropdownMenuItem(
+                                        value: AppLocale.en,
+                                        child: Text('English')),
+                                    DropdownMenuItem(
+                                        value: AppLocale.system,
+                                        child: Text('跟随系统')),
+                                  ],
+                                  onChanged: (v) {
+                                    if (v != null) settings.locale = v;
+                                  },
+                                ),
+                              ),
+                            ],
+                          ),
                         ],
                       );
                     },
@@ -3036,4 +3064,642 @@ void showScheduledManageDialog(
       ),
     ),
   );
+}
+
+// ============================================================
+// 阶段 P —— 表情包面板 / 高级搜索对话框
+// ============================================================
+
+/// R-P3（表情包体系重构，微信式双模块面板）：
+///   - 表情模块：内置表情（emojiPickerCategories，微信规模），点击插入输入框
+///   - 表情包模块："我的表情包"扁平网格（无包名）——首格"添加表情包"
+///     （多选图片，恒可用），点击贴纸即发送，长按贴纸删除
+/// 收藏他人表情：图片消息长按菜单"添加到表情包"（ChatView onSaveSticker）。
+void showStickerPickerDialog(
+  BuildContext context, {
+  required ValueChanged<Sticker> onPick,
+  required ValueChanged<String> onEmojiPicked,
+}) {
+  showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (ctx) => _StickerPickerPanel(
+      onPick: onPick,
+      onEmojiPicked: onEmojiPicked,
+    ),
+  );
+}
+
+class _StickerPickerPanel extends StatefulWidget {
+  final ValueChanged<Sticker> onPick;
+  final ValueChanged<String> onEmojiPicked;
+
+  const _StickerPickerPanel(
+      {required this.onPick, required this.onEmojiPicked});
+
+  @override
+  State<_StickerPickerPanel> createState() => _StickerPickerPanelState();
+}
+
+class _StickerPickerPanelState extends State<_StickerPickerPanel> {
+  static const _panelHeight = 340.0;
+  int _tab = 0; // 0 = 表情；1 = 表情包
+  List<Sticker> _stickers = const [];
+  var _emojiCategory = 0;
+  var _loaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _reload();
+  }
+
+  Future<void> _reload() async {
+    final list = await StickerStore.instance.loadStickers();
+    if (mounted) setState(() => _stickers = list);
+  }
+
+  Future<void> _addStickersFromPicker() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      allowMultiple: true,
+      withData: true,
+    );
+    if (result == null) return;
+    var added = 0;
+    for (final file in result.files) {
+      Uint8List? bytes;
+      if (file.bytes != null) {
+        bytes = file.bytes;
+      } else if (file.path != null) {
+        bytes = await File(file.path!).readAsBytes();
+      }
+      if (bytes != null &&
+          isSupportedImage(bytes) &&
+          await StickerStore.instance.addSticker(bytes) != null) {
+        added++;
+      }
+    }
+    await _reload();
+    if (!mounted) return;
+    if (added > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text('已添加 $added 张表情'),
+            duration: const Duration(seconds: 2)),
+      );
+    } else {
+      // R-P11：不再静默失败——魔数校验未通过/落盘失败给明确反馈
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('添加失败：仅支持 PNG/JPG/GIF 图片'),
+            duration: Duration(seconds: 2)),
+      );
+    }
+  }
+
+  Future<void> _confirmDelete(Sticker sticker) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: const Text('删除表情'),
+        content: const Text('确定删除这张表情吗？'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dctx, false),
+              child: const Text('取消')),
+          FilledButton(
+            style: FilledButton.styleFrom(minimumSize: const Size(0, 40)),
+            onPressed: () => Navigator.pop(dctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) {
+      await StickerStore.instance.removeSticker(sticker.id);
+      await _reload();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_loaded) {
+      _loaded = true;
+      _reload();
+    }
+    return Container(
+      height: _panelHeight,
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerLow,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      child: Column(
+        children: [
+          Expanded(
+            child: _tab == 0 ? _buildEmojiGrid() : _buildStickerGrid(),
+          ),
+          _buildTabBar(),
+        ],
+      ),
+    );
+  }
+
+  // ---- 表情模块（内置，点击插入输入框）----
+
+  Widget _buildEmojiGrid() {
+    final (name, emojis) = emojiPickerCategories[_emojiCategory];
+    return Column(
+      children: [
+        Expanded(
+          child: GridView.builder(
+            padding: const EdgeInsets.all(10),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 10,
+              childAspectRatio: 1,
+            ),
+            itemCount: emojis.length,
+            itemBuilder: (ctx, i) => InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () => widget.onEmojiPicked(emojis[i]),
+              child: Center(
+                // R-P10：指定 COLRv1 彩色字体——缺省时落到系统兜底字体
+                // （DejaVu/Noto Symbols 等），部分表情渲染为黑白字形
+                child: Text(emojis[i],
+                    style: const TextStyle(
+                        fontSize: 24, fontFamily: 'NotoColorEmoji')),
+              ),
+            ),
+          ),
+        ),
+        // 分类切换条
+        SizedBox(
+          height: 40,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            children: [
+              for (var i = 0; i < emojiPickerCategories.length; i++)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: ChoiceChip(
+                    label: Text(emojiPickerCategories[i].$1,
+                        style: const TextStyle(fontSize: 12)),
+                    selected: _emojiCategory == i,
+                    onSelected: (_) => setState(() => _emojiCategory = i),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ---- 表情包模块（我的表情，扁平网格）----
+
+  Widget _buildStickerGrid() {
+    return GridView.builder(
+      padding: const EdgeInsets.all(10),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 5,
+        childAspectRatio: 1,
+        mainAxisSpacing: 8,
+        crossAxisSpacing: 8,
+      ),
+      itemCount: _stickers.length + 1,
+      itemBuilder: (ctx, i) {
+        if (i == 0) {
+          // 添加表情包（R-P3：恒可用，多选图片；空态不再一片空白）
+          return InkWell(
+            key: const ValueKey('sticker_add_tile'),
+            borderRadius: BorderRadius.circular(8),
+            onTap: _addStickersFromPicker,
+            child: Container(
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.grey, width: 1),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.add_rounded,
+                      size: 26, color: Theme.of(context).colorScheme.primary),
+                  const SizedBox(height: 2),
+                  const Text('添加表情包',
+                      style: TextStyle(fontSize: 10, color: Colors.grey)),
+                ],
+              ),
+            ),
+          );
+        }
+        final sticker = _stickers[i - 1];
+        return GestureDetector(
+          onLongPress: () => _confirmDelete(sticker),
+          onTap: () {
+            Navigator.pop(context);
+            widget.onPick(sticker);
+          },
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.memory(
+              StickerStore.instance.stickerBytes(sticker.id) ?? Uint8List(0),
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => Container(
+                color: Colors.grey.shade200,
+                child: const Icon(Icons.broken_image_outlined),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildTabBar() {
+    return Container(
+      decoration: BoxDecoration(
+        border: Border(
+            top: BorderSide(
+                color: Theme.of(context).colorScheme.outlineVariant)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: InkWell(
+              onTap: () => setState(() => _tab = 0),
+              child: SizedBox(
+                height: 44,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.emoji_emotions_outlined,
+                        size: 20,
+                        color: _tab == 0
+                            ? Theme.of(context).colorScheme.primary
+                            : Colors.grey),
+                    const SizedBox(width: 6),
+                    Text('表情',
+                        style: TextStyle(
+                            fontSize: 13,
+                            color: _tab == 0
+                                ? Theme.of(context).colorScheme.primary
+                                : Colors.grey)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Expanded(
+            child: InkWell(
+              onTap: () => setState(() => _tab = 1),
+              child: SizedBox(
+                height: 44,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.favorite_rounded,
+                        size: 20,
+                        color: _tab == 1
+                            ? Theme.of(context).colorScheme.primary
+                            : Colors.grey),
+                    const SizedBox(width: 6),
+                    Text('表情包',
+                        style: TextStyle(
+                            fontSize: 13,
+                            color: _tab == 1
+                                ? Theme.of(context).colorScheme.primary
+                                : Colors.grey)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 阶段 P3（复合条件消息搜索）：高级搜索对话框——关键词/发送者 +
+/// 起始日期/结束日期（R-P4 修订：日期下拉选择，参考定时消息的日期
+/// 选择形式，不再手输）。全空不触发；确认回调 onSearch(MessageSearchFilter)。
+void showAdvancedSearchDialog(
+  BuildContext context, {
+  required ValueChanged<MessageSearchFilter> onSearch,
+}) {
+  final keywordCtrl = TextEditingController();
+  final senderCtrl = TextEditingController();
+  var listening = false;
+  DateTime? from;
+  DateTime? to;
+
+  showDialog(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setState) {
+        // RawTextField 输入只写 controller：挂监听驱动对话框重建
+        // （按钮可用态随输入刷新）
+        if (!listening) {
+          listening = true;
+          for (final c in [keywordCtrl, senderCtrl]) {
+            c.addListener(() => setState(() {}));
+          }
+        }
+        final toEnd = to == null
+            ? null
+            : DateTime(to!.year, to!.month, to!.day, 23, 59, 59);
+        final filter = MessageSearchFilter(
+          keyword: keywordCtrl.text,
+          sender: senderCtrl.text,
+          from: from,
+          to: toEnd,
+        );
+        final canSearch = filter.hasFilters;
+        return AlertDialog(
+          title: const Text('高级搜索'),
+          content: SizedBox(
+            width: 360,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                RawTextField(
+                  key: const ValueKey('adv_search_keyword'),
+                  controller: keywordCtrl,
+                  hintText: '关键词（可选）',
+                  showChineseInput: true,
+                ),
+                const SizedBox(height: 8),
+                RawTextField(
+                  key: const ValueKey('adv_search_sender'),
+                  controller: senderCtrl,
+                  hintText: '发送者（可选）',
+                  showChineseInput: true,
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _searchDayDropdown(
+                        key: const ValueKey('adv_search_from'),
+                        value: from,
+                        hint: '起始日期',
+                        onChanged: (v) => setState(() => from = v),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _searchDayDropdown(
+                        key: const ValueKey('adv_search_to'),
+                        value: to,
+                        hint: '结束日期',
+                        onChanged: (v) => setState(() => to = v),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(minimumSize: const Size(0, 40)),
+              onPressed: canSearch
+                  ? () {
+                      Navigator.pop(ctx);
+                      onSearch(filter);
+                    }
+                  : null,
+              child: const Text('搜索'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
+
+/// R-P4：搜索日期下拉（近 30 天 + 不限；样式对齐定时消息的日期选择）
+Widget _searchDayDropdown({
+  required Key key,
+  required DateTime? value,
+  required String hint,
+  required ValueChanged<DateTime?> onChanged,
+}) {
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final days = [
+    for (var i = 0; i < 30; i++) today.subtract(Duration(days: i)),
+  ];
+  String label(DateTime d) {
+    final diff = today.difference(DateTime(d.year, d.month, d.day)).inDays;
+    if (diff == 0) return '今天';
+    if (diff == 1) return '昨天';
+    return '${d.month}-${d.day}';
+  }
+
+  return SizedBox(
+    key: key,
+    child: DropdownButton<DateTime?>(
+      value: value,
+      isExpanded: true,
+      hint: Text(hint, style: const TextStyle(fontSize: 13)),
+      items: [
+        const DropdownMenuItem<DateTime?>(
+            value: null, child: Text('不限', style: TextStyle(fontSize: 13))),
+        for (final d in days)
+          DropdownMenuItem<DateTime?>(
+              value: d,
+              child: Text(label(d), style: const TextStyle(fontSize: 13))),
+      ],
+      onChanged: onChanged,
+    ),
+  );
+}
+
+/// R-P2（文件预览，参考微信）：文件卡片点击 → 预览。
+/// 文本类文件（≤1MB）与 Office/PDF（R-P9：docx/xlsx/pptx/pdf，纯 Dart
+/// 文本提取，尽力而为）内嵌预览；其余显示类型图标 + 基本信息；
+/// 提供"打开文件/打开所在目录"（系统默认程序，xdg-open）。
+void showFilePreviewDialog(
+  BuildContext context, {
+  required String filename,
+  String? path,
+  int? filesize,
+  String? sender,
+  DateTime? timestamp,
+}) {
+  final exists = path != null && File(path).existsSync();
+  final sizeLine = filesize != null ? formatFileSize(filesize) : null;
+  final textPreview = _readTextPreview(path, filesize) ??
+      _readDocumentPreview(path, filesize);
+
+  showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Row(
+        children: [
+          const Icon(Icons.insert_drive_file_rounded),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              filename,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text('大小：${sizeLine ?? '未知'}',
+                    style: const TextStyle(fontSize: 12)),
+                const SizedBox(width: 16),
+                if (sender != null)
+                  Text('来自：$sender', style: const TextStyle(fontSize: 12)),
+              ],
+            ),
+            const SizedBox(height: 10),
+            if (textPreview != null)
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 260),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: SingleChildScrollView(
+                    child: Text(
+                      textPreview,
+                      style: const TextStyle(
+                          fontSize: 12, fontFamily: 'monospace'),
+                    ),
+                  ),
+                ),
+              )
+            else
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 18),
+                child: Center(
+                  child: Column(
+                    children: [
+                      Icon(_fileIconFor(filename),
+                          size: 56, color: Colors.grey),
+                      const SizedBox(height: 8),
+                      Text(
+                        exists ? '该类型暂不支持内嵌预览' : '文件尚未下载到本地',
+                        style:
+                            const TextStyle(fontSize: 12, color: Colors.grey),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        if (exists)
+          TextButton.icon(
+            onPressed: () => Process.run('xdg-open', [File(path).parent.path]),
+            icon: const Icon(Icons.folder_open_rounded, size: 18),
+            label: const Text('打开所在目录'),
+          ),
+        if (exists)
+          FilledButton(
+            style: FilledButton.styleFrom(minimumSize: const Size(0, 40)),
+            onPressed: () => Process.run('xdg-open', [path]),
+            child: const Text('打开文件'),
+          ),
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('关闭'),
+        ),
+      ],
+    ),
+  );
+}
+
+/// 文本类扩展名（≤1MB 时内嵌预览）
+const List<String> _textPreviewExtensions = [
+  '.txt',
+  '.md',
+  '.log',
+  '.json',
+  '.csv',
+  '.yaml',
+  '.yml',
+  '.xml',
+  '.ini',
+  '.cfg',
+  '.py',
+  '.dart',
+  '.js',
+  '.ts',
+  '.html',
+  '.css',
+  '.sql',
+];
+
+String? _readTextPreview(String? path, int? filesize) {
+  if (path == null) return null;
+  final lower = path.toLowerCase();
+  if (!_textPreviewExtensions.any(lower.endsWith)) return null;
+  final file = File(path);
+  if (!file.existsSync()) return null;
+  if (filesize != null && filesize > 1024 * 1024) return null;
+  try {
+    final content = file.readAsStringSync();
+    final clipped = content.length > 20000
+        ? '${content.substring(0, 20000)}\n...（已截断）'
+        : content;
+    return clipped;
+  } catch (_) {
+    return null;
+  }
+}
+
+/// R-P9：Office/PDF 内嵌预览（纯 Dart 文本提取，尽力而为）。
+/// 50MB 上限防大文件整包读入内存；提取失败回退"打开文件"信息页。
+String? _readDocumentPreview(String? path, int? filesize) {
+  if (path == null) return null;
+  final lower = path.toLowerCase();
+  const extensions = ['.docx', '.xlsx', '.pptx', '.pdf'];
+  if (!extensions.any(lower.endsWith)) return null;
+  if (filesize != null && filesize > 50 * 1024 * 1024) return null;
+  final file = File(path);
+  if (!file.existsSync()) return null;
+  return extractDocumentPreview(path);
+}
+
+IconData _fileIconFor(String filename) {
+  final lower = filename.toLowerCase();
+  if (lower.endsWith('.pdf')) return Icons.picture_as_pdf_rounded;
+  if (['.zip', '.rar', '.7z', '.tar', '.gz'].any(lower.endsWith)) {
+    return Icons.folder_zip_rounded;
+  }
+  if (['.doc', '.docx'].any(lower.endsWith)) {
+    return Icons.description_rounded;
+  }
+  if (['.xls', '.xlsx', '.csv'].any(lower.endsWith)) {
+    return Icons.table_chart_rounded;
+  }
+  if (['.ppt', '.pptx'].any(lower.endsWith)) return Icons.slideshow_rounded;
+  if (['.mp3', '.wav', '.flac', '.m4a'].any(lower.endsWith)) {
+    return Icons.audio_file_rounded;
+  }
+  return Icons.insert_drive_file_rounded;
 }
