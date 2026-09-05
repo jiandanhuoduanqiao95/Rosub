@@ -8,14 +8,22 @@
 SSL/*.crt
 SSL/*.key
 SSL/*.pem
+SSL/*.bak
 
 # 数据库文件（含运行时生成的备份）
 users.db
 *.db
+*.sqlite
+*.sqlite3
 
 # Python 缓存
 __pycache__/
-*.pyc
+*.py[cod]
+
+# 编译产物
+*.so
+*.dll
+*.exe
 
 # 运行时文件存储（待处理/历史文件、收到的文件）
 file_store/
@@ -27,8 +35,12 @@ chatroom_flutter/stickers/
 
 # 构建产物与 IDE 配置
 .dart_tool/
+.packages
+build/
 .idea/
 .zcode/
 
 # 杂项临时文件
 project_files.txt
+*_tmp.dart
+*_tmp.py
