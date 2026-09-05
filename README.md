@@ -42,6 +42,8 @@ python client/gui/gui_main.py
 ```
 
 > **管理员密钥**: 不要把真实密钥写入任何被 git 跟踪的文件。仅通过 `export CHATROOM_ADMIN_SECRET` 环境变量传入。`config.yaml` 中 `security.admin_secret` 留空即可。
+>
+> **部署上线**：正式/试用部署（N100 小主机、systemd、公网端口转发与安全加固、备份恢复演练、升级回滚、试用方案）见《部署指南.md》。
 
 ---
 
@@ -239,7 +241,7 @@ chatroom/
     ↓
 阶段 P：体验升级              ← ✅ 已完成（富媒体气泡/表情包双模块/复合搜索/图片发送前可选标注/入场动效+滚底/中英i18n；二轮实测修订 R-P8~R-P12）
     ↓
-阶段 Q：多端适配              ← 📋 规划中（Windows/Android/iOS）
+阶段 Q：多端适配              ← 📋 规划定稿 2026-09-06（移动优先：Q0 地基 → Android → Windows → macOS → iPadOS → 鸿蒙验证，§13.9）
     ↓
 阶段 R：音视频与语音          ← 📋 规划中（RTC/语音消息+ASR）
 ```
@@ -255,7 +257,7 @@ chatroom/
 
 | 功能 | 说明 | 状态 |
 |------|------|------|
-| Flutter Windows / Android 适配 | 同一代码库编译三端（前置依赖：阶段 L 多会话模型） | 📋 阶段 Q |
+| Flutter 多端适配 | Android（三星 OneUI/vivo OriginOS6/鸿蒙非纯血 APK 侧载）/ Windows / macOS / iPadOS（TestFlight）多端编译（前置依赖阶段 L 已落地；规划定稿 2026-09-06 见开发文档 §13.9） | 📋 阶段 Q |
 | 多语言界面 | Flutter i18n（中/英/跟随系统） | ✅ 阶段 P6 完成 |
 | 并发优化 | 数据库连接池、细化锁粒度 | 🕐 长期（10 人规模非必需） |
 | 端到端加密 | ⏸ 降级 P3：已有 TLS + bcrypt，≤10 人自部署规模不推荐（见开发文档 §13.7） | 🕐 长期 |
