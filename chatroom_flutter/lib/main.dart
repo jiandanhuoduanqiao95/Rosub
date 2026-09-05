@@ -18,6 +18,11 @@ import 'config.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // R-P27（用户复测"表情黑白"轮换出现）：构建标识打印到启动日志——
+  // 多客户端排查"谁在跑旧构建"时与登录页页脚互为印证；旧构建同时呈现
+  // 黑白表情 + media_kit non-platform thread ERROR
+  // ignore: avoid_print
+  print('[chatroom] build: ${AppConfig.buildStamp}');
   // 阶段 L3（P0-4）：初始化本地消息缓存（启动秒开 + 离线可读）；失败不阻塞启动
   MessageCache.init().then((_) {}, onError: (_) {});
   // R-P8（视频画面黑屏修复）：media_kit 要求在 runApp 前完成初始化

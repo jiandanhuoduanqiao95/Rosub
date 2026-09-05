@@ -1373,57 +1373,70 @@ const List<(String, List<String>)> emojiPickerCategories = [
   ),
 ];
 
+/// 模糊日期选择（R-P28 修订：托盘式年/月/日滚轮，单入口）。
+/// 三档精度：仅年（month/day 皆 null）/ 年月（day 为 null）/ 年月日。
+/// 每档展开为本地时间范围（from 当档起点零点 / to 当档终点 23:59:59），
+/// 交由服务端 time_from/time_to 做范围搜索。
+class SearchDateSelection {
+  final int year;
+  final int? month;
+  final int? day;
+
+  const SearchDateSelection({required this.year, this.month, this.day});
+
+  DateTime get from =>
+      month == null ? DateTime(year) : DateTime(year, month!, day ?? 1);
+
+  DateTime get to {
+    if (month == null) return DateTime(year, 12, 31, 23, 59, 59);
+    if (day == null) {
+      final lastDay = DateTime(year, month! + 1, 0).day;
+      return DateTime(year, month!, lastDay, 23, 59, 59);
+    }
+    return DateTime(year, month!, day!, 23, 59, 59);
+  }
+
+  String get label => month == null
+      ? '$year年'
+      : (day == null ? '$year年$month月' : '$year年$month月$day日');
+}
+
 /// 复合条件消息搜索过滤（阶段 P3：按发送者/时间/关键词/会话组合检索）。
 /// 会话范围由既有 to / group_id 头承载，不纳入本模型。
+/// R-P28 修订：senders 多发送者（私聊双方/群成员单选多选，协议头逗号
+/// 分隔——用户名字符集不含逗号）；date 模糊日期（单入口托盘，见
+/// [SearchDateSelection]）。
 class MessageSearchFilter {
   final String keyword;
-  final String sender;
-  final DateTime? from;
-  final DateTime? to;
+  final List<String> senders;
+  final SearchDateSelection? date;
 
   const MessageSearchFilter({
     this.keyword = '',
-    this.sender = '',
-    this.from,
-    this.to,
+    this.senders = const [],
+    this.date,
   });
+
+  DateTime? get from => date?.from;
+  DateTime? get to => date?.to;
 
   /// 是否携带任一过滤条件（全空时不触发搜索）
   bool get hasFilters =>
-      keyword.trim().isNotEmpty ||
-      sender.trim().isNotEmpty ||
-      from != null ||
-      to != null;
+      keyword.trim().isNotEmpty || senders.isNotEmpty || date != null;
 
-  /// 协议头契约：keyword 恒在（trim）；sender 非空才带 'sender'；
-  /// from/to 非空才带 'time_from'/'time_to'（epoch 秒，与 O5 schedule_at 口径一致）
+  /// 协议头契约：keyword 恒在（trim）；senders 非空才带 'sender'
+  /// （逗号分隔）；date 非空才带 'time_from'/'time_to'（epoch 秒，
+  /// 与 O5 schedule_at 口径一致）
   Map<String, String> toHeaders() {
     return {
       'keyword': keyword.trim(),
-      if (sender.trim().isNotEmpty) 'sender': sender.trim(),
-      if (from != null)
+      if (senders.isNotEmpty) 'sender': senders.join(','),
+      if (date != null)
         'time_from': (from!.millisecondsSinceEpoch ~/ 1000).toString(),
-      if (to != null)
+      if (date != null)
         'time_to': (to!.millisecondsSinceEpoch ~/ 1000).toString(),
     };
   }
-}
-
-/// 解析 'YYYY-MM-DD' 日期输入 → 本地当日零点（阶段 P3 高级搜索）。
-/// 空白/非法/非 ISO 格式 → null。
-DateTime? parseSearchDay(String text) {
-  final trimmed = text.trim();
-  if (trimmed.isEmpty) return null;
-  final match = RegExp(r'^(\d{4})-(\d{1,2})-(\d{1,2})').firstMatch(trimmed);
-  if (match == null) return null;
-  final y = int.parse(match.group(1)!);
-  final m = int.parse(match.group(2)!);
-  final d = int.parse(match.group(3)!);
-  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
-  final day = DateTime(y, m, d);
-  // 回验防进位滚动（如 2 月 30 日 → 3 月）
-  if (day.month != m || day.day != d) return null;
-  return day;
 }
 
 /// 待处理的文件请求

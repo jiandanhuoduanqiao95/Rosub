@@ -501,6 +501,63 @@ class TestMessageHistoryEdgeCases:
         assert msgs[0][3] == file_data
         assert len(msgs[0][3]) == len(file_data)
 
+    def test_search_sender_single_string(self, db):
+        """
+        【MH-21】sender 为单个用户名字符串 → 等值过滤（旧客户端兼容）
+        """
+        _create_users(db, "alice", "bob")
+        _save_chat_msg(db, "alice", "bob", "from alice")
+        _save_chat_msg(db, "bob", "alice", "from bob")
+
+        results = db.search_message_history(
+            user="alice", keyword="", sender="bob")
+        assert len(results) == 1
+        assert results[0][0] == "bob"
+
+    def test_search_sender_list_in_match(self, db):
+        """
+        【MH-22】sender 为列表 → IN 多发送者匹配（R-P28 选项式多选）
+
+        场景：alice/bob/carol 各有消息，sender=["alice","bob"] 只返回
+        两人发的消息（排除 carol），无关键词时按发送者单独检索。
+        """
+        _create_users(db, "alice", "bob", "carol")
+        _save_chat_msg(db, "alice", "bob", "a1")
+        _save_chat_msg(db, "bob", "alice", "b1")
+        _save_chat_msg(db, "carol", "alice", "c1")
+
+        results = db.search_message_history(
+            user="alice", keyword="", sender=["alice", "bob"])
+        contents = {m[3].decode("utf-8") for m in results}
+        assert contents == {"a1", "b1"}
+        assert all(m[0] in ("alice", "bob") for m in results)
+
+    def test_search_sender_list_with_keyword_and_scope(self, db):
+        """
+        【MH-23】sender 列表与关键词/会话范围 AND 组合
+        """
+        _create_users(db, "alice", "bob")
+        _save_chat_msg(db, "alice", "bob", "Python from alice")
+        _save_chat_msg(db, "bob", "alice", "Python from bob")
+        _save_chat_msg(db, "bob", "alice", "Java from bob")
+
+        results = db.search_message_history(
+            user="alice", keyword="Python", with_user="bob",
+            sender=["alice", "bob"])
+        assert len(results) == 2
+
+    def test_search_sender_empty_list_no_filter(self, db):
+        """
+        【MH-24】sender 为空列表 → 等价不过滤（R-P28 对话框全不选场景）
+        """
+        _create_users(db, "alice", "bob")
+        _save_chat_msg(db, "alice", "bob", "a1")
+        _save_chat_msg(db, "bob", "alice", "b1")
+
+        results = db.search_message_history(
+            user="alice", keyword="", sender=[])
+        assert len(results) == 2
+
 
 # ============================================================
 # 运行方式

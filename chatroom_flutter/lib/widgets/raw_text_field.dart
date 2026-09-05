@@ -20,6 +20,8 @@ import 'package:flutter/services.dart';
 import '../models/chat_models.dart';
 import '../services/ime_bridge.dart';
 
+import '../config.dart';
+
 class RawTextField extends StatefulWidget {
   final TextEditingController controller;
   final FocusNode? focusNode;
@@ -344,7 +346,7 @@ class _RawTextFieldState extends State<RawTextField> {
     if (display.isEmpty) return 0;
     final baseStyle = DefaultTextStyle.of(context).style.copyWith(
           fontSize: 16,
-          fontFamilyFallback: const ['NotoColorEmoji'],
+          fontFamilyFallback: AppConfig.emojiFontStack,
         );
     final tp = TextPainter(
       text: TextSpan(style: baseStyle, text: display),
@@ -782,7 +784,7 @@ class _RawTextFieldState extends State<RawTextField> {
     // R-P10：emoji 兜底内置 COLRv1 彩色字体（与 _charIndexAtGlobal 测量样式一致）
     final baseStyle = DefaultTextStyle.of(context).style.copyWith(
           fontSize: 16,
-          fontFamilyFallback: const ['NotoColorEmoji'],
+          fontFamilyFallback: AppConfig.emojiFontStack,
         );
 
     // P-68（缺陷修复）：光标在任意位置均渲染细条 '|'（与末尾光标同样式：

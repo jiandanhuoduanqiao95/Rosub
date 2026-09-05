@@ -11,6 +11,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../config.dart';
 import '../models/chat_models.dart';
 import '../l10n/app_strings.dart';
 import 'raw_text_field.dart';
@@ -3075,34 +3076,28 @@ void showScheduledManageDialog(
 ///   - 表情包模块："我的表情包"扁平网格（无包名）——首格"添加表情包"
 ///     （多选图片，恒可用），点击贴纸即发送，长按贴纸删除
 /// 收藏他人表情：图片消息长按菜单"添加到表情包"（ChatView onSaveSticker）。
-void showStickerPickerDialog(
-  BuildContext context, {
-  required ValueChanged<Sticker> onPick,
-  required ValueChanged<String> onEmojiPicked,
-}) {
-  showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    backgroundColor: Colors.transparent,
-    builder: (ctx) => _StickerPickerPanel(
-      onPick: onPick,
-      onEmojiPicked: onEmojiPicked,
-    ),
-  );
-}
-
-class _StickerPickerPanel extends StatefulWidget {
+///
+/// R-P14（用户实测：面板遮挡输入框）：由 showModalBottomSheet 模态弹层
+/// 改为**可嵌入面板**——ChatScreen 在输入栏上方挂载（微信式），输入栏
+/// 始终可见，用户能看到自己输入的内容。贴纸点击后经 [onClose] 收起
+/// 面板；表情插入后面板保持（连续输入）。
+class StickerPickerPanel extends StatefulWidget {
   final ValueChanged<Sticker> onPick;
   final ValueChanged<String> onEmojiPicked;
+  final VoidCallback? onClose;
 
-  const _StickerPickerPanel(
-      {required this.onPick, required this.onEmojiPicked});
+  const StickerPickerPanel({
+    super.key,
+    required this.onPick,
+    required this.onEmojiPicked,
+    this.onClose,
+  });
 
   @override
-  State<_StickerPickerPanel> createState() => _StickerPickerPanelState();
+  State<StickerPickerPanel> createState() => _StickerPickerPanelState();
 }
 
-class _StickerPickerPanelState extends State<_StickerPickerPanel> {
+class _StickerPickerPanelState extends State<StickerPickerPanel> {
   static const _panelHeight = 340.0;
   int _tab = 0; // 0 = 表情；1 = 表情包
   List<Sticker> _stickers = const [];
@@ -3189,19 +3184,22 @@ class _StickerPickerPanelState extends State<_StickerPickerPanel> {
       _loaded = true;
       _reload();
     }
-    return Container(
-      height: _panelHeight,
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerLow,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      child: Column(
-        children: [
-          Expanded(
-            child: _tab == 0 ? _buildEmojiGrid() : _buildStickerGrid(),
-          ),
-          _buildTabBar(),
-        ],
+    // R-P14：Material 祖先保证 InkWell 水波纹/高亮生效（AGENTS 规约）
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
+      child: Container(
+        height: _panelHeight,
+        decoration: const BoxDecoration(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+        ),
+        child: Column(
+          children: [
+            Expanded(
+              child: _tab == 0 ? _buildEmojiGrid() : _buildStickerGrid(),
+            ),
+            _buildTabBar(),
+          ],
+        ),
       ),
     );
   }
@@ -3220,15 +3218,28 @@ class _StickerPickerPanelState extends State<_StickerPickerPanel> {
               childAspectRatio: 1,
             ),
             itemCount: emojis.length,
+            // R-P14（用户实测：点击无反馈）：显式 splash/highlight/hover
+            // 高亮色（圆形水波纹 + 按压高亮圈），让"已输入"有明确视觉反馈
             itemBuilder: (ctx, i) => InkWell(
               borderRadius: BorderRadius.circular(8),
+              customBorder: const CircleBorder(),
+              splashColor:
+                  Theme.of(ctx).colorScheme.primary.withValues(alpha: 0.30),
+              highlightColor:
+                  Theme.of(ctx).colorScheme.primary.withValues(alpha: 0.16),
+              hoverColor:
+                  Theme.of(ctx).colorScheme.primary.withValues(alpha: 0.08),
               onTap: () => widget.onEmojiPicked(emojis[i]),
               child: Center(
                 // R-P10：指定 COLRv1 彩色字体——缺省时落到系统兜底字体
                 // （DejaVu/Noto Symbols 等），部分表情渲染为黑白字形
                 child: Text(emojis[i],
                     style: const TextStyle(
-                        fontSize: 24, fontFamily: 'NotoColorEmoji')),
+                        fontSize: 24,
+                        // R-P26：第二兜底系统 Noto Color Emoji（CBDT 彩色），
+                        // 内置字体加载失败时仍走彩色而非 fontconfig 黑白字形
+                        fontFamily: 'NotoColorEmoji',
+                        fontFamilyFallback: AppConfig.emojiFontStack)),
               ),
             ),
           ),
@@ -3298,8 +3309,9 @@ class _StickerPickerPanelState extends State<_StickerPickerPanel> {
         return GestureDetector(
           onLongPress: () => _confirmDelete(sticker),
           onTap: () {
-            Navigator.pop(context);
             widget.onPick(sticker);
+            // R-P14：嵌入式面板——发送后收起（原模态层的 Navigator.pop）
+            widget.onClose?.call();
           },
           child: ClipRRect(
             borderRadius: BorderRadius.circular(8),
@@ -3382,18 +3394,20 @@ class _StickerPickerPanelState extends State<_StickerPickerPanel> {
   }
 }
 
-/// 阶段 P3（复合条件消息搜索）：高级搜索对话框——关键词/发送者 +
-/// 起始日期/结束日期（R-P4 修订：日期下拉选择，参考定时消息的日期
-/// 选择形式，不再手输）。全空不触发；确认回调 onSearch(MessageSearchFilter)。
+/// 阶段 P3（复合条件消息搜索）：高级搜索对话框——关键词 + 发送者
+/// （R-P28 修订：选项式多选 chip，候选由 senderCandidates 实时提供，
+/// 私聊为会话双方、群聊为群成员列表）+ 日期单入口（点击弹出托盘式
+/// 年/月/日滚轮选择器，三档模糊精度均展开为范围搜索）。
+/// 全空不触发；确认回调 onSearch(MessageSearchFilter)。
 void showAdvancedSearchDialog(
   BuildContext context, {
   required ValueChanged<MessageSearchFilter> onSearch,
+  List<String> Function()? senderCandidates,
 }) {
   final keywordCtrl = TextEditingController();
-  final senderCtrl = TextEditingController();
   var listening = false;
-  DateTime? from;
-  DateTime? to;
+  SearchDateSelection? date;
+  final selectedSenders = <String>{};
 
   showDialog(
     context: context,
@@ -3403,18 +3417,14 @@ void showAdvancedSearchDialog(
         // （按钮可用态随输入刷新）
         if (!listening) {
           listening = true;
-          for (final c in [keywordCtrl, senderCtrl]) {
-            c.addListener(() => setState(() {}));
-          }
+          keywordCtrl.addListener(() => setState(() {}));
         }
-        final toEnd = to == null
-            ? null
-            : DateTime(to!.year, to!.month, to!.day, 23, 59, 59);
+        final candidates = senderCandidates?.call() ?? const <String>[];
+        final myName = AppState.instance.username;
         final filter = MessageSearchFilter(
           keyword: keywordCtrl.text,
-          sender: senderCtrl.text,
-          from: from,
-          to: toEnd,
+          senders: selectedSenders.toList(),
+          date: date,
         );
         final canSearch = filter.hasFilters;
         return AlertDialog(
@@ -3423,6 +3433,7 @@ void showAdvancedSearchDialog(
             width: 360,
             child: Column(
               mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 RawTextField(
                   key: const ValueKey('adv_search_keyword'),
@@ -3430,34 +3441,83 @@ void showAdvancedSearchDialog(
                   hintText: '关键词（可选）',
                   showChineseInput: true,
                 ),
-                const SizedBox(height: 8),
-                RawTextField(
-                  key: const ValueKey('adv_search_sender'),
-                  controller: senderCtrl,
-                  hintText: '发送者（可选）',
-                  showChineseInput: true,
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _searchDayDropdown(
-                        key: const ValueKey('adv_search_from'),
-                        value: from,
-                        hint: '起始日期',
-                        onChanged: (v) => setState(() => from = v),
-                      ),
+                const SizedBox(height: 12),
+                Text('发送者（可多选）',
+                    style: TextStyle(
+                        fontSize: 12, color: Colors.grey.shade600)),
+                const SizedBox(height: 4),
+                if (candidates.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: Text('（暂无可选发送者）',
+                        style: TextStyle(
+                            fontSize: 12, color: Colors.grey.shade500)),
+                  )
+                else
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      for (final name in candidates)
+                        FilterChip(
+                          key: ValueKey('adv_search_sender_chip_$name'),
+                          label: Text(
+                              name == myName ? '$name（我）' : name,
+                              style: const TextStyle(fontSize: 13)),
+                          selected: selectedSenders.contains(name),
+                          showCheckmark: true,
+                          visualDensity: VisualDensity.compact,
+                          onSelected: (v) => setState(() {
+                            v ? selectedSenders.add(name) : selectedSenders.remove(name);
+                          }),
+                        ),
+                    ],
+                  ),
+                const SizedBox(height: 12),
+                // R-P28：日期单入口——点击弹出托盘选择器（仅此一个入口）
+                InkWell(
+                  key: const ValueKey('adv_search_date'),
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: () => showSearchDatePickerDialog(
+                    ctx,
+                    initial: date,
+                    onConfirm: (sel) => setState(() => date = sel),
+                  ),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 13),
+                    decoration: BoxDecoration(
+                      border: Border.all(
+                          color: Theme.of(ctx)
+                              .colorScheme
+                              .outline
+                              .withValues(alpha: 0.5)),
+                      borderRadius: BorderRadius.circular(8),
                     ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: _searchDayDropdown(
-                        key: const ValueKey('adv_search_to'),
-                        value: to,
-                        hint: '结束日期',
-                        onChanged: (v) => setState(() => to = v),
-                      ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.calendar_today_outlined,
+                            size: 18,
+                            color: Theme.of(ctx).colorScheme.primary),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            date?.label ?? '日期（不限）',
+                            style: TextStyle(
+                                fontSize: 14,
+                                color: date == null
+                                    ? Colors.grey.shade500
+                                    : Theme.of(ctx)
+                                        .colorScheme
+                                        .onSurface),
+                          ),
+                        ),
+                        Icon(Icons.expand_more,
+                            size: 20, color: Colors.grey.shade600),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
               ],
             ),
@@ -3484,42 +3544,274 @@ void showAdvancedSearchDialog(
   );
 }
 
-/// R-P4：搜索日期下拉（近 30 天 + 不限；样式对齐定时消息的日期选择）
-Widget _searchDayDropdown({
-  required Key key,
-  required DateTime? value,
-  required String hint,
-  required ValueChanged<DateTime?> onChanged,
+/// R-P28：托盘式模糊日期选择——精度三档（按年/按月/按日）+ 对应
+/// 年/月/日滚轮列（ListWheelScrollView + FixedExtentScrollPhysics，
+/// 点行即选中）。确认 → onConfirm(SearchDateSelection)；
+/// "不限" → onConfirm(null)；取消不动主对话框。
+void showSearchDatePickerDialog(
+  BuildContext context, {
+  SearchDateSelection? initial,
+  required ValueChanged<SearchDateSelection?> onConfirm,
 }) {
   final now = DateTime.now();
-  final today = DateTime(now.year, now.month, now.day);
-  final days = [
-    for (var i = 0; i < 30; i++) today.subtract(Duration(days: i)),
-  ];
-  String label(DateTime d) {
-    final diff = today.difference(DateTime(d.year, d.month, d.day)).inDays;
-    if (diff == 0) return '今天';
-    if (diff == 1) return '昨天';
-    return '${d.month}-${d.day}';
-  }
-
-  return SizedBox(
-    key: key,
-    child: DropdownButton<DateTime?>(
-      value: value,
-      isExpanded: true,
-      hint: Text(hint, style: const TextStyle(fontSize: 13)),
-      items: [
-        const DropdownMenuItem<DateTime?>(
-            value: null, child: Text('不限', style: TextStyle(fontSize: 13))),
-        for (final d in days)
-          DropdownMenuItem<DateTime?>(
-              value: d,
-              child: Text(label(d), style: const TextStyle(fontSize: 13))),
-      ],
-      onChanged: onChanged,
+  final years = [for (var y = now.year - 10; y <= now.year; y++) y];
+  showDialog(
+    context: context,
+    builder: (ctx) => _SearchDatePickerBody(
+      years: years,
+      now: now,
+      initial: initial,
+      onConfirm: (sel) {
+        Navigator.pop(ctx);
+        onConfirm(sel);
+      },
     ),
   );
+}
+
+class _SearchDatePickerBody extends StatefulWidget {
+  final List<int> years;
+  final DateTime now;
+  final SearchDateSelection? initial;
+  final ValueChanged<SearchDateSelection?> onConfirm;
+
+  const _SearchDatePickerBody({
+    required this.years,
+    required this.now,
+    required this.initial,
+    required this.onConfirm,
+  });
+
+  @override
+  State<_SearchDatePickerBody> createState() => _SearchDatePickerBodyState();
+}
+
+class _SearchDatePickerBodyState extends State<_SearchDatePickerBody> {
+  // 0=按年 1=按月 2=按日
+  late int _precision;
+  late int _yearIndex;
+  late int _monthIndex;
+  late int _dayIndex;
+  late FixedExtentScrollController _yearCtrl;
+  late FixedExtentScrollController _monthCtrl;
+  late FixedExtentScrollController _dayCtrl;
+
+  static const double _itemExtent = 36;
+
+  @override
+  void initState() {
+    super.initState();
+    final initial = widget.initial;
+    _precision =
+        initial == null ? 2 : (initial.day != null ? 2 : (initial.month != null ? 1 : 0));
+    _yearIndex = widget.years.indexOf(initial?.year ?? widget.now.year);
+    if (_yearIndex < 0) _yearIndex = widget.years.length - 1;
+    _monthIndex = (initial?.month ?? widget.now.month) - 1;
+    final days = DateTime(
+            widget.years[_yearIndex], (initial?.month ?? widget.now.month) + 1, 0)
+        .day;
+    _dayIndex = ((initial?.day ?? widget.now.day) - 1).clamp(0, days - 1);
+    _yearCtrl = FixedExtentScrollController(initialItem: _yearIndex);
+    _monthCtrl = FixedExtentScrollController(initialItem: _monthIndex);
+    _dayCtrl = FixedExtentScrollController(initialItem: _dayIndex);
+  }
+
+  @override
+  void dispose() {
+    _yearCtrl.dispose();
+    _monthCtrl.dispose();
+    _dayCtrl.dispose();
+    super.dispose();
+  }
+
+  int get _daysInMonth =>
+      DateTime(_year, _monthIndex + 2, 0).day;
+
+  int get _year => widget.years[_yearIndex];
+  int get _month => _monthIndex + 1;
+
+  SearchDateSelection _selection() {
+    if (_precision == 0) return SearchDateSelection(year: _year);
+    if (_precision == 1) {
+      return SearchDateSelection(year: _year, month: _month);
+    }
+    return SearchDateSelection(
+        year: _year, month: _month, day: (_dayIndex + 1).clamp(1, _daysInMonth));
+  }
+
+  // 精度切换后重挂载的滚轮恢复到最近选中位置（控制器重建时
+  // position 会重置为 initialItem，需 post-frame 校正）
+  void _restoreWheels() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_precision >= 1) {
+        _monthCtrl.jumpToItem(_monthIndex.clamp(0, 11));
+      }
+      if (_precision >= 2) {
+        _dayCtrl.jumpToItem(_dayIndex.clamp(0, _daysInMonth - 1));
+      }
+    });
+  }
+
+  void _setPrecision(int p) {
+    if (p == _precision) return;
+    setState(() => _precision = p);
+    _restoreWheels();
+  }
+
+  void _onYearChanged(int i) {
+    setState(() {
+      _yearIndex = i;
+      _clampDayIfNeeded();
+    });
+  }
+
+  void _onMonthChanged(int i) {
+    setState(() {
+      _monthIndex = i;
+      _clampDayIfNeeded();
+    });
+  }
+
+  // 月份天数变少时把日列收敛回有效范围（如 1/31 → 2 月 → 28）
+  void _clampDayIfNeeded() {
+    if (_dayIndex > _daysInMonth - 1) {
+      _dayIndex = _daysInMonth - 1;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _dayCtrl.jumpToItem(_dayIndex);
+      });
+    }
+  }
+
+  Widget _wheel({
+    required FixedExtentScrollController ctrl,
+    required int count,
+    required String Function(int index) label,
+    required ValueChanged<int> onSelected,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    return Expanded(
+      child: Stack(
+        children: [
+          Center(
+            child: Container(
+              height: _itemExtent,
+              margin: const EdgeInsets.symmetric(horizontal: 4),
+              decoration: BoxDecoration(
+                color: scheme.primary.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                    color: scheme.primary.withValues(alpha: 0.35)),
+              ),
+            ),
+          ),
+          ListWheelScrollView.useDelegate(
+            controller: ctrl,
+            itemExtent: _itemExtent,
+            physics: const FixedExtentScrollPhysics(),
+            diameterRatio: 1.8,
+            perspective: 0.003,
+            overAndUnderCenterOpacity: 0.4,
+            childDelegate: ListWheelChildBuilderDelegate(
+              builder: (ctx, i) => GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => ctrl.animateToItem(
+                  i,
+                  duration: const Duration(milliseconds: 200),
+                  curve: Curves.easeOut,
+                ),
+                child: Center(
+                  child: Text(label(i), style: const TextStyle(fontSize: 16)),
+                ),
+              ),
+              childCount: count,
+            ),
+            onSelectedItemChanged: onSelected,
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('选择日期'),
+      content: SizedBox(
+        width: 340,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                _precisionChip(0, '按年'),
+                const SizedBox(width: 8),
+                _precisionChip(1, '按月'),
+                const SizedBox(width: 8),
+                _precisionChip(2, '按日'),
+              ],
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 168,
+              child: Row(
+                children: [
+                  _wheel(
+                    ctrl: _yearCtrl,
+                    count: widget.years.length,
+                    label: (i) => '${widget.years[i]}年',
+                    onSelected: _onYearChanged,
+                  ),
+                  if (_precision >= 1)
+                    _wheel(
+                      ctrl: _monthCtrl,
+                      count: 12,
+                      label: (i) => '${i + 1}月',
+                      onSelected: _onMonthChanged,
+                    ),
+                  if (_precision >= 2)
+                    _wheel(
+                      ctrl: _dayCtrl,
+                      count: _daysInMonth,
+                      label: (i) => '${i + 1}日',
+                      onSelected: (i) => setState(() => _dayIndex = i),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          key: const ValueKey('date_clear'),
+          onPressed: () => widget.onConfirm(null),
+          child: const Text('不限'),
+        ),
+        TextButton(
+          key: const ValueKey('date_cancel'),
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          key: const ValueKey('date_ok'),
+          style: FilledButton.styleFrom(minimumSize: const Size(0, 40)),
+          onPressed: () => widget.onConfirm(_selection()),
+          child: const Text('确定'),
+        ),
+      ],
+    );
+  }
+
+  Widget _precisionChip(int value, String label) {
+    return ChoiceChip(
+      key: ValueKey('date_prec_$value'),
+      label: Text(label, style: const TextStyle(fontSize: 13)),
+      selected: _precision == value,
+      visualDensity: VisualDensity.compact,
+      onSelected: (_) => _setPrecision(value),
+    );
+  }
 }
 
 /// R-P2（文件预览，参考微信）：文件卡片点击 → 预览。
@@ -3598,12 +3890,17 @@ void showFilePreviewDialog(
                     children: [
                       Icon(_fileIconFor(filename),
                           size: 56, color: Colors.grey),
-                      const SizedBox(height: 8),
-                      Text(
-                        exists ? '该类型暂不支持内嵌预览' : '文件尚未下载到本地',
-                        style:
-                            const TextStyle(fontSize: 12, color: Colors.grey),
-                      ),
+                      // R-P21（用户反馈）：不再显示"该类型暂不支持内嵌预览"——
+                      // 无法预览时仅展示文件图标，直接用"打开文件/打开所在
+                      // 目录"操作；仅文件确实不在本地时保留提示
+                      if (!exists) ...[
+                        const SizedBox(height: 8),
+                        const Text(
+                          '文件尚未下载到本地',
+                          style:
+                              TextStyle(fontSize: 12, color: Colors.grey),
+                        ),
+                      ],
                     ],
                   ),
                 ),

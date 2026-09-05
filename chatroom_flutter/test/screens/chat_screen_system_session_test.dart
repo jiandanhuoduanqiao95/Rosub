@@ -65,6 +65,9 @@ MockSocketService buildService() {
   when(() => s.searchHistory(any(),
       to: any(named: 'to'),
       groupId: any(named: 'groupId'),
+      senders: any(named: 'senders'),
+      timeFrom: any(named: 'timeFrom'),
+      timeTo: any(named: 'timeTo'),
       limit: any(named: 'limit'))).thenAnswer((_) async {});
   return s;
 }
@@ -213,7 +216,13 @@ void main() {
           groupId: any(named: 'groupId'),
           beforeMessageId: any(named: 'beforeMessageId'),
           limit: any(named: 'limit')));
-      verifyNever(() => socket.searchHistory(any(), to: any(named: 'to')));
+      verifyNever(() => socket.searchHistory(any(),
+          to: any(named: 'to'),
+          groupId: any(named: 'groupId'),
+          senders: any(named: 'senders'),
+          timeFrom: any(named: 'timeFrom'),
+          timeTo: any(named: 'timeTo'),
+          limit: any(named: 'limit')));
       expect(find.text('系统消息 为只读会话'), findsOneWidget);
       await tester.pump(const Duration(seconds: 3));
     });

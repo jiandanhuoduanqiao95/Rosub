@@ -146,7 +146,14 @@ class MessageHandler:
         logging.info(f"发送初始会话元数据给用户: {username}, 会话数={len(conversation_list)}")
 
     def load_offline_data(self, username, ssock):
-        """加载用户的离线消息和文件请求"""
+        """加载用户的离线消息和文件请求（**不含文件体补发**，见 push_offline_files）。
+
+        阶段 R-P14（2026-09-05 用户实测"登录时间过长"）：文件体补发从本方法
+        拆出为 push_offline_files，由登录流程在 send_initial_data（好友/群组
+        等列表）**之后**调用——大文件（如 22MB 视频）补发不再阻塞登录初始
+        数据，客户端立即完成登录进入主界面，文件在监听循环中后台接收
+        （气泡进度条照常显示）。
+        """
         messages = self.server.db.get_offline_messages(username)
         logging.info(f"用户 {username} 的离线消息: {len(messages)} 条")
 
@@ -179,27 +186,11 @@ class MessageHandler:
                     self.server.guarded_send(ssock, "chat", content.decode('utf-8'),
                                  extra_headers=extra_headers)
                 elif msg_type == "file":
-                    extra_headers = {"from": sender, "filename": filename, "history": "true",
-                                     "message_id": message_id, "timestamp": str(msg_timestamp),
-                                     "status": status}
-                    if sender == username:
-                        extra_headers["to"] = msg_receiver
-                    gid = offline_group_ids.get(message_id)
-                    if gid is not None:
-                        extra_headers["group_id"] = str(gid)
-                    if file_path and os.path.exists(file_path):
-                        # 大文件：流式分块发送，不读入内存。
-                        # 阶段 P 修复：经 per-socket 写锁发送——与其它线程
-                        # 的 guarded_send（presence/聊天推送）串行，杜绝
-                        # 并发 sendall 交错 TLS 记录（登录初始数据阶段
-                        # 流错位 → 客户端断线重连死循环）
-                        self.server.with_sock_write(
-                            ssock,
-                            lambda: send_file_message(
-                                ssock, "file", file_path,
-                                extra_headers=extra_headers))
-                    else:
-                        self.server.guarded_send(ssock, "file", content, extra_headers=extra_headers)
+                    # 阶段 R-P14：文件体补发延后至 send_initial_data 之后
+                    # （push_offline_files），不阻塞登录初始数据
+                    logging.info(
+                        f"离线文件延后补发: 发送者={sender}, 接收者={username}, "
+                        f"消息ID={message_id}")
                 elif msg_type == "group_chat":
                     try:
                         message_data = json.loads(content.decode('utf-8'))
@@ -342,6 +333,93 @@ class MessageHandler:
                 logging.error(f"发送待处理群邀请失败: 群组={group_id}, "
                               f"接收者={username}, 错误={e}")
 
+    def push_offline_files(self, username, ssock, device_id="default"):
+        """离线文件体补发（阶段 R-P14：从 load_offline_data 拆出）。
+
+        登录流程在 send_initial_data（好友/群组列表）**之后**调用——大文件
+        （如 22MB 视频）补发不再阻塞登录初始数据：客户端立即完成登录进入
+        主界面，文件体在监听循环中后台接收（进度条气泡照常显示）。
+
+        头部契约与原 load_offline_data file 分支完全一致（from/filename/
+        history/message_id/timestamp/status，发送者回显带 to，群文件带
+        group_id）；经 per-socket 写锁发送（R-P13：与其它线程的
+        guarded_send 串行，杜绝并发 sendall 交错 TLS 记录）。
+
+        R-P21（2026-09-05 用户实测"重登后已下载文件重新下载"）：接收方
+        **本设备**此前已完整收过的文件不再重复推送文件体，改推 file_meta
+        （同头部、无消息体，追加 filesize 头）——客户端仅重建/对账气泡，
+        不触发重新下载。判定依据（阶段 L 的 file_request_resolutions）：
+        该用户对此消息的接受记录 device_id 与本次登录 device_id 一致；
+        发送者自身回显（sender == username，原文件就在发送端本地）同样
+        只推元数据。其他设备登录仍补发完整文件体（多端文件同步语义不变）。
+        """
+        messages = self.server.db.get_offline_messages(username)
+        offline_group_ids = self.server.db.get_offline_group_ids(
+            [m[4] for m in messages])
+        for msg in messages:
+            message_id = "?"
+            try:
+                sender, msg_type, content, filename, message_id, status, \
+                    msg_receiver, msg_timestamp, file_path = msg
+                if msg_type != "file":
+                    continue
+                logging.info(f"发送离线消息: 发送者={sender}, 类型=file, "
+                             f"消息ID={message_id}")
+                extra_headers = {"from": sender, "filename": filename,
+                                 "history": "true",
+                                 "message_id": message_id,
+                                 "timestamp": str(msg_timestamp),
+                                 "status": status}
+                if sender == username:
+                    extra_headers["to"] = msg_receiver
+                gid = offline_group_ids.get(message_id)
+                if gid is not None:
+                    extra_headers["group_id"] = str(gid)
+                if self._skip_offline_file_body(sender, username, message_id,
+                                                device_id):
+                    if file_path and os.path.exists(file_path):
+                        extra_headers["filesize"] = str(
+                            os.path.getsize(file_path))
+                    self.server.guarded_send(ssock, "file_meta", "",
+                                             extra_headers=extra_headers)
+                    logging.info(f"已下载文件仅补发元数据（不重复推送文件体）: "
+                                 f"接收者={username}, 消息ID={message_id}")
+                    continue
+                if file_path and os.path.exists(file_path):
+                    # 大文件：流式分块发送，不读入内存。
+                    # R-P13：per-socket 写锁内发送，与其它线程的
+                    # guarded_send（presence/聊天推送）串行
+                    self.server.with_sock_write(
+                        ssock,
+                        lambda: send_file_message(
+                            ssock, "file", file_path,
+                            extra_headers=extra_headers))
+                else:
+                    self.server.guarded_send(ssock, "file", content,
+                                             extra_headers=extra_headers)
+            except Exception as e:
+                # 单条推送异常不中断后续补发（与 load_offline_data 隔离惯例一致）
+                logging.error(f"推送离线文件异常（跳过）: 用户={username}, "
+                              f"消息ID={message_id}, 错误={e}")
+
+    def _skip_offline_file_body(self, sender, username, message_id,
+                                device_id):
+        """R-P21：判定离线文件是否只补发元数据（file_meta）不推送文件体。
+
+        ① 发送者自身回显：原文件就在发送端本地，重登补发纯浪费带宽；
+        ② 接收方本设备此前已接受该文件（file_request_resolutions 存在
+           (accept, device_id) 记录且与本次登录设备一致）——阶段 L⑨ 在
+           file_response/group_file_response 处理时落库，接受即完整传输
+           （delivered 在传输完成后才标记，传输中断仍是 sent 不受影响）。
+        无接受记录的旧行（阶段 L 之前的历史数据）保守补发完整文件体。
+        """
+        if sender == username:
+            return True
+        resolution = self.server.db.get_file_resolution(message_id, username)
+        return (resolution is not None
+                and resolution[0] == "accept"
+                and resolution[1] == device_id)
+
     def _handle_file_message(self, username, ssock, header, length):
         """处理 file 消息：大文件（> 阈值）在线直传不落盘；小文件落盘暂存。
 
@@ -478,6 +556,11 @@ class MessageHandler:
                     if still_current:
                         try:
                             self.load_offline_data(target, recipient_socket)
+                            # 阶段 R-P14：文件体补发（拆分后需显式调用）
+                            # R-P21：按接收方会话设备判定已下载文件只推元数据
+                            self.push_offline_files(
+                                target, recipient_socket,
+                                self.server.device_id_of(recipient_socket))
                         except Exception as e:
                             logging.warning(f"转发后补推离线消息失败: {target}, {e}")
             if forward_failed:
@@ -1002,13 +1085,16 @@ class MessageHandler:
                     # 消息搜索（阶段 H5；阶段 P3 扩展复合条件）
                     # header: keyword（条件全空时报错）/ to（可选私聊限定）
                     #         / group_id（可选群聊限定）/ limit（可选，默认 50）
-                    #         / sender（可选发送者过滤）/ time_from / time_to
-                    #         （可选时间范围，epoch 秒）
+                    #         / sender（可选发送者过滤，R-P28 支持逗号分隔
+                    #           多发送者——用户名字符集不含逗号，可安全切分）
+                    #         / time_from / time_to（可选时间范围，epoch 秒）
                     # 服务端返回最新在前（timestamp DESC, id DESC），客户端负责翻转展示顺序
                     keyword = (header.get("keyword") or "").strip()
                     with_user = header.get("to")
                     group_id = header.get("group_id")
-                    sender = header.get("sender") or None
+                    raw_sender = (header.get("sender") or "").strip()
+                    senders = [s.strip() for s in raw_sender.split(",")
+                               if s.strip()]
 
                     def _epoch_to_db_ts(raw):
                         if raw in (None, ""):
@@ -1023,7 +1109,7 @@ class MessageHandler:
 
                     time_from = _epoch_to_db_ts(header.get("time_from"))
                     time_to = _epoch_to_db_ts(header.get("time_to"))
-                    if not keyword and not sender \
+                    if not keyword and not senders \
                             and time_from is None and time_to is None:
                         self.server.guarded_send(ssock, "error", "搜索关键字不能为空")
                         logging.warning(f"搜索失败: 用户={username}, 缺少搜索关键字")
@@ -1035,7 +1121,7 @@ class MessageHandler:
                         limit_int = 50
                     rows = self.server.db.search_message_history(
                         username, keyword, with_user=with_user, group_id=group_id,
-                        limit=limit_int, sender=sender,
+                        limit=limit_int, sender=senders,
                         time_from=time_from, time_to=time_to)
                     batch = []
                     for r in rows:

@@ -49,4 +49,21 @@ class AppConfig {
   /// 小图片自动接收阈值（字节，5MB，阶段 N3b）：扩展名为图片
   /// 且 ≤ 此值的文件请求自动接受并内联展示（参考微信）。
   static const int autoAcceptImageMaxSize = 5 * 1024 * 1024;
+
+  /// 构建标识（R-P27，2026-09-05 用户复测"表情黑白"轮换出现）：随修订
+  /// 递增，显示在登录页页脚并打印到启动日志——多客户端排查"谁在跑
+  /// 旧构建"（旧构建同时呈现黑白表情 + media_kit non-platform thread
+  /// ERROR）时一眼可辨。每次修订轮次更新此值。
+  static const String buildStamp = 'r-p26';
+
+  /// 彩色 emoji 字体栈（R-P26 硬化）：首选内置 COLRv1 字体，第二兜底
+  /// 系统 Noto Color Emoji（CBDT 彩色位图，Ubuntu 默认安装、覆盖全部
+  /// emoji 码点）——内置字体加载失败/缺码点时落到系统彩字而非
+  /// fontconfig 的黑白符号字体（DejaVu/Noto Sans Symbols）。独立成格
+  /// 的 emoji 用 [emojiFontFamily] 打头（R-P10 契约）；混排文本用
+  /// [emojiFontFallback] 兜底（主字体链在前，emoji 缺字形时兜底）。
+  static const List<String> emojiFontStack = [
+    'NotoColorEmoji',
+    'Noto Color Emoji',
+  ];
 }

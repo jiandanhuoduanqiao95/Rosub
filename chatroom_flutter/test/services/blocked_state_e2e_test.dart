@@ -19,6 +19,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:chatroom_flutter/services/socket_service.dart';
+import 'package:chatroom_flutter/config.dart';
 import 'package:chatroom_flutter/services/state_manager.dart';
 
 AppState get state => AppState.instance;
@@ -44,7 +45,7 @@ with db._get_connection() as conn:
     conn.execute("INSERT INTO friends (user1,user2,status) VALUES ('bob','alice','accepted')")
     conn.commit()
 from server.server_main import Server
-server = Server(port=8090)
+server = Server(port=8097)
 server.db = db
 server.build_listen()
 ''';
@@ -68,6 +69,9 @@ void main() {
       skipped = true;
       return;
     }
+    // R-P27：独立端口 8097（各 E2E 独立端口约定）——原 8090 与默认端口
+    // 相同，开发服务器常驻时 E2E 会连到它（测试口令被拒 + 触发登录限速）
+    AppConfig.serverPort = 8097;
     final script = File('/tmp/opencode/j_e2e_server.py');
     _writeE2eScript(script, serverScript);
     serverProcess = await Process.start(
@@ -88,6 +92,7 @@ void main() {
   });
 
   tearDownAll(() async {
+    AppConfig.serverPort = 8090;
     serverProcess?.kill(ProcessSignal.sigkill);
     await serverProcess?.exitCode;
   });

@@ -328,3 +328,60 @@ class TestSearchHistoryHandler:
         batch = json.loads(d.decode())
         assert len(batch) == 1
         assert batch[0]["content"] == "群 Python"
+
+    def test_search_history_multi_sender_header(self, harness):
+        """R-P28：sender 头逗号分隔多发送者 → IN 匹配（选项式多选）。"""
+        _seed_history(harness)
+        alice = harness.client()
+        alice.login("alice", "password123", consume=False)
+        alice.recv_initial()
+
+        alice.send("search_history", "", keyword="Python",
+                   sender="alice,bob")
+        h, d = alice.expect("search_response", timeout=3)
+        batch = json.loads(d.decode())
+        contents = {b["content"] for b in batch}
+        # 三条含 Python 的消息分别由 alice（2 条）与 bob（1 条）发送
+        assert contents == {"讨论 Python 项目", "Python 很棒",
+                            "Python 和 carol 无关紧要"}
+
+    def test_search_history_single_sender_unchanged(self, harness):
+        """R-P28：sender 单值（旧客户端形态）行为不变。"""
+        _seed_history(harness)
+        alice = harness.client()
+        alice.login("alice", "password123", consume=False)
+        alice.recv_initial()
+
+        alice.send("search_history", "", keyword="Python", sender="bob")
+        h, d = alice.expect("search_response", timeout=3)
+        batch = json.loads(d.decode())
+        assert {b["content"] for b in batch} == {"Python 很棒"}
+        assert all(b["sender"] == "bob" for b in batch)
+
+    def test_search_history_sender_with_spaces_tolerated(self, harness):
+        """R-P28：逗号分隔值带空白 → 切分后 strip，不产生空发送者。"""
+        _seed_history(harness)
+        alice = harness.client()
+        alice.login("alice", "password123", consume=False)
+        alice.recv_initial()
+
+        alice.send("search_history", "", keyword="Python",
+                   sender=" bob , ,alice ")
+        h, d = alice.expect("search_response", timeout=3)
+        batch = json.loads(d.decode())
+        assert {b["content"] for b in batch} == {
+            "讨论 Python 项目", "Python 很棒", "Python 和 carol 无关紧要"}
+
+    def test_search_history_sender_only_no_keyword_ok(self, harness):
+        """R-P28：仅多发送者、无关键词/时间 → 合法组合检索（不报错）。"""
+        _seed_history(harness)
+        alice = harness.client()
+        alice.login("alice", "password123", consume=False)
+        alice.recv_initial()
+
+        alice.send("search_history", "", sender="bob,carol")
+        h, d = alice.expect("search_response", timeout=3)
+        assert h["type"] == "search_response"
+        batch = json.loads(d.decode())
+        senders = {b["sender"] for b in batch}
+        assert senders == {"bob", "carol"}

@@ -22,8 +22,10 @@ dependencies:
   # 阶段 L3（P0-4）：客户端本地消息缓存（sqflite + 桌面/测试 FFI 后端）
   sqflite: ^2.4.1
   sqflite_common_ffi: ^2.3.4
-  media_kit: 1.1.11
-  media_kit_video: 1.2.5
+  # R-P14（用户实测崩溃）：1.1.x 的 native→Flutter 消息在非平台线程发送
+  # （shell.cc ERROR + 可能崩溃），1.2.x/2.x 修复线程问题——升级并回归
+  media_kit: ^1.2.6
+  media_kit_video: ^2.0.1
   media_kit_libs_video: ^1.0.7
   # R-P9（文件预览扩展）：docx/xlsx/pptx 为 ZIP+OOXML，archive 纯 Dart 解包
   # 提取文本预览（零原生依赖）

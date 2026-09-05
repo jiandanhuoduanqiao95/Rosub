@@ -1,21 +1,20 @@
-/// 文档内嵌文本预览（R-P9：文件预览支持 docx/xlsx/pptx/pdf）
+/// 文档内嵌文本预览（R-P9：文件预览支持 docx/xlsx/pptx）
 ///
 /// 纯 Dart 实现（零原生依赖）：
-/// - docx/xlsx/pptx：OOXML 即 ZIP+XML，经 archive 解包后用正则提取
-///   文本游程（docx: word/document.xml `<w:t>`；xlsx: sharedStrings +
-///   各 sheet 单元格；pptx: slideN.xml `<a:t>`）；
-/// - pdf：扫描 `stream...endstream` 段并尝试 zlib/raw-deflate 解压
-///   （FlateDecode），从内容流提取 `(...) Tj` / `[...] TJ` 文本操作符
-///   （尽力而为——加密/图片型/CID 字体的 PDF 提取不出时返回 null，
-///   预览对话框回退"打开文件"）。
+/// docx/xlsx/pptx：OOXML 即 ZIP+XML，经 archive 解包后用正则提取
+/// 文本游程（docx: word/document.xml `<w:t>`；xlsx: sharedStrings +
+/// 各 sheet 单元格；pptx: slideN.xml `<a:t>`）。
+///
+/// R-P14（用户实测反馈）：**取消 PDF 预览**——FlateDecode 内容流的文本
+/// 提取对加密/图片型/CID 字体文档命中率低（"尽力而为"体验差），pdf 统一
+/// 回退预览对话框的"打开文件"信息页。
 ///
 /// 所有输出截断至 ~8000 字符；提取失败/扩展名不支持 → null。
 
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:archive/archive.dart' hide ZLibDecoder;
+import 'package:archive/archive.dart';
 
 const int _maxPreviewChars = 8000;
 
@@ -31,9 +30,6 @@ String? extractDocumentPreview(String path) {
     }
     if (lower.endsWith('.pptx')) {
       return _previewPptx(path);
-    }
-    if (lower.endsWith('.pdf')) {
-      return _previewPdf(path);
     }
   } catch (_) {
     return null;
@@ -199,87 +195,4 @@ String _cellValue(String cellXml, List<String> shared) {
     return (idx != null && idx >= 0 && idx < shared.length) ? shared[idx] : '';
   }
   return _xmlUnescape(v);
-}
-
-// ============================================================
-// PDF（FlateDecode 内容流文本操作符提取）
-// ============================================================
-
-String? _previewPdf(String path) {
-  final bytes = File(path).readAsBytesSync();
-  final raw = latin1.decode(bytes, allowInvalid: true);
-  final buffer = StringBuffer();
-  final streamRe = RegExp(r'stream\r?\n');
-  for (final m in streamRe.allMatches(raw)) {
-    if (buffer.length > _maxPreviewChars) break;
-    final start = m.end;
-    final end = raw.indexOf('endstream', start);
-    if (end < 0) break;
-    final segment = _tryInflate(bytes, start, end);
-    if (segment == null) continue;
-    _extractPdfText(latin1.decode(segment, allowInvalid: true), buffer);
-  }
-  final text = buffer.toString().trim();
-  if (text.isEmpty) return null;
-  return _clip('【PDF 文本预览（尽力提取，排版以打开文件为准）】', text);
-}
-
-Uint8List? _tryInflate(Uint8List bytes, int start, int end) {
-  final clampedEnd = end < bytes.length ? end : bytes.length;
-  if (clampedEnd <= start) return null;
-  final view = Uint8List.sublistView(bytes, start, clampedEnd);
-  try {
-    return zlib.decode(view) as Uint8List?;
-  } catch (_) {}
-  try {
-    // 个别生成器写 raw deflate（无 zlib 头）
-    return Uint8List.fromList(ZLibDecoder(raw: true).convert(view));
-  } catch (_) {}
-  return null;
-}
-
-/// 从 PDF 内容流提取文本操作符：`(...) Tj`、`[...] TJ`、`(...) '`、`(...) "`；
-/// `T* / Td / TD / BT` 视为换行/块边界。仅处理字面量串。
-void _extractPdfText(String content, StringBuffer out) {
-  final tokenRe = RegExp(
-    r'\((?:\\.|[^\\()])*\)\s*(?:Tj|\x27|")'
-    r'|\[(?:[^\]\\]|\\.)*\]\s*TJ'
-    r'|(?:T\*|Td|TD|BT|ET)',
-    dotAll: true,
-  );
-  for (final m in tokenRe.allMatches(content)) {
-    final token = m.group(0)!;
-    if (token == 'T*' || token == 'Td' || token == 'TD') {
-      out.write('\n');
-      continue;
-    }
-    if (token == 'BT' || token == 'ET') continue;
-    for (final s in RegExp(r'\((?:\\.|[^\\()])*\)', dotAll: true)
-        .allMatches(token)) {
-      final literal = s.group(0)!;
-      out.write(_unescapePdfString(
-          literal.substring(1, literal.length - 1)));
-    }
-    if (token.endsWith('TJ')) out.write(' ');
-  }
-}
-
-String _unescapePdfString(String s) {
-  return s.replaceAllMapped(RegExp(r'\\([nrtbf()\\]|[0-7]{1,3})'), (m) {
-    final g = m.group(1)!;
-    switch (g) {
-      case 'n':
-        return '\n';
-      case 'r':
-        return '\r';
-      case 't':
-        return '\t';
-      case 'b':
-      case 'f':
-        return '';
-      default:
-        if (g.length == 1) return g;
-        return String.fromCharCode(int.parse(g, radix: 8));
-    }
-  }).replaceAll('\\\n', '');
 }

@@ -563,11 +563,21 @@ class TestGroupFileRoutingN3b:
         assert gmap.get("n3b-grp-2") == gid, \
             f"offline_messages 应记录群文件 group_id: {gmap}"
 
-        # bob 重登：离线补发的 file 消息应带 group_id 头
+        # bob 重登：离线补发的文件消息应带 group_id 头
+        # （R-P21：同设备已接受过 → 元数据补推 file_meta，头部契约不变）
         bob.close()
         time.sleep(0.3)
         bob2 = _login(harness, "bob", "password456", consume=False)
-        initial = bob2.recv_initial()
-        seen = [h for h, d in initial.get("offline", []) if h.get("type") == "file"]
+        bob2.recv_initial()
+        # R-P14：文件体补发延后到初始数据（列表）之后——从缓冲区续读
+        seen = []
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            hh, dd = bob2.recv(timeout=1)
+            if hh is None:
+                break
+            if hh.get("type") in ("file", "file_meta"):
+                seen.append(hh)
+                break
         assert any(h.get("group_id") == str(gid) for h in seen), \
             f"离线补发的群文件必须携带 group_id: {seen}"

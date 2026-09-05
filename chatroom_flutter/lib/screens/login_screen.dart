@@ -679,6 +679,17 @@ class _LoginScreenState extends State<LoginScreen> {
             child: Text(_isLogin ? '没有账号？注册' : '已有账号？登录',
                 style: const TextStyle(color: Color(0xFF93C5FD))),
           ),
+
+          // R-P27：构建标识——多客户端排查"谁在跑旧构建"（旧构建同时呈现
+          // 黑白表情 + media_kit non-platform thread ERROR）时一眼可辨
+          const SizedBox(height: 4),
+          Text(
+            '构建 ${AppConfig.buildStamp}',
+            style: TextStyle(
+              fontSize: 10,
+              color: Colors.white.withValues(alpha: 0.35),
+            ),
+          ),
         ],
       ),
     );

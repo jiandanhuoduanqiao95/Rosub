@@ -17,13 +17,12 @@
 //       全局无重复；首分类 '常用' 须完整包含 defaultReactionEmojis——
 //       阶段 K 既有表情盘不丢失回归）
 //
-//   P3 复合条件消息搜索：
-//     - MessageSearchFilter：关键词/发送者/时间范围组合检索条件
-//       （hasFilters 组合语义 + toHeaders() 协议头契约：
-//       keyword 恒在；sender 非空才带 'sender'；from/to 非空才带
-//       'time_from'/'time_to'（epoch 秒字符串，与 O5 schedule_at 口径一致）
-//     - parseSearchDay(text)：'YYYY-MM-DD' → 本地零点 DateTime；
-//       非法/空白 → null
+//   P3 复合条件消息搜索（R-P28 修订：发送者选项式多选 + 模糊日期单入口）：
+//     - MessageSearchFilter：关键词/多发送者/模糊日期组合检索条件
+//       （senders 列表 → 协议头 'sender' 逗号分隔；date 模糊日期 →
+//       'time_from'/'time_to'（epoch 秒字符串，与 O5 schedule_at 口径一致））
+//     - SearchDateSelection：年/年月/年月日三档模糊精度 → 本地时间
+//       范围（from 当档起点 / to 当档终点 23:59:59）+ 中文摘要 label
 //
 // 实现前：本文件引用尚未实现的 API，编译失败或用例红，属 TDD 红。
 // 实现后：全部转绿。
@@ -183,7 +182,8 @@ void main() {
     test('默认构造：无过滤条件', () {
       const filter = MessageSearchFilter();
       expect(filter.keyword, '');
-      expect(filter.sender, '');
+      expect(filter.senders, isEmpty);
+      expect(filter.date, isNull);
       expect(filter.from, isNull);
       expect(filter.to, isNull);
       expect(filter.hasFilters, isFalse);
@@ -191,13 +191,15 @@ void main() {
 
     test('任一字段设置即 hasFilters', () {
       expect(const MessageSearchFilter(keyword: '你好').hasFilters, isTrue);
-      expect(const MessageSearchFilter(sender: 'bob').hasFilters, isTrue);
+      expect(const MessageSearchFilter(senders: ['bob']).hasFilters, isTrue);
       expect(
-        MessageSearchFilter(from: DateTime(2026, 9, 1)).hasFilters,
+        const MessageSearchFilter(
+                date: SearchDateSelection(year: 2026, month: 9))
+            .hasFilters,
         isTrue,
       );
       expect(
-          const MessageSearchFilter(to: null, keyword: 'x').hasFilters, isTrue);
+          const MessageSearchFilter(keyword: 'x').hasFilters, isTrue);
     });
 
     test('toHeaders：空条件仅携带 keyword', () {
@@ -206,8 +208,8 @@ void main() {
       expect(headers, {'keyword': ''});
     });
 
-    test('toHeaders：关键词 + 发送者', () {
-      const filter = MessageSearchFilter(keyword: ' 会议 ', sender: 'bob');
+    test('toHeaders：关键词 + 单发送者', () {
+      const filter = MessageSearchFilter(keyword: ' 会议 ', senders: ['bob']);
       final headers = filter.toHeaders();
       expect(headers['keyword'], '会议', reason: '关键词 trim');
       expect(headers['sender'], 'bob');
@@ -215,56 +217,73 @@ void main() {
       expect(headers.containsKey('time_to'), isFalse);
     });
 
-    test('toHeaders：时间范围 → epoch 秒（与 O5 schedule_at 口径一致）', () {
-      final from = DateTime(2026, 9, 1, 8, 30);
-      final to = DateTime(2026, 9, 2, 23, 59);
-      final filter = MessageSearchFilter(keyword: '', from: from, to: to);
+    test('toHeaders：多发送者逗号分隔（R-P28 选项式多选）', () {
+      const filter = MessageSearchFilter(senders: ['bob', 'alice']);
       final headers = filter.toHeaders();
-      expect(headers['time_from'],
-          (from.millisecondsSinceEpoch ~/ 1000).toString());
-      expect(
-          headers['time_to'], (to.millisecondsSinceEpoch ~/ 1000).toString());
+      expect(headers['sender'], 'bob,alice', reason: '多发送者 join(\',\')');
+      expect(headers.length, 2);
+    });
+
+    test('toHeaders：年精度 date → 全年范围头（epoch 秒）', () {
+      const filter = MessageSearchFilter(date: SearchDateSelection(year: 2026));
+      final headers = filter.toHeaders();
+      final expectedFrom =
+          (DateTime(2026, 1, 1).millisecondsSinceEpoch ~/ 1000).toString();
+      final expectedTo = (DateTime(2026, 12, 31, 23, 59, 59)
+              .millisecondsSinceEpoch ~/
+          1000)
+          .toString();
+      expect(headers['time_from'], expectedFrom);
+      expect(headers['time_to'], expectedTo);
+      expect(headers.length, 3, reason: 'keyword 恒在');
     });
 
     test('toHeaders：完整组合', () {
-      final filter = MessageSearchFilter(
+      const filter = MessageSearchFilter(
         keyword: '报告',
-        sender: 'carol',
-        from: DateTime(2026, 9, 1),
-        to: DateTime(2026, 9, 3),
+        senders: ['carol'],
+        date: SearchDateSelection(year: 2026, month: 9, day: 3),
       );
       final headers = filter.toHeaders();
       expect(headers['keyword'], '报告');
       expect(headers['sender'], 'carol');
       expect(headers['time_from'],
-          (DateTime(2026, 9, 1).millisecondsSinceEpoch ~/ 1000).toString());
-      expect(headers['time_to'],
           (DateTime(2026, 9, 3).millisecondsSinceEpoch ~/ 1000).toString());
+      expect(
+          headers['time_to'],
+          (DateTime(2026, 9, 3, 23, 59, 59).millisecondsSinceEpoch ~/ 1000)
+              .toString());
       expect(headers.length, 4);
     });
   });
 
-  group('P3 —— parseSearchDay 日期解析', () {
-    test("'YYYY-MM-DD' → 本地零点", () {
-      final day = parseSearchDay('2026-09-01');
-      expect(day, DateTime(2026, 9, 1));
-      expect(day!.hour, 0);
-      expect(day.minute, 0);
-      expect(day.second, 0);
-      expect(day.isUtc, isFalse, reason: '本地零点（搜索输入按本地日期理解）');
+  group('P3 —— SearchDateSelection 模糊日期（R-P28 托盘选择）', () {
+    test('仅年 → 全年范围 + 摘要', () {
+      const sel = SearchDateSelection(year: 2026);
+      expect(sel.from, DateTime(2026, 1, 1), reason: '当年 1 月 1 日零点');
+      expect(sel.to, DateTime(2026, 12, 31, 23, 59, 59), reason: '当年末');
+      expect(sel.label, '2026年');
     });
 
-    test('空白/非法 → null', () {
-      expect(parseSearchDay(''), isNull);
-      expect(parseSearchDay('   '), isNull);
-      expect(parseSearchDay('abc'), isNull);
-      expect(parseSearchDay('2026-13-01'), isNull, reason: '月份非法');
-      expect(parseSearchDay('2026/09/01'), isNull, reason: '仅支持 ISO 格式');
+    test('年月 → 整月范围（2 月平年 28 天 / 闰年 29 天）', () {
+      const feb = SearchDateSelection(year: 2026, month: 2);
+      expect(feb.from, DateTime(2026, 2, 1));
+      expect(feb.to, DateTime(2026, 2, 28, 23, 59, 59));
+      expect(feb.label, '2026年2月');
+      const leap = SearchDateSelection(year: 2028, month: 2);
+      expect(leap.to, DateTime(2028, 2, 29, 23, 59, 59), reason: '闰年');
     });
 
-    test('合法 ISO 补齐格式（带时间）→ 解析为当日', () {
-      final day = parseSearchDay('2026-09-01 00:00:00');
-      expect(day, DateTime(2026, 9, 1), reason: 'DateTime.tryParse 宽容解析');
+    test('小月月末（4 月 → 30 日）', () {
+      const apr = SearchDateSelection(year: 2026, month: 4);
+      expect(apr.to, DateTime(2026, 4, 30, 23, 59, 59));
+    });
+
+    test('年月日 → 全天范围 + 摘要', () {
+      const sel = SearchDateSelection(year: 2026, month: 9, day: 3);
+      expect(sel.from, DateTime(2026, 9, 3), reason: '当日零点');
+      expect(sel.to, DateTime(2026, 9, 3, 23, 59, 59), reason: '当日末 23:59:59');
+      expect(sel.label, '2026年9月3日');
     });
   });
 }

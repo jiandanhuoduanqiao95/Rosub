@@ -1,17 +1,18 @@
 // ============================================================
-// doc_preview.dart —— R-P9（文件预览扩展 docx/xlsx/pptx/pdf）契约
+// doc_preview.dart —— R-P9（文件预览扩展 docx/xlsx/pptx）契约
 // ============================================================
 // 用户二轮实测反馈：内嵌预览支持的文件类型不够多，起码要支持
-// docx/xlsx/pptx/pdf。实现为纯 Dart 提取（archive 解包 OOXML +
-// PDF 内容流文本操作符提取），本文件锁定：
+// docx/xlsx/pptx/pdf。实现为纯 Dart 提取（archive 解包 OOXML），锁定：
 //
 //   extractDocumentPreview(path)：
 //     - docx：word/document.xml 段落 `<w:t>` 游程，段间换行
 //     - xlsx：sharedStrings + 各 sheet 单元格（t="s" 解共享串，
 //       直值单元格原样），行格式 `A1: 值`
 //     - pptx：slideN.xml（按页序），前 5 页，`—— 第 N 页 ——` 分隔
-//     - pdf：FlateDecode 内容流 `(...) Tj` / `[...] TJ` 提取
 //     - 不支持扩展名 / 损坏文件 / 空文档 → null（不抛异常）
+//
+// R-P14（用户实测反馈）：**取消 PDF 预览**——FlateDecode 文本提取命中
+// 率低，pdf 统一返回 null（预览对话框回退"打开文件"信息页）。
 //
 // 对话框级：showFilePreviewDialog 对 docx 显示提取文本（内嵌预览，
 // 不再是"该类型暂不支持内嵌预览"）。
@@ -160,8 +161,8 @@ void main() {
     });
   });
 
-  group('R-P9 —— extractDocumentPreview（pdf）', () {
-    test('FlateDecode 内容流 Tj 文本提取', () {
+  group('R-P14 —— pdf 预览已取消', () {
+    test('即使是可提取的 FlateDecode 文本流也返回 null（回退"打开文件"）', () {
       final dir = _tmp();
       addTearDown(() => dir.deleteSync(recursive: true));
       final path = '${dir.path}/doc.pdf';
@@ -175,23 +176,6 @@ void main() {
         ..add(_ascii('\nendstream\nendobj\n%%EOF\n'));
       _write(path, buffer.toBytes());
 
-      final text = extractDocumentPreview(path);
-      expect(text, isNotNull);
-      expect(text!, contains('PDF 文本预览'));
-      expect(text, contains('Hello PDF'));
-      expect(text, contains('Second Line'));
-    });
-
-    test('非 Flate 流（提取不出文本）→ null', () {
-      final dir = _tmp();
-      addTearDown(() => dir.deleteSync(recursive: true));
-      final path = '${dir.path}/img.pdf';
-      final buffer = BytesBuilder()
-        ..add(_ascii('%PDF-1.4\n'))
-        ..add(_ascii('1 0 obj\n<</Length 4>>\nstream\n'))
-        ..add(_ascii('\x00\x01\x02\x03'))
-        ..add(_ascii('\nendstream\nendobj\n%%EOF\n'));
-      _write(path, buffer.toBytes());
       expect(extractDocumentPreview(path), isNull);
     });
   });

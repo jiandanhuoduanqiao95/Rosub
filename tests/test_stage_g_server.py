@@ -496,15 +496,54 @@ class TestLargeFileDiskStorage:
         time.sleep(0.3)
         bob2 = harness.client()
         bob2.login("bob", "password456", consume=False)
-        initial2 = bob2.recv_initial()
-        file_msgs = [h for h, d2 in initial2["offline"]
-                     if h.get("type") == "file" and h.get("message_id") == "g4-off-1"]
-        assert file_msgs, "重新登录应收到离线文件消息"
-        # 内容通过与 payload 相同的 file 消息体到达（recv_initial 未消费时按顺序读取）
-        for h, d2 in initial2["offline"]:
-            if h.get("type") == "file" and h.get("message_id") == "g4-off-1":
-                assert d2 == payload, "离线补发的文件内容应完整"
+        bob2.recv_initial()
+        # R-P21：同设备重登（default）——该设备已完整接受过此文件
+        # （file_request_resolutions 记录 accept@default），只补发元数据
+        # file_meta（无消息体，带 filesize 头），不再触发重复下载
+        meta = None
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            hh, dd = bob2.recv(timeout=1)
+            if hh is None:
                 break
+            if (hh.get("type") == "file_meta"
+                    and hh.get("message_id") == "g4-off-1"):
+                meta = (hh, dd)
+                break
+        assert meta is not None, "同设备重登应收到 file_meta 元数据补推"
+        assert meta[0].get("history") == "true", "file_meta 应带 history 头"
+        assert meta[0].get("filesize") == str(len(payload)), \
+            "file_meta 应携带 filesize 头（气泡大小显示）"
+        assert meta[1] == b"", "file_meta 不得携带消息体（不重复下载）"
+        # 补发窗口内不得再出现同 id 的完整文件体
+        dup_body = None
+        deadline = time.time() + 1
+        while time.time() < deadline:
+            hh, dd = bob2.recv(timeout=0.5)
+            if hh is None:
+                break
+            if (hh.get("type") == "file"
+                    and hh.get("message_id") == "g4-off-1"):
+                dup_body = (hh, dd)
+                break
+        assert dup_body is None, "同设备重登不得再推送完整文件体"
+
+        # 换设备登录（desktop2）：多端文件同步语义不变——完整文件体补发
+        bob3 = harness.client()
+        bob3.login("bob", "password456", consume=False, device_id="desktop2")
+        bob3.recv_initial()
+        h = None
+        body = None
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            hh, dd = bob3.recv(timeout=1)
+            if hh is None:
+                break
+            if hh.get("type") == "file" and hh.get("message_id") == "g4-off-1":
+                h, body = hh, dd
+                break
+        assert h is not None, "其他设备首次登录应收到完整文件体补发"
+        assert body == payload, "离线补发的文件内容应完整"
 
 
 # ============================================================

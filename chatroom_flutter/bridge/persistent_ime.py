@@ -254,6 +254,16 @@ class PersistentIme:
         self._suppress_cursor = True
         self.entry.set_text(text)
         self.entry.set_position(len(text))
+        # R-P14（用户实测：表情面板插入 emoji 后桌面残留 emoji 鬼影）：
+        # set_text 同步的是应用层文本而非 IME 输入，但 fcitx 的 GTK IM
+        # 上下文会把同步内容当作预编辑（preedit）显示在候选窗中——
+        # 桥接窗口隐藏后残影仍留在屏幕上。同步后重置 IM 上下文清除该状态。
+        try:
+            im_context = self.entry.get_im_context()
+            if im_context is not None:
+                im_context.reset()
+        except Exception:
+            pass
         self._suppress_cursor = False
         self._last_text = text
         self._suppress_changed = False

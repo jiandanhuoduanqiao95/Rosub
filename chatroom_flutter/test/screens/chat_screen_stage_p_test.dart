@@ -58,9 +58,10 @@ void stubCommon(MockSocketService socket) {
       to: any(named: 'to'),
       groupId: any(named: 'groupId'),
       limit: any(named: 'limit'),
-      sender: any(named: 'sender'),
+      senders: any(named: 'senders'),
       timeFrom: any(named: 'timeFrom'),
       timeTo: any(named: 'timeTo'))).thenAnswer((_) async {});
+  when(() => socket.fetchGroupMembers(any())).thenAnswer((_) async {});
 }
 
 Future<void> pumpScreen(WidgetTester tester, MockSocketService socket,
@@ -235,7 +236,7 @@ void main() {
           to: 'bob',
           groupId: null,
           limit: any(named: 'limit'),
-          sender: null,
+          senders: [],
           timeFrom: null,
           timeTo: null)).called(1);
     });
@@ -267,7 +268,7 @@ void main() {
           to: null,
           groupId: 1,
           limit: any(named: 'limit'),
-          sender: null,
+          senders: [],
           timeFrom: null,
           timeTo: null)).called(1);
     });

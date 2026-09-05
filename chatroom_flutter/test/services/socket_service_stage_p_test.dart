@@ -55,7 +55,7 @@ void main() {
     });
 
     test('纯发送者过滤（无关键词）未连接不崩溃、无副作用', () async {
-      await service.searchHistory('', sender: 'bob');
+      await service.searchHistory('', senders: ['bob']);
       expect(state.searchResults('bob'), isEmpty);
       expect(state.isSearchMode('bob'), isFalse);
       expect(state.noticeQueue, isEmpty);
@@ -76,7 +76,7 @@ void main() {
         '报告',
         to: 'bob',
         limit: 20,
-        sender: 'bob',
+        senders: ['bob'],
         timeFrom: DateTime(2026, 9, 1, 8, 30),
         timeTo: DateTime(2026, 9, 30, 23, 59),
       );
@@ -89,17 +89,30 @@ void main() {
       await service.searchHistory(
         '公告',
         groupId: 1,
-        sender: 'carol',
+        senders: ['carol'],
         timeFrom: DateTime(2026, 9, 1),
       );
       expect(state.searchResults('group_1'), isEmpty);
       expect(state.isSearchMode('group_1'), isFalse);
     });
 
+    test('多发送者（R-P28 选项式多选）未连接不崩溃、无副作用', () async {
+      await service.searchHistory('', senders: ['bob', 'alice']);
+      expect(state.searchResults('bob'), isEmpty);
+      expect(state.isSearchMode('bob'), isFalse);
+      expect(state.noticeQueue, isEmpty);
+    });
+
+    test('senders 全空白元素 → 等价不过滤（不发送空 sender 头）', () async {
+      await service.searchHistory('', senders: ['', '   ']);
+      expect(state.noticeQueue, isEmpty);
+      expect(state.isSearchMode('bob'), isFalse);
+    });
+
     test('多次调用安全（幂等）', () async {
       for (var i = 0; i < 5; i++) {
         await service.searchHistory('x',
-            sender: 'bob', timeFrom: DateTime(2026, 9, 1));
+            senders: ['bob'], timeFrom: DateTime(2026, 9, 1));
       }
       expect(state.isSearchMode('bob'), isFalse);
     });
@@ -107,11 +120,11 @@ void main() {
 
   group('P3 —— 头字段口径（epoch 秒，与 O5 口径一致）', () {
     test('本地时刻与 UTC 时刻的 epoch 秒一致（同一瞬间）', () {
-      final at = DateTime(2026, 9, 1, 8, 30);
-      expect(at.millisecondsSinceEpoch ~/ 1000,
-          at.toUtc().millisecondsSinceEpoch ~/ 1000);
-      final filter = MessageSearchFilter(keyword: '', from: at);
-      final expected = (at.millisecondsSinceEpoch ~/ 1000).toString();
+      const sel = SearchDateSelection(year: 2026, month: 9, day: 1);
+      expect(sel.from.millisecondsSinceEpoch ~/ 1000,
+          sel.from.toUtc().millisecondsSinceEpoch ~/ 1000);
+      const filter = MessageSearchFilter(keyword: '', date: sel);
+      final expected = (sel.from.millisecondsSinceEpoch ~/ 1000).toString();
       expect(filter.toHeaders()['time_from'], expected,
           reason: 'toHeaders 与本地毫秒换算口径一致');
     });

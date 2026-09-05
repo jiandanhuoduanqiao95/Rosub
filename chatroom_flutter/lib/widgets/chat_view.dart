@@ -101,6 +101,10 @@ class ChatView extends StatefulWidget {
   // 阶段 P2（表情包体系）：表情包入口（提供即输入行显示"表情包"按钮）
   final VoidCallback? onShowStickerPicker;
 
+  // R-P14（微信式嵌入式面板）：表情/表情包面板，非空时渲染在输入栏上方
+  // （输入栏保持可见，用户能看到自己输入的内容）
+  final Widget? emojiPanel;
+
   // 阶段 P3（复合条件消息搜索）：高级搜索入口（搜索栏展开时显示）
   final VoidCallback? onAdvancedSearch;
 
@@ -156,6 +160,7 @@ class ChatView extends StatefulWidget {
     this.onSaveSticker,
     this.onShowStickerPicker,
     this.onAdvancedSearch,
+    this.emojiPanel,
   });
 
   static void _noopSearch(String _) {}
@@ -596,6 +601,10 @@ class _ChatViewState extends State<ChatView> {
           ),
         ),
 
+        // R-P14：表情/表情包面板（微信式）——渲染在输入栏上方，
+        // 输入栏保持可见；搜索模式下不渲染（与输入栏一致）
+        if (!widget.isSearchMode && widget.emojiPanel != null)
+          widget.emojiPanel!,
         // 输入栏（搜索模式下隐藏，阶段 H5）
         if (widget.isSearchMode)
           const SizedBox.shrink()
@@ -1224,6 +1233,8 @@ class _MessageBubble extends StatelessWidget {
                         fontSize: 12,
                         fontStyle: FontStyle.italic,
                         color: Colors.grey[600],
+                        // R-P10 契约补齐：引用预览同样兜底 COLRv1 彩色字体
+                        fontFamilyFallback: const ['NotoColorEmoji'],
                       ),
                     ),
                   ),
@@ -1282,9 +1293,10 @@ class _MessageBubble extends StatelessWidget {
                           color: isSelf
                               ? Theme.of(context).colorScheme.onPrimary
                               : Theme.of(context).colorScheme.onSurfaceVariant,
-                          // R-P10：消息正文的 emoji 兜底到内置 COLRv1 彩色
-                          // 字体（缺省时 fontconfig 可能命中黑白字形）
-                          fontFamilyFallback: const ['NotoColorEmoji'],
+                          // R-P10/R-P26：消息正文 emoji 兜底到 COLRv1
+                          // 彩色字体栈（内置 + 系统彩字，缺省时
+                          // fontconfig 可能命中黑白字形）
+                          fontFamilyFallback: AppConfig.emojiFontStack,
                         ),
                       ),
                     // 阶段 I1：发送中/发送失败状态标记（仅自己的文字消息；
@@ -1410,6 +1422,7 @@ class _MessageBubble extends StatelessWidget {
                               style: const TextStyle(
                                 fontSize: 12,
                                 fontFamily: 'NotoColorEmoji',
+                                fontFamilyFallback: AppConfig.emojiFontStack,
                               ),
                             ),
                           ),
@@ -1644,7 +1657,9 @@ class _MessageMenuSheetState extends State<_MessageMenuSheet> {
                                     ActionChip(
                                       label: Text(emoji,
                                           style: const TextStyle(
-                                              fontFamily: 'NotoColorEmoji')),
+                                              fontFamily: 'NotoColorEmoji',
+                                              fontFamilyFallback:
+                                                  AppConfig.emojiFontStack)),
                                       onPressed: () => _invoke(() =>
                                           widget.onAddReaction!(
                                               widget.message.messageId, emoji)),

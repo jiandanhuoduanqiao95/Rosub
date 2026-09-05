@@ -674,13 +674,24 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  /// 阶段 P2（R-P3 修订）：表情面板——表情模块点击插入输入框（光标处），
+  // R-P14（微信式）：表情/表情包面板挂载状态（true = 显示在输入栏上方）
+  bool _emojiPanelVisible = false;
+
+  /// 阶段 P2（R-P3 修订）：表情面板开关——表情模块点击插入输入框（光标处），
   /// 表情包模块点击贴纸按图片消息通道发送到当前会话。
+  /// R-P14：由模态弹层改为输入栏上方嵌入式面板（不遮挡输入框）。
   void _showStickerPicker() {
     final key = _state.currentChat;
     if (key == null || key == '服务器') return;
-    showStickerPickerDialog(
-      context,
+    setState(() => _emojiPanelVisible = !_emojiPanelVisible);
+  }
+
+  /// 构建嵌入式表情面板（输入栏上方挂载；无可用会话时不渲染）
+  Widget? _buildEmojiPanel() {
+    final key = _state.currentChat;
+    if (!_emojiPanelVisible || key == null || key == '服务器') return null;
+    return StickerPickerPanel(
+      key: const ValueKey('sticker_panel'),
       onPick: (sticker) {
         final bytes = StickerStore.instance.stickerBytes(sticker.id);
         if (bytes != null) {
@@ -688,6 +699,7 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       },
       onEmojiPicked: _insertEmoji,
+      onClose: () => setState(() => _emojiPanelVisible = false),
     );
   }
 
@@ -751,21 +763,39 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  /// 阶段 P3：高级搜索（关键词/发送者/时间组合，按会话路由）
+  /// 阶段 P3：高级搜索（关键词/发送者/时间组合，按会话路由）。
+  /// R-P28 修订：发送者改为选项式多选（私聊=会话双方、群聊=群成员，
+  /// 打开时预取群成员列表），日期为单入口托盘式模糊日期。
   void _showAdvancedSearch() {
     final current = _state.currentChat;
     if (current == null || current == '服务器') return;
+    final isGroup = current.startsWith('group_');
+    final groupId = isGroup ? int.tryParse(current.substring(6)) : null;
+    if (isGroup && groupId != null) {
+      widget.socketService.fetchGroupMembers(groupId);
+    }
     showAdvancedSearchDialog(
       context,
+      senderCandidates: () {
+        if (isGroup) {
+          for (final g in _state.groups) {
+            if (g.id == groupId) return g.members;
+          }
+          return const <String>[];
+        }
+        final myName = _state.username;
+        return [
+          current,
+          if (myName != null && myName != current) myName,
+        ];
+      },
       onSearch: (filter) {
-        final sender = filter.sender.isEmpty ? null : filter.sender;
-        if (current.startsWith('group_')) {
-          final groupId = int.tryParse(current.substring(6));
+        if (isGroup) {
           if (groupId != null) {
             widget.socketService.searchHistory(
               filter.keyword,
               groupId: groupId,
-              sender: sender,
+              senders: filter.senders,
               timeFrom: filter.from,
               timeTo: filter.to,
             );
@@ -774,7 +804,7 @@ class _ChatScreenState extends State<ChatScreen> {
           widget.socketService.searchHistory(
             filter.keyword,
             to: current,
-            sender: sender,
+            senders: filter.senders,
             timeFrom: filter.from,
             timeTo: filter.to,
           );
@@ -1095,6 +1125,10 @@ class _ChatScreenState extends State<ChatScreen> {
                         _state.selectChat(key);
                         _inputCtrl.text = _state.draftOf(key);
                         _maybeLoadInitialHistory(key);
+                        // R-P14：切换会话收起表情面板
+                        if (_emojiPanelVisible) {
+                          setState(() => _emojiPanelVisible = false);
+                        }
                       },
                       onAddFriend: _showAddFriendDialog,
                       onCreateGroup: _showCreateGroupDialog,
@@ -1193,6 +1227,8 @@ class _ChatScreenState extends State<ChatScreen> {
                                     onSaveSticker: _saveMessageSticker,
                                     // 阶段 P2：贴纸面板入口
                                     onShowStickerPicker: _showStickerPicker,
+                                    // R-P14：嵌入式表情面板（输入栏上方）
+                                    emojiPanel: _buildEmojiPanel(),
                                     // 阶段 P3：高级搜索入口
                                     onAdvancedSearch: _showAdvancedSearch,
                                     // 阶段 N2（P2-1）：聊天记录导出（TXT/JSON）
@@ -1333,6 +1369,7 @@ class _VideoViewerPage extends StatefulWidget {
 class _VideoViewerPageState extends State<_VideoViewerPage> {
   Player? _player;
   VideoController? _controller;
+  StreamSubscription<dynamic>? _errorSub;
   bool _failed = false;
 
   @override
@@ -1368,21 +1405,47 @@ class _VideoViewerPageState extends State<_VideoViewerPage> {
           hwdec: 'no',
         ),
       );
-      await player.open(Media(path));
-      if (mounted) {
-        setState(() {
-          _player = player;
-          _controller = controller;
-        });
+      // R-P21（用户实测：接收方点开视频"一直加载中"）：改为 media_kit
+      // 标准用法——先挂载 Video 再 open，帧就绪即显示，不再以 open()
+      // 完成作为显示前提（open 挂起时原实现永久停留在占位页）；
+      // 错误流 + open 超时（10s）双兜底，失败释放播放器并给出
+      // "使用系统播放器打开"出口。
+      _errorSub = player.stream.error.listen((_) {
+        if (!mounted) return;
+        _disposePlayer();
+        setState(() => _failed = true);
+      });
+      if (!mounted) {
+        await player.dispose();
+        return;
+      }
+      setState(() {
+        _player = player;
+        _controller = controller;
+      });
+      try {
+        await player.open(Media(path)).timeout(const Duration(seconds: 10));
+      } on TimeoutException {
+        if (!mounted) return;
+        _disposePlayer();
+        setState(() => _failed = true);
       }
     } catch (_) {
       if (mounted) setState(() => _failed = true);
     }
   }
 
+  void _disposePlayer() {
+    _errorSub?.cancel();
+    _errorSub = null;
+    _player?.dispose();
+    _player = null;
+    _controller = null;
+  }
+
   @override
   void dispose() {
-    _player?.dispose();
+    _disposePlayer();
     super.dispose();
   }
 
@@ -1430,8 +1493,18 @@ class _VideoViewerPageState extends State<_VideoViewerPage> {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.play_circle_rounded,
-                              size: 72, color: Colors.white70),
+                          // R-P21：初始化中显示加载指示器；仅失败态显示
+                          // 播放图标 + 系统播放器出口（不再"永久加载中"）
+                          if (_failed)
+                            const Icon(Icons.play_circle_rounded,
+                                size: 72, color: Colors.white70)
+                          else
+                            const SizedBox(
+                              width: 44,
+                              height: 44,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 3, color: Colors.white70),
+                            ),
                           const SizedBox(height: 12),
                           Text(
                             widget.filename,

@@ -4,25 +4,28 @@
 // 覆盖《软件开发文档4.1.0.md》§13.9 阶段 P（P2/P3/P6 客户端面板）：
 //
 //   P2 表情包体系：
-//     showStickerPickerDialog(context, {required ValueChanged<Sticker> onPick})：
+//     StickerPickerPanel（R-P14 嵌入式面板，输入栏上方挂载；原模态层
+//     showStickerPickerDialog 已移除）：
 //       - 贴纸面板：包 tab（StickerStore.loadPacks）+ 当前包贴纸网格
 //         （缩略图 Image.memory，字节来自 stickerBytes）
 //       - 点击贴纸 → onPick(sticker) 并关闭
 //       - 管理区：输入包名添加（addPack 后列表刷新）、删除包
 //       - 空包/无包 → 空态提示不崩溃
 //
-//   P3 复合条件消息搜索：
+//   P3 复合条件消息搜索（R-P28 修订）：
 //     showAdvancedSearchDialog(context,
-//         {required ValueChanged<MessageSearchFilter> onSearch})：
-//       - 四输入区（ValueKey 契约，防与 ChatView 搜索栏字段歧义）：
-//         'adv_search_keyword' / 'adv_search_sender' /
-//         'adv_search_from' / 'adv_search_to'
-//         （RawTextField，R-O1 惯例：不 autofocus、showChineseInput；
-//         占位：关键词/发送者/起始日期(YYYY-MM-DD)/结束日期）
+//         {required ValueChanged<MessageSearchFilter> onSearch,
+//          List<String> Function()? senderCandidates})：
+//       - 输入区（ValueKey 契约）：'adv_search_keyword'（关键词，
+//         RawTextField，R-O1 惯例：不 autofocus、showChineseInput）/
+//         'adv_search_sender_chip_<name>'（发送者选项式 FilterChip，
+//         可单选/多选/取消）/'adv_search_date'（日期单入口，点击弹出
+//         托盘式年/月/日滚轮选择器）
+//       - 日期托盘（showSearchDatePickerDialog）：精度三档（按年/按月/
+//         按日，'date_prec_0/1/2'）→ 对应滚轮列；三档模糊精度均展开为
+//         范围（年→全年 / 年月→整月 / 年月日→全天）；'不限'清除
 //       - 全空 → "搜索"不触发回调（按钮禁用）
-//       - 填写后搜索 → onSearch(MessageSearchFilter)（日期经
-//         parseSearchDay 解析；关键词 trim）
-//       - 非法日期 → 不触发回调 + 错误提示
+//       - 填写后搜索 → onSearch(MessageSearchFilter)（关键词 trim）
 //       - 取消 → 关闭无回调
 //
 //   P6 多语言界面：
@@ -142,26 +145,24 @@ void main() {
       await StickerStore.instance.addSticker(pngBytes);
     }
 
+    // R-P14：面板为可嵌入组件（ChatScreen 经 ChatView.emojiPanel 挂载
+    // 在输入栏上方），测试直接 pump 面板本体
     Future<void> pumpPanel(
       WidgetTester tester, {
       ValueChanged<Sticker>? onPick,
       ValueChanged<String>? onEmojiPicked,
+      VoidCallback? onClose,
     }) async {
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
-          body: Builder(
-            builder: (ctx) => TextButton(
-              onPressed: () => showStickerPickerDialog(
-                ctx,
-                onPick: onPick ?? (_) {},
-                onEmojiPicked: onEmojiPicked ?? (_) {},
-              ),
-              child: const Text('open'),
-            ),
+          body: StickerPickerPanel(
+            key: const ValueKey('sticker_panel'),
+            onPick: onPick ?? (_) {},
+            onEmojiPicked: onEmojiPicked ?? (_) {},
+            onClose: onClose,
           ),
         ),
       ));
-      await tester.tap(find.text('open'));
       await tester.pumpAndSettle();
     }
 
@@ -212,10 +213,11 @@ void main() {
       expect(tile.onTap, isNotNull, reason: 'R-P3：添加恒可用（修复点不动）');
     });
 
-    testWidgets('表情包模块：贴纸缩略图展示；点击 → onPick 并关闭', (tester) async {
+    testWidgets('表情包模块：贴纸缩略图展示；点击 → onPick 并回调 onClose', (tester) async {
       await seedStickers();
       final picked = <Sticker>[];
-      await pumpPanel(tester, onPick: picked.add);
+      var closed = false;
+      await pumpPanel(tester, onPick: picked.add, onClose: () => closed = true);
 
       await tester.tap(find.text('表情包').last);
       await tester.pumpAndSettle();
@@ -226,8 +228,8 @@ void main() {
 
       expect(picked.length, 1, reason: '点击贴纸即发送');
       expect(picked.first.name.endsWith('.png'), isTrue);
-      expect(find.byIcon(Icons.favorite_rounded), findsNothing,
-          reason: '选择后面板关闭');
+      expect(closed, isTrue,
+          reason: 'R-P14：选择后回调 onClose（宿主收起面板；嵌入组件自身不 pop）');
     });
 
     testWidgets('长按贴纸 → 删除确认 → store 移除并刷新', (tester) async {
@@ -248,21 +250,37 @@ void main() {
   });
 
   group('P3 —— 高级搜索对话框（showAdvancedSearchDialog）', () {
-    testWidgets('四输入区渲染（关键词/发送者/起始日期/结束日期）', (tester) async {
+    testWidgets('渲染：关键词输入 + 发送者选项 chips + 日期单入口（R-P28）',
+        (tester) async {
+      await pumpOpener(
+          tester,
+          (ctx) => showAdvancedSearchDialog(
+                ctx,
+                senderCandidates: () => ['bob', 'alice'],
+                onSearch: (_) {},
+              ));
+      expect(find.byKey(const ValueKey('adv_search_keyword')), findsOneWidget);
+      expect(find.byKey(const ValueKey('adv_search_date')), findsOneWidget,
+          reason: 'R-P28 日期仅保留一个入口');
+      expect(find.byKey(const ValueKey('adv_search_sender_chip_bob')),
+          findsOneWidget,
+          reason: '发送者改为选项式 chip');
+      expect(find.byKey(const ValueKey('adv_search_sender_chip_alice')),
+          findsOneWidget);
+      expect(find.byKey(const ValueKey('adv_search_from')), findsNothing,
+          reason: '旧双下拉入口已移除');
+      expect(find.byKey(const ValueKey('adv_search_to')), findsNothing);
+    });
+
+    testWidgets('候选为空 → 占位提示不崩溃', (tester) async {
       await pumpOpener(
           tester,
           (ctx) => showAdvancedSearchDialog(
                 ctx,
                 onSearch: (_) {},
               ));
-      expect(find.byKey(const ValueKey('adv_search_keyword')), findsOneWidget);
-      expect(find.byKey(const ValueKey('adv_search_sender')), findsOneWidget);
-      // R-P4：日期改为下拉选择（不再手输）
-      expect(find.byKey(const ValueKey('adv_search_from')), findsOneWidget);
-      expect(find.byKey(const ValueKey('adv_search_to')), findsOneWidget);
-      // 注：下拉占位提示位于 DropdownButton 的 IndexedStack 离台节点，
-      // find.text（skipOffstage 默认 true）不可见——占位/选择行为由
-      // "日期下拉选择"用例点选验证
+      expect(find.text('（暂无可选发送者）'), findsOneWidget);
+      expect(find.byKey(const ValueKey('adv_search_date')), findsOneWidget);
     });
 
     testWidgets('全空点"搜索" → 不触发回调', (tester) async {
@@ -271,6 +289,7 @@ void main() {
           tester,
           (ctx) => showAdvancedSearchDialog(
                 ctx,
+                senderCandidates: () => ['bob'],
                 onSearch: (_) => searched = true,
               ));
       await tester.tap(find.text('搜索'));
@@ -284,6 +303,7 @@ void main() {
           tester,
           (ctx) => showAdvancedSearchDialog(
                 ctx,
+                senderCandidates: () => ['bob'],
                 onSearch: (f) => got = f,
               ));
       await typeAscii(
@@ -294,66 +314,189 @@ void main() {
 
       expect(got, isNotNull);
       expect(got!.keyword, 'hello');
-      expect(got!.sender, '');
+      expect(got!.senders, isEmpty);
+      expect(got!.date, isNull);
       expect(got!.from, isNull);
       expect(got!.to, isNull);
     });
 
-    testWidgets('日期下拉选择（R-P4）→ filter 时间范围正确（零点/当日末）', (tester) async {
+    testWidgets('发送者 chip 单选/多选 → filter.senders 保序', (tester) async {
       MessageSearchFilter? got;
       await pumpOpener(
           tester,
           (ctx) => showAdvancedSearchDialog(
                 ctx,
+                senderCandidates: () => ['bob', 'alice'],
                 onSearch: (f) => got = f,
               ));
       await typeAscii(
           tester, find.byKey(const ValueKey('adv_search_keyword')), 'report');
-      await typeAscii(
-          tester, find.byKey(const ValueKey('adv_search_sender')), 'b');
-
-      final now = DateTime.now();
-      final today = DateTime(now.year, now.month, now.day);
-      final yesterday = today.subtract(const Duration(days: 1));
-
-      await tester.tap(find.byKey(const ValueKey('adv_search_from')));
+      await tester.tap(find.byKey(const ValueKey('adv_search_sender_chip_bob')));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('昨天').last);
+      await tester.tap(
+          find.byKey(const ValueKey('adv_search_sender_chip_alice')));
       await tester.pumpAndSettle();
-
-      await tester.tap(find.byKey(const ValueKey('adv_search_to')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('今天').last);
-      await tester.pumpAndSettle();
-
       await tester.tap(find.text('搜索'));
       await tester.pumpAndSettle();
 
       expect(got, isNotNull);
-      expect(got!.keyword, 'report');
-      expect(got!.sender, 'b');
-      expect(got!.from, yesterday, reason: '起始日期 → 当日零点');
-      expect(got!.to,
-          today.add(const Duration(hours: 23, minutes: 59, seconds: 59)),
-          reason: '结束日期含当日（23:59:59）');
+      expect(got!.senders, ['bob', 'alice'], reason: '按选择顺序');
     });
 
-    testWidgets('不选日期（默认不限）→ filter 不携带时间头', (tester) async {
+    testWidgets('发送者 chip 再点取消 → 从 senders 移除', (tester) async {
       MessageSearchFilter? got;
       await pumpOpener(
           tester,
           (ctx) => showAdvancedSearchDialog(
                 ctx,
+                senderCandidates: () => ['bob', 'alice'],
                 onSearch: (f) => got = f,
               ));
+      await typeAscii(
+          tester, find.byKey(const ValueKey('adv_search_keyword')), 'report');
+      await tester.tap(find.byKey(const ValueKey('adv_search_sender_chip_bob')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+          find.byKey(const ValueKey('adv_search_sender_chip_alice')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('adv_search_sender_chip_bob')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('搜索'));
+      await tester.pumpAndSettle();
+
+      expect(got!.senders, ['alice'], reason: 'bob 已取消勾选');
+    });
+
+    testWidgets('日期托盘：按年精度 → 全年范围（模糊精度）', (tester) async {
+      MessageSearchFilter? got;
+      await pumpOpener(
+          tester,
+          (ctx) => showAdvancedSearchDialog(
+                ctx,
+                senderCandidates: () => ['bob'],
+                onSearch: (f) => got = f,
+              ));
+      await typeAscii(
+          tester, find.byKey(const ValueKey('adv_search_keyword')), 'report');
+
+      await tester.tap(find.byKey(const ValueKey('adv_search_date')));
+      await tester.pumpAndSettle();
+      expect(find.text('选择日期'), findsOneWidget, reason: '托盘对话框弹出');
+
+      await tester.tap(find.byKey(const ValueKey('date_prec_0')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('2024年'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('date_ok')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('2024年'), findsOneWidget, reason: '入口摘要显示所选年');
+      await tester.tap(find.text('搜索'));
+      await tester.pumpAndSettle();
+
+      expect(got, isNotNull);
+      expect(got!.date!.year, 2024);
+      expect(got!.date!.month, isNull, reason: '按年精度月不限');
+      expect(got!.from, DateTime(2024, 1, 1), reason: '全年范围起点');
+      expect(got!.to, DateTime(2024, 12, 31, 23, 59, 59), reason: '全年范围终点');
+    });
+
+    testWidgets('日期托盘：按月精度 → 整月范围', (tester) async {
+      MessageSearchFilter? got;
+      await pumpOpener(
+          tester,
+          (ctx) => showAdvancedSearchDialog(
+                ctx,
+                senderCandidates: () => ['bob'],
+                onSearch: (f) => got = f,
+              ));
+      await tester.tap(find.byKey(const ValueKey('adv_search_date')));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('date_prec_1')));
+      await tester.pumpAndSettle();
+      // 滚轮可视窗口为选中项 ±2 行：年轮默认当前年（1 行上=2025 可见），
+      // 月轮默认当前月（9 月），+2 行 = 11 月可见
+      await tester.tap(find.text('2025年'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('11月'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('date_ok')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('2025年11月'), findsOneWidget);
+      await tester.tap(find.text('搜索'));
+      await tester.pumpAndSettle();
+
+      expect(got!.from, DateTime(2025, 11, 1), reason: '整月起点');
+      expect(got!.to, DateTime(2025, 11, 30, 23, 59, 59), reason: '整月终点（小月）');
+    });
+
+    testWidgets('日期托盘：按日默认今天 → 全天范围', (tester) async {
+      MessageSearchFilter? got;
+      await pumpOpener(
+          tester,
+          (ctx) => showAdvancedSearchDialog(
+                ctx,
+                senderCandidates: () => ['bob'],
+                onSearch: (f) => got = f,
+              ));
+      await tester.tap(find.byKey(const ValueKey('adv_search_date')));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('date_ok')));
+      await tester.pumpAndSettle();
+
+      final now = DateTime.now();
+      expect(find.text('${now.year}年${now.month}月${now.day}日'), findsOneWidget,
+          reason: '默认精度按日、选中今天');
+      await tester.tap(find.text('搜索'));
+      await tester.pumpAndSettle();
+
+      expect(got!.from, DateTime(now.year, now.month, now.day));
+      expect(
+          got!.to,
+          DateTime(now.year, now.month, now.day, 23, 59, 59),
+          reason: '全天范围');
+    });
+
+    testWidgets('日期"不限"清除 + 托盘取消不动原选择', (tester) async {
+      MessageSearchFilter? got;
+      await pumpOpener(
+          tester,
+          (ctx) => showAdvancedSearchDialog(
+                ctx,
+                senderCandidates: () => ['bob'],
+                onSearch: (f) => got = f,
+              ));
+      await tester.tap(find.byKey(const ValueKey('adv_search_date')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('date_ok')));
+      await tester.pumpAndSettle();
+      final now = DateTime.now();
+      expect(find.text('${now.year}年${now.month}月${now.day}日'), findsOneWidget);
+
+      // 取消 → 入口摘要不变
+      await tester.tap(find.byKey(const ValueKey('adv_search_date')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('date_cancel')));
+      await tester.pumpAndSettle();
+      expect(find.text('${now.year}年${now.month}月${now.day}日'), findsOneWidget,
+          reason: '托盘取消不改主对话框');
+
+      // 不限 → 摘要复位
+      await tester.tap(find.byKey(const ValueKey('adv_search_date')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('date_clear')));
+      await tester.pumpAndSettle();
+      expect(find.text('日期（不限）'), findsOneWidget);
+
       await typeAscii(
           tester, find.byKey(const ValueKey('adv_search_keyword')), 'hello');
       await tester.pump();
       await tester.tap(find.text('搜索'));
       await tester.pumpAndSettle();
-
-      expect(got, isNotNull);
-      expect(got!.from, isNull, reason: '默认不限');
+      expect(got!.from, isNull, reason: '清除后不携带时间头');
       expect(got!.to, isNull);
     });
 
@@ -363,6 +506,7 @@ void main() {
           tester,
           (ctx) => showAdvancedSearchDialog(
                 ctx,
+                senderCandidates: () => ['bob'],
                 onSearch: (_) => searched = true,
               ));
       await tester.tap(find.text('取消'));

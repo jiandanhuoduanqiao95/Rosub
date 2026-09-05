@@ -22,6 +22,9 @@ file_store/
 files/
 received_files/
 
+# 客户端运行时用户数据（阶段 P2 StickerStore 表情包存储，R-P28 起忽略）
+chatroom_flutter/stickers/
+
 # 构建产物与 IDE 配置
 .dart_tool/
 .idea/

@@ -891,6 +891,15 @@ class SocketService {
           }
           break;
 
+        case 'file_meta':
+          // R-P21：已下载文件的元数据补推（无消息体）——只重建/对账气泡，
+          // 不落盘不重复下载（正常时序在列表后到达、由监听循环处理，
+          // 此处为初始数据窗口内到达的防御分支）
+          if (isHistory) {
+            _handleOfflineFileMeta(header);
+          }
+          break;
+
         case 'group_chat':
           if (isHistory && from != null) {
             final groupId = header['group_id'] as String?;
@@ -1203,6 +1212,34 @@ class SocketService {
     }
   }
 
+  /// R-P21：已下载文件的离线元数据补推（file_meta，无消息体）——
+  /// 仅重建/对账气泡（本地缓存已有同 id 气泡时由 addMessage 去重，
+  /// 仅更新状态），不落盘、不触发重新下载。头部与 file 补发一致
+  /// （from/filename/history/message_id/timestamp/status + to/group_id/
+  /// filesize），路由规则与 _handleFileMessage 的 history 分支一致。
+  void _handleOfflineFileMeta(Map<String, dynamic> header) {
+    final filename = header['filename'] as String? ?? 'file';
+    final sender = header['from'] as String? ?? '未知';
+    final to = header['to'] as String?;
+    final gid = int.tryParse(header['group_id'] as String? ?? '');
+    final chatKey = gid != null
+        ? 'group_$gid'
+        : ((sender == state.username && to != null) ? to : sender);
+    final msg = ChatMessage(
+      sender: sender,
+      content: '[文件] $filename',
+      type: 'file',
+      messageId: header['message_id'] as String? ?? _generateMessageId(),
+      filename: filename,
+      groupId: gid,
+      filesize: int.tryParse(header['filesize'] as String? ?? ''),
+      timestamp: _parseTimestamp(header['timestamp'] as String?),
+      isHistory: false,
+      status: header['status'] as String? ?? 'delivered',
+    );
+    state.addMessage(chatKey, msg);
+  }
+
   /// 处理收到的文件消息（内容已流式落盘到 [filePath]）
   void _handleFileMessage(Map<String, dynamic> header, String filePath) {
     final filename = header['filename'] as String? ?? 'received_file';
@@ -1404,6 +1441,13 @@ class SocketService {
         state.addMessage(chatKey, msg);
         // 桌面通知（阶段 H2）：未聚焦窗口时通知收到文件
         _notifyIncoming(msg, chatKey);
+        break;
+
+      // ---- 已下载文件的离线元数据补推（R-P21：无消息体，不重复下载） ----
+      case 'file_meta':
+        if (isHistory && from != null) {
+          _handleOfflineFileMeta(header);
+        }
         break;
 
       // ---- 好友请求 ----
@@ -2592,7 +2636,7 @@ class SocketService {
   /// 搜索历史消息（阶段 H5；阶段 P3 扩展复合条件）
   /// [to] 私聊对方用户名（可选，缺省全局搜索）
   /// [groupId] 群组 ID（可选，群聊范围搜索）
-  /// [sender] 发送者过滤（可选，P3）
+  /// [senders] 发送者过滤（可选多选，R-P28：协议头 'sender' 逗号分隔）
   /// [timeFrom]/[timeTo] 时间范围（可选，P3，协议头为 epoch 秒）
   /// [limit] 返回数量上限，默认 50
   Future<void> searchHistory(
@@ -2600,7 +2644,7 @@ class SocketService {
     String? to,
     int? groupId,
     int limit = 50,
-    String? sender,
+    List<String>? senders,
     DateTime? timeFrom,
     DateTime? timeTo,
   }) async {
@@ -2611,7 +2655,11 @@ class SocketService {
     };
     if (to != null) extra['to'] = to;
     if (groupId != null) extra['group_id'] = groupId.toString();
-    if (sender != null && sender.isNotEmpty) extra['sender'] = sender;
+    if (senders != null) {
+      final names =
+          senders.map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+      if (names.isNotEmpty) extra['sender'] = names.join(',');
+    }
     if (timeFrom != null) {
       extra['time_from'] = (timeFrom.millisecondsSinceEpoch ~/ 1000).toString();
     }

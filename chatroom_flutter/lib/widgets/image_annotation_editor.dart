@@ -136,6 +136,7 @@ class _ImageAnnotationEditorState extends State<ImageAnnotationEditor> {
                           painter: _AnnotationPainter(
                             image: _image,
                             controller: _controller,
+                            scale: scale,
                           ),
                         ),
                       ),
@@ -307,8 +308,16 @@ class _AnnotationPainter extends CustomPainter {
   final ui.Image? image;
   final AnnotationController controller;
 
-  _AnnotationPainter({required this.image, required this.controller})
-      : super(repaint: controller);
+  /// 显示缩放比（画布尺寸 = 图像尺寸 × scale）。笔画/裁剪框存储与合成
+  /// 均为图像像素坐标——绘制必须经 [scale] 换算，否则缩小显示的大图
+  /// 上标注位置/粗细与手指轨迹错位（R-P14 用户实测）。
+  final double scale;
+
+  _AnnotationPainter({
+    required this.image,
+    required this.controller,
+    required this.scale,
+  }) : super(repaint: controller);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -324,19 +333,84 @@ class _AnnotationPainter extends CustomPainter {
       canvas.drawRect(
           Offset.zero & size, Paint()..color = Colors.grey.shade800);
     }
+    // 笔画/裁剪框为图像坐标 → 经 canvas.scale 换算到显示坐标
+    canvas.save();
+    canvas.scale(scale);
     for (final stroke in controller.strokes) {
       _paintStroke(canvas, stroke.points, stroke.color, stroke.strokeWidth);
     }
     final crop = controller.cropRect;
     if (crop != null) {
+      // R-P21（用户反馈：透明白框不醒目，看不出裁了哪些部分）：改为
+      // 标准裁剪 UI——框外区域整体压暗（保留区保持原亮度，一眼可辨），
+      // 白色实线边框 + 三分构图网格 + 四角粗 L 形角标。所有线宽按
+      // 1/scale 换算，保证不同缩放下显示粗细一致。
+      final bounds = Rect.fromLTWH(
+          0, 0, size.width / scale, size.height / scale);
+      final outside = ui.Path()
+        ..addRect(bounds)
+        ..addRect(crop)
+        ..fillType = ui.PathFillType.evenOdd;
+      canvas.drawPath(
+          outside, Paint()..color = Colors.black.withValues(alpha: 0.55));
       canvas.drawRect(
         crop,
         Paint()
-          ..color = Colors.white.withValues(alpha: 0.35)
+          ..color = Colors.white
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 2,
+          ..strokeWidth = 1.5 / scale,
       );
+      final gridPaint = Paint()
+        ..color = Colors.white.withValues(alpha: 0.35)
+        ..strokeWidth = 1 / scale;
+      for (final f in const [1.0 / 3.0, 2.0 / 3.0]) {
+        canvas.drawLine(
+            Offset(crop.left + crop.width * f, crop.top),
+            Offset(crop.left + crop.width * f, crop.bottom),
+            gridPaint);
+        canvas.drawLine(
+            Offset(crop.left, crop.top + crop.height * f),
+            Offset(crop.right, crop.top + crop.height * f),
+            gridPaint);
+      }
+      final arm = 18.0 / scale;
+      final cornerPaint = Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3 / scale
+        ..strokeCap = StrokeCap.round;
+      final corners = <(Offset, Offset, Offset, Offset)>[
+        (
+          crop.topLeft,
+          Offset(crop.left + arm, crop.top),
+          Offset(crop.left, crop.top + arm),
+          crop.topLeft
+        ),
+        (
+          crop.topRight,
+          Offset(crop.right - arm, crop.top),
+          Offset(crop.right, crop.top + arm),
+          crop.topRight
+        ),
+        (
+          crop.bottomLeft,
+          Offset(crop.left + arm, crop.bottom),
+          Offset(crop.left, crop.bottom - arm),
+          crop.bottomLeft
+        ),
+        (
+          crop.bottomRight,
+          Offset(crop.right - arm, crop.bottom),
+          Offset(crop.right, crop.bottom - arm),
+          crop.bottomRight
+        ),
+      ];
+      for (final (_, hEnd, vEnd, origin) in corners) {
+        canvas.drawLine(origin, hEnd, cornerPaint);
+        canvas.drawLine(origin, vEnd, cornerPaint);
+      }
     }
+    canvas.restore();
   }
 
   void _paintStroke(

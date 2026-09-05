@@ -168,6 +168,9 @@ class ClientHandler:
                     # 加载离线数据并发送初始好友/群组列表
                     message_handler.load_offline_data(username, ssock)
                     message_handler.send_initial_data(username, ssock)
+                    # 阶段 R-P14：文件体补发在初始数据（好友/群组列表）之后，
+                    # 大文件不再阻塞登录（客户端监听循环后台接收）
+                    message_handler.push_offline_files(username, ssock, device_id)
                     message_handler.process_messages(username, ssock)
                 else:
                     self.server.guarded_send(ssock, "error", "注册失败")
@@ -255,6 +258,9 @@ class ClientHandler:
                     # 加载离线消息、好友请求和文件请求，并发送初始好友/群组列表
                     message_handler.load_offline_data(username, ssock)
                     message_handler.send_initial_data(username, ssock)
+                    # 阶段 R-P14：文件体补发在初始数据（好友/群组列表）之后，
+                    # 大文件不再阻塞登录（客户端监听循环后台接收）
+                    message_handler.push_offline_files(username, ssock, device_id)
                     # 处理后续消息
                     message_handler.process_messages(username, ssock)
                 else:

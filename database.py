@@ -2395,7 +2395,8 @@ class Database:
         - 缺省：该用户参与的全部消息（全局）
 
         可选过滤（AND 组合，全部参数化查询）：
-        - sender：发送者等值
+        - sender：发送者过滤（单个用户名字符串或用户名列表，R-P28
+          多发送者 IN 匹配；空列表等价不过滤）
         - time_from / time_to：timestamp 下/上界（含边界，'YYYY-MM-DD HH:MM:SS'
           UTC 字符串——与存储格式一致，字典序比较即时间序比较）
         """
@@ -2418,8 +2419,11 @@ class Database:
                 conditions.append("CAST(content AS TEXT) LIKE ?")
                 args.append(f"%{keyword}%")
             if sender:
-                conditions.append("sender = ?")
-                args.append(sender)
+                senders = [sender] if isinstance(sender, str) else list(sender)
+                if senders:
+                    placeholders = ",".join("?" * len(senders))
+                    conditions.append(f"sender IN ({placeholders})")
+                    args.extend(senders)
             if time_from is not None:
                 conditions.append("timestamp >= ?")
                 args.append(time_from)
