@@ -1,4 +1,15 @@
+import sys
+import os
 import tkinter as tk
+
+# 确保项目根目录和当前包目录在 Python 路径中
+#   项目根：使 protocol / config / validation 可导入
+#   当前包：使 gui_login_ui / gui_chat_ui 等同级模块可导入
+_project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_package_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _project_root)
+sys.path.insert(0, _package_dir)
+
 from gui_login_ui import LoginUI
 from gui_chat_ui import ChatUI
 from gui_admin_ui import AdminUI

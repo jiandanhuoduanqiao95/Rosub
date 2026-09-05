@@ -1,0 +1,13 @@
+name: dart_protocol
+description: >-
+  Dart implementation of the chatroom custom binary protocol (protocol.py v1.0.0).
+  Provides send_message / recv_message codec for TCP socket communication,
+  identical to the Python protocol used by the chatroom server.
+version: 1.0.0
+
+environment:
+  sdk: ^3.0.0
+
+dev_dependencies:
+  test: ^1.24.0
+  lints: ^3.0.0

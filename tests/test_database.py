@@ -71,19 +71,25 @@ class TestDatabaseInit:
 
     def test_tables_created(self, db):
         """
-        【测试16】数据库创建时，8 张表都已正确建立
-        
+        【测试16】数据库创建时，全部表都已正确建立（阶段 I 新增 conversations，
+        阶段 J 新增 blocked_users，阶段 K 新增 reactions，阶段 M 新增
+        group_join_requests / group_invitations，阶段 N 新增 audit_logs，
+        阶段 O 新增 scheduled_messages / group_pinned_messages）
+
         怎么做：查询 SQLite 的 sqlite_master 系统表
         验证点：所有预期的表都存在
         """
         with db._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
             tables = {row[0] for row in cursor.fetchall()}
 
         expected = {
             "users", "offline_messages", "friends", "file_requests",
-            "groups", "group_members", "group_file_requests", "group_file_responses"
+            "groups", "group_members", "group_file_requests", "group_file_responses",
+            "message_history", "conversations", "blocked_users", "reactions",
+            "file_request_resolutions", "group_join_requests", "group_invitations",
+            "audit_logs", "scheduled_messages", "group_pinned_messages"
         }
         assert tables == expected, f"缺少表: {expected - tables}"
 
@@ -189,6 +195,108 @@ class TestUserManagement:
 
 
 # ============================================================
+# 第 2.1 组：修改密码测试（阶段 G2，TDD 红，待实现）
+# ============================================================
+
+class TestUpdatePassword:
+    """
+    【修改密码测试】阶段 G2
+
+    覆盖 Database.update_password(username, old_hash, new_hash)：
+      - old_hash 与数据库当前存储哈希按字节相等比较，匹配才允许替换
+      - 匹配 → 替换为新哈希并返回 True；不改变 is_admin 标志
+      - 用户不存在 / 哈希不匹配 → 返回 False，不抛异常
+      - 更新后旧密码失效，新密码可通过 bcrypt 校验
+
+    实现前：本类整体报 AttributeError（update_password 不存在），属 TDD 红。
+    """
+
+    def test_update_password_success(self, db):
+        """
+        【G2-1】正确旧哈希 → 哈希被替换为新哈希，返回 True
+        """
+        old_hash = bcrypt.hashpw("oldpass1".encode(), bcrypt.gensalt())
+        new_hash = bcrypt.hashpw("newpass1".encode(), bcrypt.gensalt())
+        db.add_user("alice", old_hash)
+
+        result = db.update_password("alice", old_hash, new_hash)
+
+        assert result is True
+        stored_hash, _ = db.get_user("alice")
+        assert bcrypt.checkpw("newpass1".encode(), stored_hash) is True
+
+    def test_update_password_wrong_old_hash_returns_false(self, db):
+        """
+        【G2-2】旧哈希不匹配 → 返回 False，原哈希保持不变
+        """
+        old_hash = bcrypt.hashpw("oldpass1".encode(), bcrypt.gensalt())
+        wrong_hash = bcrypt.hashpw("attacker1".encode(), bcrypt.gensalt())
+        db.add_user("alice", old_hash)
+
+        result = db.update_password(
+            "alice", wrong_hash, bcrypt.hashpw("newpass1".encode(), bcrypt.gensalt())
+        )
+
+        assert result is False
+        stored_hash, _ = db.get_user("alice")
+        assert stored_hash == old_hash, "原哈希不应被篡改"
+        assert bcrypt.checkpw("oldpass1".encode(), stored_hash) is True
+
+    def test_update_password_nonexistent_user_returns_false(self, db):
+        """
+        【G2-3】用户不存在 → 返回 False，不抛异常
+        """
+        result = db.update_password(
+            "ghost", bcrypt.hashpw(b"x", bcrypt.gensalt()), bcrypt.hashpw(b"y", bcrypt.gensalt())
+        )
+        assert result is False
+
+    def test_update_password_old_password_invalid_after_update(self, db):
+        """
+        【G2-4】更新后旧密码不再能通过校验，新密码可校验
+        """
+        old_hash = bcrypt.hashpw("oldpass1".encode(), bcrypt.gensalt())
+        new_hash = bcrypt.hashpw("newpass1".encode(), bcrypt.gensalt())
+        db.add_user("alice", old_hash)
+        assert db.update_password("alice", old_hash, new_hash) is True
+
+        stored_hash, _ = db.get_user("alice")
+        assert bcrypt.checkpw("oldpass1".encode(), stored_hash) is False
+        assert bcrypt.checkpw("newpass1".encode(), stored_hash) is True
+
+    def test_update_password_preserves_is_admin(self, db):
+        """
+        【G2-5】管理员改密后 is_admin 标志保持不变
+        """
+        old_hash = bcrypt.hashpw("adminold1".encode(), bcrypt.gensalt())
+        db.add_user("admin", old_hash)
+        with db._get_connection() as conn:
+            conn.execute("UPDATE users SET is_admin = 1 WHERE username = 'admin'")
+            conn.commit()
+        new_hash = bcrypt.hashpw("adminnew1".encode(), bcrypt.gensalt())
+
+        assert db.update_password("admin", old_hash, new_hash) is True
+
+        stored_hash, is_admin = db.get_user("admin")
+        assert bcrypt.checkpw("adminnew1".encode(), stored_hash) is True
+        assert is_admin == 1
+
+    def test_update_password_then_new_password_usable_for_login(self, db):
+        """
+        【G2-6】改密后新密码可用于登录流程的 bcrypt 校验
+        """
+        old_hash = bcrypt.hashpw("oldpass1".encode(), bcrypt.gensalt())
+        new_hash = bcrypt.hashpw("newpass1".encode(), bcrypt.gensalt())
+        db.add_user("alice", old_hash)
+        assert db.update_password("alice", old_hash, new_hash) is True
+
+        stored_hash, _ = db.get_user("alice")
+        # 模拟登录：checkpw(登录密码, 存储哈希)
+        assert bcrypt.checkpw("newpass1".encode(), stored_hash) is True
+        assert bcrypt.checkpw("oldpass1".encode(), stored_hash) is False
+
+
+# ============================================================
 # 第 3 组：离线消息测试
 # ============================================================
 
@@ -206,10 +314,11 @@ class TestOfflineMessages:
     def test_save_and_get_offline_message(self, db):
         """
         【测试25】保存一条离线消息，然后用 get_offline_messages 取出
-        
+
         验证点：
         - 消息内容、发送者、类型正确
         - 取出后状态变为 'delivered'
+        - 再次查询仍返回（已读历史作为最近消息保留，更早的通过 fetch_history 拉取）
         """
         db.save_offline_message("alice", "bob", "chat", b"Hello Bob!",
                                 message_id="msg-001")
@@ -217,16 +326,19 @@ class TestOfflineMessages:
         messages = db.get_offline_messages("bob")
         assert len(messages) == 1
 
-        sender, msg_type, content, filename, msg_id, status = messages[0]
+        sender, msg_type, content, filename, msg_id, status, receiver, timestamp, file_path = messages[0]
         assert sender == "alice"
+        assert receiver == "bob"
         assert msg_type == "chat"
         assert content == b"Hello Bob!"
         assert msg_id == "msg-001"
         assert status == "sent"  # 取出时返回的状态还是 'sent'
+        assert file_path is None
 
-        # 再次查询，应该没有 'sent' 状态的消息了（已被标记为 'delivered'）
+        # 再次查询：已读消息仍然返回（作为最近历史保留）
         messages2 = db.get_offline_messages("bob")
-        assert len(messages2) == 0
+        assert len(messages2) == 1
+        assert messages2[0][5] == "delivered"  # status 已变为 delivered
 
     def test_save_offline_message_with_file(self, db):
         """
@@ -239,9 +351,10 @@ class TestOfflineMessages:
 
         messages = db.get_offline_messages("bob")
         assert len(messages) == 1
-        _, msg_type, content, filename, _, _ = messages[0]
+        _, msg_type, content, filename, _, _, receiver, _, _ = messages[0]
         assert msg_type == "file"
         assert filename == "report.pdf"
+        assert receiver == "bob"
 
     def test_get_offline_messages_only_returns_sent(self, db):
         """
@@ -377,18 +490,15 @@ class TestFriendSystem:
 
     def test_add_friend_request_self(self, db):
         """
-        【测试34】给自己发好友请求（理论上不应该发生）
+        【测试34】给自己发好友请求应被拒绝
         
-        注意：当前代码没有阻止这种情况，只是检查用户是否存在。
-        这是一个潜在的 bug——但测试记录当前行为。
+        修复 BUG-02：现在 add_friend_request 会检查 requester == target，
+        如果相同则返回 False。
         """
         pw = bcrypt.hashpw("pw".encode(), bcrypt.gensalt())
         db.add_user("alice", pw)
-        # 当前允许自己加自己
         result = db.add_friend_request("alice", "alice")
-        # 这里根据实际行为：可能成功（两人相同但用户存在）
-        # 不验证特定结果，只验证不崩溃
-        assert result in (True, False)
+        assert result is False
 
     def test_accept_friend_request(self, db):
         """
@@ -461,6 +571,19 @@ class TestFriendSystem:
         # 接受后才是好友
         db.accept_friend_request("alice", "bob")
         assert db.is_friend("alice", "bob") is True
+
+    def test_add_friend_request_self_blocked(self, db):
+        """
+        【BUG-02 验证】自己不能添加自己为好友
+        
+        验证 add_friend_request("alice", "alice") 返回 False。
+        """
+        pw = bcrypt.hashpw("pw".encode(), bcrypt.gensalt())
+        db.add_user("alice", pw)
+        result = db.add_friend_request("alice", "alice")
+        assert result is False
+        # 也没有待处理请求
+        assert db.get_pending_friend_requests("alice") == []
 
 
 # ============================================================
@@ -586,11 +709,13 @@ class TestFileRequests:
 
         info = db.get_file_request("file-req-1")
         assert info is not None
-        sender, receiver, filename, filesize, content = info
+        sender, receiver, filename, filesize, content, file_path, status = info
         assert sender == "alice"
         assert receiver == "bob"
         assert filename == "doc.txt"
         assert content == file_content
+        assert file_path is None
+        assert status == "pending"
 
     def test_get_pending_file_requests(self, db):
         """
@@ -647,10 +772,8 @@ class TestFileRequests:
         db.save_group_file_response("grp-file-1", gid, "bob", "accept")
         db.save_group_file_response("grp-file-1", gid, "charlie", "reject")
 
-        # 注意：all_members_responded 检查的是所有群成员（包括发送者 alice）
-        # 是否都已响应。由于发送者不会自己响应，所以永远返回 False。
-        # 这是当前代码的一个设计缺陷，记录下来。
-        assert db.all_members_responded("grp-file-1", gid) is False
+        # all_members_responded 应排除发送者 alice，因此 bob+charlie 都响应后返回 True
+        assert db.all_members_responded("grp-file-1", gid) is True
 
     def test_all_members_responded_false(self, db):
         """
@@ -670,6 +793,45 @@ class TestFileRequests:
 
         # charlie 还没响应，所以不是全部
         assert db.all_members_responded("gfr-1", gid) is False
+
+    def test_all_members_responded_excludes_sender(self, db):
+        """
+        【BUG-01 验证】发送者不需要响应自己的群文件请求
+        
+        场景：群组有 alice(发送者), bob, charlie
+        bob 和 charlie 都响应后 → all_members_responded 应返回 True
+        （alice 作为发送者被排除）
+        """
+        self._setup_users(db, "charlie")
+
+        gid = db.create_group("BUG01测试群", "alice")
+        db.join_group(gid, "bob")
+        db.join_group(gid, "charlie")
+
+        db.save_group_file_request(gid, "alice", "bug01.pdf", 100, b"test", "bug01-1")
+
+        # bob 和 charlie 都响应
+        db.save_group_file_response("bug01-1", gid, "bob", "accept")
+        db.save_group_file_response("bug01-1", gid, "charlie", "reject")
+
+        # 发送者 alice 被排除，全部非发送者成员已响应 → True
+        assert db.all_members_responded("bug01-1", gid) is True
+
+        # 对比：如果 bob 还没响应，应返回 False
+        db2 = self._fresh_db()
+        self._setup_users(db2, "charlie")
+        gid2 = db2.create_group("BUG01b", "alice")
+        db2.join_group(gid2, "bob")
+        db2.join_group(gid2, "charlie")
+        db2.save_group_file_request(gid2, "alice", "b.pdf", 100, b"x", "bug01-2")
+        db2.save_group_file_response("bug01-2", gid2, "bob", "accept")
+        # charlie 未响应 → False
+        assert db2.all_members_responded("bug01-2", gid2) is False
+
+    def _fresh_db(self):
+        """创建一个新的独立数据库实例用于子测试"""
+        import tempfile
+        return Database(tempfile.mktemp(suffix=".db"))
 
 
 # ============================================================

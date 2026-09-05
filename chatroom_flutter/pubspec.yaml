@@ -1,0 +1,52 @@
+name: chatroom_flutter
+description: "聊天室 Flutter 桌面客户端 —— Windows / Linux / Android 三端统一"
+publish_to: 'none'
+version: 1.0.0
+
+environment:
+  sdk: ^3.0.0
+  flutter: '>=3.10.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  dart_protocol:
+    path: ../dart_protocol
+  ffi: ^2.1.0
+  file_picker: ^8.0.0
+  path_provider: ^2.1.0
+  intl: ^0.19.0
+  shared_preferences: ^2.5.5
+  # 阶段 L2（P1-23）：密码改存系统钥匙串（flutter_secure_storage）
+  flutter_secure_storage: ^9.2.2
+  # 阶段 L3（P0-4）：客户端本地消息缓存（sqflite + 桌面/测试 FFI 后端）
+  sqflite: ^2.4.1
+  sqflite_common_ffi: ^2.3.4
+  # R-P14（用户实测崩溃）：1.1.x 的 native→Flutter 消息在非平台线程发送
+  # （shell.cc ERROR + 可能崩溃），1.2.x/2.x 修复线程问题——升级并回归
+  media_kit: ^1.2.6
+  media_kit_video: ^2.0.1
+  media_kit_libs_video: ^1.0.7
+  # R-P9（文件预览扩展）：docx/xlsx/pptx 为 ZIP+OOXML，archive 纯 Dart 解包
+  # 提取文本预览（零原生依赖）
+  archive: ^4.2.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  # 测试重构新增：mocktail（无代码生成的 Mock 库，用于隔离网络服务的 widget 测试）
+  mocktail: ^1.0.4
+  # 测试强化新增：faker（生成随机用户名/文本/路径等数据，用于模糊/属性测试）
+  faker: ^2.2.0
+  # 测试重构新增：integration_test（Flutter 官方端到端测试绑定）
+  integration_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  # 彩色 emoji 字体（阶段 K：表情回应彩色渲染，Telegram 风格）
+  fonts:
+    - family: NotoColorEmoji
+      fonts:
+        - asset: assets/fonts/NotoColorEmoji.ttf

@@ -94,12 +94,21 @@ class HeadlessTestClient:
         self.send("register", username, password=password)
         self.username = username
 
-    def consume_initial(self, max_msg=15):
+    def consume_initial(self, max_msg=40):
         """
         消费登录后的初始推送。
         返回 (login_ok, friends_json, groups_json, offline_msgs)
+        阶段 J 修复：好友元数据/黑名单随登录初始数据推送，本方法一并消费，
+        收齐好友列表+群组列表+好友元数据+黑名单后提前退出（缓冲不残留）。
+        阶段 K：会话元数据（list_conversations）为最后一条推送，短超时尾随消费。
         """
-        result = {"login_ok": False, "friends": [], "groups": [], "offline": []}
+        result = {"login_ok": False, "friends": [], "groups": [], "offline": [],
+                  "friend_requests": [], "blocked": [], "friend_meta": [],
+                  "conversations": []}
+        got_friends = False
+        got_groups = False
+        got_meta = False
+        got_blocked = False
         for _ in range(max_msg):
             h, d = self.recv(timeout=2)
             if h is None:
@@ -116,8 +125,27 @@ class HeadlessTestClient:
                     continue
             elif t == "admin_response" and h.get("response_type") == "list_friends":
                 result["friends"] = json.loads(d.decode()) if d else []
+                got_friends = True
+            elif t == "admin_response" and h.get("response_type") == "list_friends_meta":
+                result["friend_meta"] = json.loads(d.decode()) if d else []
+                got_meta = True
+            elif t == "admin_response" and h.get("response_type") == "list_blocked":
+                result["blocked"] = json.loads(d.decode()) if d else []
+                got_blocked = True
+            elif t == "admin_response" and h.get("response_type") == "list_conversations":
+                result["conversations"] = json.loads(d.decode()) if d else []
             elif t == "list_groups":
                 result["groups"] = json.loads(d.decode()) if d else []
+                got_groups = True
+            elif t == "friend_request":
+                result["friend_requests"].append((h, d))
+            if got_friends and got_groups and got_meta and got_blocked:
+                break
+        # 阶段 K 尾随消费：list_conversations 在 list_blocked 之后推送
+        h, d = self.recv(timeout=0.1)
+        if (h is not None and h.get("type") == "admin_response"
+                and h.get("response_type") == "list_conversations"):
+            result["conversations"] = json.loads(d.decode()) if d else []
         return result
 
     def drain(self, timeout=0.5):
@@ -312,11 +340,11 @@ class TestE2EAuthentication:
         bob = HeadlessTestClient(port=srv.port)
 
         alice.connect()
-        alice.register("alice", "a123")
+        alice.register("alice", "alice123")
         alice.consume_initial()
 
         bob.connect()
-        bob.register("bob", "b123")
+        bob.register("bob", "bob12345")
         bob.consume_initial()
 
         # 加好友
@@ -330,6 +358,8 @@ class TestE2EAuthentication:
         # bob 下线
         bob.disconnect()
         time.sleep(0.3)
+        # 阶段 J：消费 bob 下线的 presence 广播（通知性噪声）
+        alice.drain(timeout=1.0)
 
         # alice 发消息给离线的 bob
         alice.send_chat("bob", "离线消息测试内容")
@@ -344,7 +374,7 @@ class TestE2EAuthentication:
         # bob 重新上线
         bob2 = HeadlessTestClient(port=srv.port)
         bob2.connect()
-        bob2.login("bob", "b123")
+        bob2.login("bob", "bob12345")
         r = bob2.consume_initial(max_msg=15)
 
         # 检查离线消息
@@ -378,7 +408,7 @@ class TestE2EGroupScenarios:
         bob = HeadlessTestClient(port=srv.port)
 
         # 注册
-        for c, name, pw in [(alice, "alice", "a"), (bob, "bob", "b")]:
+        for c, name, pw in [(alice, "alice", "alice123"), (bob, "bob", "bob12345")]:
             c.connect()
             c.register(name, pw)
             c.consume_initial()
@@ -394,9 +424,8 @@ class TestE2EGroupScenarios:
         groups = json.loads(d.decode())
         group_id = str(groups[0]["id"])
 
-        # bob 加入
-        bob.send("join_group", group_id)
-        bob.drain(timeout=1.0)  # 消费加入响应和通知
+        # bob 加入（阶段 M：join_group 改为申请制，测试前置直接落库）
+        srv.server.db.join_group(int(group_id), "bob")
 
         # alice 发群聊（先清管道）
         alice.drain(timeout=0.5)
@@ -431,7 +460,7 @@ class TestE2EMessageRecall:
         alice = HeadlessTestClient(port=srv.port)
         bob = HeadlessTestClient(port=srv.port)
 
-        for c, name, pw in [(alice, "alice", "a"), (bob, "bob", "b")]:
+        for c, name, pw in [(alice, "alice", "alice123"), (bob, "bob", "bob12345")]:
             c.connect()
             c.register(name, pw)
             c.consume_initial()
@@ -448,10 +477,8 @@ class TestE2EMessageRecall:
         h, d = bob.recv(timeout=3)
         assert h is not None and "将被撤回" in (d.decode() if d else ""), f"bob 未收到消息: {h}"
 
-        # 撤回
+        # 撤回（服务端不再回发"已撤回"确认，直接验证 bob 收到 recall 通知）
         alice.send("recall", "", message_id=msg_id)
-        h, d = alice.recv(timeout=2)
-        assert "已撤回" in (d.decode() if d else ""), f"撤回失败: {d.decode() if d else h}"
 
         # bob 收到撤回通知
         h, d = bob.recv(timeout=3)

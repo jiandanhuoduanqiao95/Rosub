@@ -1,0 +1,38 @@
+# ============================================================
+# 聊天室系统 —— 配置文件
+# ============================================================
+# 协议版本: 1.0.0（已冻结）
+# 修改此文件后重启服务端即可生效，无需重新编译。
+# ============================================================
+
+server:
+  host: "127.0.0.1"       # 服务端监听地址
+  port: 8090               # 服务端监听端口
+  ssl_cert: "SSL/tsetcn.crt"  # SSL 证书路径
+  ssl_key: "SSL/tsetcn.pem"   # SSL 私钥路径
+
+client:
+  host: "127.0.0.1"          # 默认服务器地址
+  port: 8090                  # 默认服务器端口
+  ssl_cert: "SSL/tsetcn.crt"  # SSL 证书路径
+  server_hostname: "tset.cn"  # SSL 证书主机名
+
+protocol:
+  version: "1.0.0"       # 协议版本（已冻结，不可随意修改）
+  chunk_size: 4194304    # 消息分块大小（字节），默认 4MB
+
+message:
+  recall_timeout_minutes: 2  # 消息撤回时限（分钟）
+
+file:
+  max_file_size: 5368709120       # 文件大小上限（字节），默认 5GB
+  large_file_threshold: 314572800  # 大文件直传阈值（字节），默认 300MB，超过则在线直传不落盘
+
+database:
+  path: "users.db"       # SQLite 数据库文件路径
+
+security:
+  # 管理员注册/登录密钥。生产环境建议不要把真实密钥写入此文件，
+  # 优先通过下方环境变量 CHATROOM_ADMIN_SECRET 注入。
+  admin_secret: ""
+  admin_secret_env: "CHATROOM_ADMIN_SECRET"

@@ -1,39 +1,46 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
+# ============================================================
+# 聊天室项目 —— .gitignore
+# 防止误提交密钥/证书、数据库、构建产物与运行时数据
+# （AGENTS.md 提交规范：不提交密钥、证书、数据库文件、构建产物）
+# ============================================================
 
-# SSL 密钥和证书（绝对不能提交！）
-SSL/tsetcn.key
-SSL/tsetcn.pem
-SSL/tsetcn.crt
+# 证书与私钥（SSL/ 下的生成脚本 SSL.py / gen_cert.py 仍被跟踪，勿忽略整个目录）
+SSL/*.crt
+SSL/*.key
+SSL/*.pem
 SSL/*.bak
 
-# IDE 配置
-.idea/
-
-# 编译后的二进制文件
-*.so
-*.dll
-*.exe
-
-# 数据库文件（可能包含真实用户数据）
+# 数据库文件（含运行时生成的备份）
+users.db
 *.db
 *.sqlite
 *.sqlite3
 
-# 运行时数据
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 编译产物
+*.so
+*.dll
+*.exe
+
+# 运行时文件存储（待处理/历史文件、收到的文件）
+file_store/
 files/
-chatroom_flutter/received_files/
+received_files/
 
-# 临时文件
-*_tmp.dart
-*_tmp.py
+# 客户端运行时用户数据（阶段 P2 StickerStore 表情包存储，R-P28 起忽略）
+chatroom_flutter/stickers/
 
-# 项目文件列表
-project_files.txt
-
-# Flutter
+# 构建产物与 IDE 配置
 .dart_tool/
 .packages
 build/
+.idea/
+.zcode/
+
+# 杂项临时文件
+project_files.txt
+*_tmp.dart
+*_tmp.py
