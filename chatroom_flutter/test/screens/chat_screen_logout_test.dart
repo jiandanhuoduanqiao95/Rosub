@@ -19,7 +19,7 @@ import 'package:chatroom_flutter/screens/chat_screen.dart';
 import 'package:chatroom_flutter/screens/login_screen.dart';
 import 'package:chatroom_flutter/services/socket_service.dart';
 import 'package:chatroom_flutter/services/state_manager.dart';
-import 'package:chatroom_flutter/widgets/raw_text_field.dart';
+import 'package:chatroom_flutter/widgets/adaptive_text_field.dart';
 
 class MockSocketService extends Mock implements SocketService {}
 
@@ -89,7 +89,7 @@ void main() {
       expect(find.text('登录'), findsWidgets);
       expect(find.textContaining('自动登录'), findsNothing);
       final usernameField = tester
-          .widget<RawTextField>(find.byKey(const ValueKey('username_field')));
+          .widget<AdaptiveTextField>(find.byKey(const ValueKey('username_field')));
       expect(usernameField.controller.text, '');
     });
 

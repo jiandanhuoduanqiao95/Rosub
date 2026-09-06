@@ -14,12 +14,14 @@ import 'package:file_picker/file_picker.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
-import '../config.dart';
 import '../l10n/app_strings.dart';
 import '../models/chat_models.dart';
+import '../platform/capabilities.dart';
 import '../services/chat_exporter.dart';
+import '../services/app_paths.dart';
 import '../services/file_drop.dart';
 import '../services/ime_bridge.dart';
+import '../services/session_lifecycle.dart';
 import '../services/session_store.dart';
 import '../services/socket_service.dart';
 import '../services/sticker_store.dart';
@@ -29,7 +31,7 @@ import '../services/taskbar_notifier.dart';
 import '../widgets/chat_view.dart';
 import '../widgets/dialogs.dart';
 import '../widgets/image_annotation_editor.dart';
-import '../widgets/raw_text_field.dart';
+import '../widgets/adaptive_text_field.dart';
 import '../widgets/sidebar.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -63,6 +65,11 @@ class _ChatScreenState extends State<ChatScreen> {
     // 阶段 N3（P2-4 文件拖拽发送）：接收 GTK 拖入的文件路径
     FileDrop.instance.ensureListening();
     FileDrop.instance.setOnFilesDropped(_onFilesDropped);
+    // 阶段 Q0-5：会话生命周期守护——回前台校验 socket 存活并重连
+    SessionLifecycleGuard.instance.bind(
+      isSocketAlive: () => widget.socketService.socket != null,
+      reconnect: () => widget.socketService.ensureConnectedOnResume(),
+    );
     // 阶段 O1 修订（2026-08-31 多公告并存）：进入聊天页时对当前会话
     // （重连恢复场景）拉取群公告历史
     final initial = _state.currentChat;
@@ -73,6 +80,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    SessionLifecycleGuard.instance.unbind();
     FileDrop.instance.setOnFilesDropped(null);
     _draftDebounce?.cancel();
     _dndExpiryTimer?.cancel();
@@ -386,13 +394,13 @@ class _ChatScreenState extends State<ChatScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            RawTextField(
+            AdaptiveTextField(
               controller: nicknameCtrl,
               hintText: '昵称',
               showChineseInput: true,
             ),
             const SizedBox(height: 8),
-            RawTextField(
+            AdaptiveTextField(
               controller: signatureCtrl,
               hintText: '个性签名',
               showChineseInput: true,
@@ -653,7 +661,7 @@ class _ChatScreenState extends State<ChatScreen> {
     String? path = message.filePath;
     if (path == null && message.filename != null) {
       final base = message.filename!.split(RegExp(r'[/\\]')).last;
-      path = '${AppConfig.receivedFilesDir}/$base';
+      path = '${AppPaths.receivedFilesDir}/$base';
     }
     if (bytes == null && (path == null || !File(path).existsSync())) return;
     showDialog<void>(
@@ -727,7 +735,7 @@ class _ChatScreenState extends State<ChatScreen> {
       var path = message.filePath;
       if (path == null && message.filename != null) {
         final base = message.filename!.split(RegExp(r'[/\\]')).last;
-        path = '${AppConfig.receivedFilesDir}/$base';
+        path = '${AppPaths.receivedFilesDir}/$base';
       }
       if (path != null && File(path).existsSync()) {
         bytes = await File(path).readAsBytes();
@@ -751,7 +759,7 @@ class _ChatScreenState extends State<ChatScreen> {
     var path = message.filePath;
     if (path == null && message.filename != null) {
       final base = message.filename!.split(RegExp(r'[/\\]')).last;
-      path = '${AppConfig.receivedFilesDir}/$base';
+      path = '${AppPaths.receivedFilesDir}/$base';
     }
     showFilePreviewDialog(
       context,
@@ -820,7 +828,7 @@ class _ChatScreenState extends State<ChatScreen> {
     var path = message.filePath;
     if (path == null && message.filename != null) {
       final base = message.filename!.split(RegExp(r'[/\\]')).last;
-      path = '${AppConfig.receivedFilesDir}/$base';
+      path = '${AppPaths.receivedFilesDir}/$base';
     }
     showDialog<void>(
       context: context,
@@ -894,7 +902,7 @@ class _ChatScreenState extends State<ChatScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('引用回复'),
-        content: RawTextField(
+        content: AdaptiveTextField(
           controller: ctrl,
           hintText: '输入回复内容',
           showChineseInput: true,
@@ -1452,7 +1460,8 @@ class _VideoViewerPageState extends State<_VideoViewerPage> {
   void _openWithSystemPlayer() {
     final path = widget.path;
     if (path != null && File(path).existsSync()) {
-      Process.run('xdg-open', [path]);
+      // Q0-3：经平台能力抽象打开（Linux=xdg-open；其他端按平台实现）
+      PlatformCapabilities.fileLauncher.openFile(path);
     }
   }
 

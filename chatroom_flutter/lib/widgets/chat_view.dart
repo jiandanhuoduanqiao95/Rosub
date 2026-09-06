@@ -2,7 +2,8 @@
 ///
 /// 显示消息列表 + 底部输入栏。
 /// 支持文本发送、文件发送、消息撤回、上滑加载历史（阶段 E）。
-/// 输入框使用 RawTextField + IME 桥接，避免 Flutter + fcitx GTK IM Context 死锁。
+/// 输入框经 AdaptiveTextField 适配层（Q0-2）：Linux 渲染 RawTextField +
+/// IME 桥接（避免 Flutter + fcitx GTK IM Context 死锁），其余平台标准输入。
 
 import 'dart:async';
 import 'dart:io';
@@ -11,9 +12,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../config.dart';
+import '../services/app_paths.dart';
 import '../models/chat_models.dart';
 import '../services/theme_settings.dart';
-import 'raw_text_field.dart';
+import 'adaptive_text_field.dart';
 
 class ChatView extends StatefulWidget {
   final String chatKey;
@@ -393,7 +395,7 @@ class _ChatViewState extends State<ChatView> {
             child: Row(
               children: [
                 Expanded(
-                  child: RawTextField(
+                  child: AdaptiveTextField(
                     key: const ValueKey('search_field'),
                     controller: _searchCtrl,
                     hintText: '搜索历史消息...',
@@ -784,7 +786,7 @@ class _InputBar extends StatelessWidget {
               onPressed: onShareCard,
             ),
           Expanded(
-            child: RawTextField(
+            child: AdaptiveTextField(
               controller: inputCtrl,
               hintText: '输入消息，Enter 发送...',
               showChineseInput: true,
@@ -983,7 +985,7 @@ class _MessageBubble extends StatelessWidget {
     final name = message.filename;
     if (name == null) return null;
     final base = name.split(RegExp(r'[/\\]')).last;
-    return '${AppConfig.receivedFilesDir}/$base';
+    return '${AppPaths.receivedFilesDir}/$base';
   }
 
   /// 阶段 P1：是否为可内嵌展示的视频文件消息（未撤回 + 视频扩展名 +

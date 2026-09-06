@@ -16,6 +16,8 @@ import 'package:dart_protocol/protocol.dart';
 
 import '../config.dart';
 import '../models/chat_models.dart';
+import 'app_paths.dart';
+import 'certificate_trust.dart';
 import 'message_cache.dart';
 import 'sticker_store.dart';
 import 'taskbar_notifier.dart';
@@ -204,7 +206,10 @@ class SocketService {
       _socket = await SecureSocket.connect(
         AppConfig.serverHost,
         AppConfig.serverPort,
-        onBadCertificate: (_) => true, // 接受自签名证书
+        // Q0-6：证书信任策略——默认恒真（局域网现状不变）；
+        // enforce 开启后按指纹/首连确认裁决（公网试用加固）
+        onBadCertificate: (cert) => CertificateTrust.validateSync(
+            cert, AppConfig.serverHost, AppConfig.serverPort),
         timeout: const Duration(seconds: 10),
       );
       _reader = MessageReader(_socket!);
@@ -325,6 +330,19 @@ class SocketService {
   // ============================================================
   // 断线重连
   // ============================================================
+
+  /// 阶段 Q0-5（移动生命周期接线）：回前台校验存活并按需重连。
+  /// resumed 时由 SessionLifecycleGuard（ChatScreen bind）触发：
+  /// 已登录（重连凭据在内存）+ 非主动退出 + socket 已死 + 未在重连
+  /// → 走既有 _onConnectionLost 链路（重连循环 + 重登录 + 离线补发）；
+  /// 其余情况 no-op（幂等——未登录/主动退出/正在重连/连接存活）。
+  Future<void> ensureConnectedOnResume() async {
+    if (_intentionalDisconnect) return;
+    if (_reconnecting) return;
+    if (_socket != null) return;
+    if (_savedUsername == null || _savedPassword == null) return;
+    _onConnectionLost();
+  }
 
   /// 网络断开时调用：切到 reconnecting 状态并启动重连循环
   /// 与 disconnect() 的区别：不清空好友/群组/消息，不回登录页
@@ -458,7 +476,8 @@ class SocketService {
       final s = await SecureSocket.connect(
         AppConfig.serverHost,
         AppConfig.serverPort,
-        onBadCertificate: (_) => true,
+        onBadCertificate: (cert) => CertificateTrust.validateSync(
+            cert, AppConfig.serverHost, AppConfig.serverPort),
         timeout: const Duration(seconds: 10),
       );
       _transferSocket = s;
@@ -3172,7 +3191,7 @@ class SocketService {
   /// 准备接收文件的目标路径（安全文件名 + 确保目录存在）
   String _prepareReceiveTarget(String filename) {
     final safeName = sanitizeFilename(filename);
-    final dir = Directory(AppConfig.receivedFilesDir);
+    final dir = Directory(AppPaths.receivedFilesDir);
     if (!dir.existsSync()) dir.createSync(recursive: true);
     return '${dir.path}/$safeName';
   }
@@ -3181,7 +3200,7 @@ class SocketService {
   String? _saveReceivedFile(String filename, Uint8List data) {
     try {
       final safeName = sanitizeFilename(filename);
-      final dir = Directory(AppConfig.receivedFilesDir);
+      final dir = Directory(AppPaths.receivedFilesDir);
       if (!dir.existsSync()) dir.createSync(recursive: true);
       final file = File('${dir.path}/$safeName');
       file.writeAsBytesSync(data);

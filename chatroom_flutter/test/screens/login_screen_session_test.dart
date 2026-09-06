@@ -19,7 +19,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:chatroom_flutter/main.dart';
-import 'package:chatroom_flutter/widgets/raw_text_field.dart';
+import 'package:chatroom_flutter/widgets/adaptive_text_field.dart';
 
 Size testerSurfaceSize = const Size(800, 1000);
 
@@ -79,7 +79,7 @@ Future<void> typeInto(WidgetTester tester, Key fieldKey, String text) async {
 
 /// 读取 RawTextField 的真实文本（其渲染含光标 span，不能依赖 find.text）。
 String fieldText(WidgetTester tester, Key fieldKey) =>
-    tester.widget<RawTextField>(find.byKey(fieldKey)).controller.text;
+    tester.widget<AdaptiveTextField>(find.byKey(fieldKey)).controller.text;
 
 Future<void> pumpApp(WidgetTester tester) async {
   await tester.binding.setSurfaceSize(testerSurfaceSize);

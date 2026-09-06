@@ -27,6 +27,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../models/chat_models.dart';
+import '../platform/capabilities.dart';
 import 'focus_tracker.dart';
 import 'state_manager.dart';
 
@@ -168,10 +169,13 @@ class TaskbarNotifier {
     return data.toBytes();
   }
 
-  /// 播放提示音（异常隔离：响铃失败不影响消息处理管线）
+  /// 播放提示音（异常隔离：响铃失败不影响消息处理管线）。
+  /// 阶段 Q0-3：经平台能力抽象分发（paplay/aplay 仅 Linux 默认链）；
+  /// 同步与异步（Future）错误均吞掉，不传播到调用方
   static void playSound() {
     try {
-      playSoundImpl();
+      PlatformCapabilities.sound.playNotifySound().then((_) {},
+          onError: (_) {});
     } catch (_) {}
   }
 
@@ -214,11 +218,13 @@ class TaskbarNotifier {
     }
   }
 
-  /// 任务栏图标开始闪烁（未聚焦收到新消息时）
+  /// 任务栏图标开始闪烁（未聚焦收到新消息时）。
+  /// 阶段 Q0-3：经平台能力抽象分发（override 注入优先；Linux 默认链
+  /// 走 setUrgencyImpl 既有注入点，非 Linux 端按能力实现降级）
   static void flash() {
     if (!enabled) return;
     try {
-      setUrgencyImpl(true);
+      PlatformCapabilities.notification.flash();
     } catch (_) {
       // 闪烁失败不影响消息处理管线
     }
@@ -227,7 +233,7 @@ class TaskbarNotifier {
   /// 清除紧急提示（窗口重新聚焦后调用；不受 enabled 限制）
   static void clearUrgency() {
     try {
-      setUrgencyImpl(false);
+      PlatformCapabilities.notification.clearUrgency();
     } catch (_) {}
   }
 

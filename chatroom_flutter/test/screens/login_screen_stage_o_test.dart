@@ -23,6 +23,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:chatroom_flutter/screens/login_screen.dart';
 import 'package:chatroom_flutter/services/theme_settings.dart';
 
+import 'package:chatroom_flutter/widgets/adaptive_text_field.dart';
 import 'package:chatroom_flutter/widgets/raw_text_field.dart';
 
 ThemeSettings get settings => ThemeSettings.instance;
@@ -34,8 +35,8 @@ Future<void> pumpLogin(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
-RawTextField field(WidgetTester tester, String key) =>
-    tester.widget<RawTextField>(find.byKey(ValueKey(key)));
+AdaptiveTextField field(WidgetTester tester, String key) =>
+    tester.widget<AdaptiveTextField>(find.byKey(ValueKey(key)));
 
 void main() {
   setUp(() {

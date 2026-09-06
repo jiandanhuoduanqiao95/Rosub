@@ -7,22 +7,27 @@ import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'screens/login_screen.dart';
+import 'services/app_paths.dart';
 import 'services/focus_tracker.dart';
 import 'services/ime_bridge.dart';
 import 'services/message_cache.dart';
+import 'services/session_lifecycle.dart';
 import 'services/sticker_store.dart';
 import 'services/taskbar_notifier.dart';
 import 'services/theme_settings.dart';
 
 import 'config.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // R-P27（用户复测"表情黑白"轮换出现）：构建标识打印到启动日志——
   // 多客户端排查"谁在跑旧构建"时与登录页页脚互为印证；旧构建同时呈现
   // 黑白表情 + media_kit non-platform thread ERROR
   // ignore: avoid_print
   print('[chatroom] build: ${AppConfig.buildStamp}');
+  // 阶段 Q0-4：解析平台存储目录（Linux 兼容既有 CWD 相对路径；
+  // 其余平台走 path_provider 文档目录）——先于任何落盘调用
+  await AppPaths.ensureInitialized();
   // 阶段 L3（P0-4）：初始化本地消息缓存（启动秒开 + 离线可读）；失败不阻塞启动
   MessageCache.init().then((_) {}, onError: (_) {});
   // R-P8（视频画面黑屏修复）：media_kit 要求在 runApp 前完成初始化
@@ -31,8 +36,9 @@ void main() {
     MediaKit.ensureInitialized();
   } catch (_) {}
   // R-P11（贴纸添加无反应修复）：生产入口注入贴纸落盘目录
-  // （未 init 时 addSticker/stickerBytes 静默返回 null——根因）
-  StickerStore.instance.init(baseDir: AppConfig.stickerStoreDir);
+  // （未 init 时 addSticker/stickerBytes 静默返回 null——根因）。
+  // Q0-4：目录改由 AppPaths 按平台解析
+  StickerStore.instance.init(baseDir: AppPaths.stickerStoreDir);
   runApp(const ChatroomApp());
 }
 
@@ -70,6 +76,12 @@ class _ChatroomAppState extends State<ChatroomApp> with WidgetsBindingObserver {
     if (state == AppLifecycleState.detached) {
       // 应用即将退出，清理 IME 桥接进程，避免窗口残留
       ImeBridgeManager.instance.shutdown();
+    }
+    if (state == AppLifecycleState.resumed) {
+      // 阶段 Q0-5：回前台校验 socket 存活并重连——paused（退后台）
+      // 下断开属预期，恢复后走既有重连 + 离线补发链路；桌面最小化
+      // 恢复时 socket 存活，此调用无操作（接线天然无害）
+      SessionLifecycleGuard.instance.handleResumed();
     }
     // 窗口焦点检测（阶段 H1）：resumed = 聚焦，inactive/paused = 失焦。
     // 任务栏闪烁（H2）仅在未聚焦时触发。

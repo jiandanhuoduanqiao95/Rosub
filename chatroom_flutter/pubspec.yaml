@@ -30,6 +30,8 @@ dependencies:
   # R-P9（文件预览扩展）：docx/xlsx/pptx 为 ZIP+OOXML，archive 纯 Dart 解包
   # 提取文本预览（零原生依赖）
   archive: ^4.2.0
+  # Q0-6（证书指纹校验）：SHA-256(cert.der) 指纹计算
+  crypto: ^3.0.0
 
 dev_dependencies:
   flutter_test:

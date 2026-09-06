@@ -10,7 +10,7 @@ import 'package:flutter/material.dart';
 import '../config.dart';
 import '../l10n/app_strings.dart';
 import '../services/theme_settings.dart';
-import '../widgets/raw_text_field.dart';
+import '../widgets/adaptive_text_field.dart';
 import '../models/chat_models.dart';
 import '../services/session_store.dart';
 import '../services/socket_service.dart';
@@ -568,7 +568,7 @@ class _LoginScreenState extends State<LoginScreen> {
           ],
 
           _loginField(
-            child: RawTextField(
+            child: AdaptiveTextField(
               key: const ValueKey('username_field'),
               controller: _usernameCtrl,
               focusNode: _usernameFocus,
@@ -578,7 +578,7 @@ class _LoginScreenState extends State<LoginScreen> {
           const SizedBox(height: 14),
 
           _loginField(
-            child: RawTextField(
+            child: AdaptiveTextField(
               key: const ValueKey('password_field'),
               controller: _passwordCtrl,
               hintText: '密码（至少6个字符）',
@@ -618,7 +618,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     key: const ValueKey('admin_secret_field_wrap'),
                     padding: const EdgeInsets.only(top: 4),
                     child: _loginField(
-                      child: RawTextField(
+                      child: AdaptiveTextField(
                         key: const ValueKey('admin_secret_field'),
                         controller: _adminSecretCtrl,
                         hintText: '管理员密钥',

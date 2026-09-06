@@ -14,7 +14,8 @@ import 'package:intl/intl.dart';
 import '../config.dart';
 import '../models/chat_models.dart';
 import '../l10n/app_strings.dart';
-import 'raw_text_field.dart';
+import 'adaptive_text_field.dart';
+import '../platform/capabilities.dart';
 import '../services/doc_preview.dart';
 import '../services/quick_reply_store.dart';
 import '../services/socket_service.dart';
@@ -133,7 +134,7 @@ void showUserSearchDialog(
             Row(
               children: [
                 Expanded(
-                  child: RawTextField(
+                  child: AdaptiveTextField(
                     controller: ctrl,
                     hintText: '输入用户名关键字',
                   ),
@@ -226,13 +227,13 @@ void _showAddFriendMessageDialog(
             child: Text('是否为对方取备注名？', style: TextStyle(fontSize: 13)),
           ),
           const SizedBox(height: 4),
-          RawTextField(
+          AdaptiveTextField(
             controller: noteCtrl,
             hintText: '备注名（可选）',
             showChineseInput: true,
           ),
           const SizedBox(height: 8),
-          RawTextField(
+          AdaptiveTextField(
             controller: ctrl,
             hintText: '验证消息（可选）',
             showChineseInput: true,
@@ -417,7 +418,7 @@ void showSetFriendNoteDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: Text('设置备注 - $username'),
-      content: RawTextField(
+      content: AdaptiveTextField(
         controller: ctrl,
         hintText: '备注名（留空清除）',
         showChineseInput: true,
@@ -444,7 +445,7 @@ void showSetFriendGroupDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: Text('设置分组 - $username'),
-      content: RawTextField(
+      content: AdaptiveTextField(
         controller: ctrl,
         hintText: '分组名（留空移回未分组）',
         showChineseInput: true,
@@ -474,7 +475,7 @@ void showAddFriendDialog(BuildContext context, ValueChanged<String> onAdd) {
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('添加好友'),
-      content: RawTextField(
+      content: AdaptiveTextField(
         controller: ctrl,
         hintText: '好友用户名',
       ),
@@ -512,7 +513,7 @@ void showCreateGroupDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('创建群组'),
-      content: RawTextField(
+      content: AdaptiveTextField(
         controller: ctrl,
         hintText: '群组名称',
         showChineseInput: true,
@@ -549,7 +550,7 @@ void showJoinGroupDialog(BuildContext context, ValueChanged<int> onJoin) {
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          RawTextField(
+          AdaptiveTextField(
             controller: ctrl,
             hintText: '群组 ID',
           ),
@@ -598,7 +599,7 @@ void _showJoinMessageDialog(
         children: [
           Text('群组: $groupName', style: const TextStyle(fontSize: 13)),
           const SizedBox(height: 8),
-          RawTextField(
+          AdaptiveTextField(
             controller: ctrl,
             hintText: '验证消息（选填，群主审批时可见）',
             showChineseInput: true,
@@ -646,7 +647,7 @@ void showGroupSearchDialog(
             Row(
               children: [
                 Expanded(
-                  child: RawTextField(
+                  child: AdaptiveTextField(
                     controller: ctrl,
                     hintText: '输入群组名称关键字',
                     showChineseInput: true,
@@ -720,7 +721,7 @@ void showGroupSearchDialog(
             Row(
               children: [
                 Expanded(
-                  child: RawTextField(
+                  child: AdaptiveTextField(
                     controller: idCtrl,
                     hintText: '或输入群组 ID 申请加入',
                   ),
@@ -840,7 +841,7 @@ void _showAcceptNoteDialog(
         children: [
           const Text('是否添加备注？'),
           const SizedBox(height: 8),
-          RawTextField(
+          AdaptiveTextField(
             controller: ctrl,
             hintText: '备注名（可选，留空跳过）',
             showChineseInput: true,
@@ -1046,12 +1047,12 @@ void _showResetPasswordDialog(BuildContext context, SocketService service) {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            RawTextField(
+            AdaptiveTextField(
               controller: userCtrl,
               hintText: '目标用户名',
             ),
             const SizedBox(height: 8),
-            RawTextField(
+            AdaptiveTextField(
               controller: pwCtrl,
               hintText: '新密码（6-128 位，无控制字符）',
               obscureText: true,
@@ -1091,7 +1092,7 @@ void _showAnnouncementDialog(BuildContext context, SocketService service) {
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('发送系统公告'),
-      content: RawTextField(
+      content: AdaptiveTextField(
         controller: ctrl,
         hintText: '公告内容',
         showChineseInput: true,
@@ -1120,7 +1121,7 @@ void _showDeleteUserDialog(BuildContext context, SocketService service) {
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('删除用户'),
-      content: RawTextField(
+      content: AdaptiveTextField(
         controller: ctrl,
         hintText: '要删除的用户名',
       ),
@@ -1218,21 +1219,21 @@ void showChangePasswordDialog(BuildContext context, SocketService service) {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            RawTextField(
+            AdaptiveTextField(
               controller: oldCtrl,
               hintText: '当前密码',
               obscureText: true,
               showVisibilityToggle: true,
             ),
             const SizedBox(height: 8),
-            RawTextField(
+            AdaptiveTextField(
               controller: newCtrl,
               hintText: '新密码',
               obscureText: true,
               showVisibilityToggle: true,
             ),
             const SizedBox(height: 8),
-            RawTextField(
+            AdaptiveTextField(
               controller: confirmCtrl,
               hintText: '确认新密码',
               obscureText: true,
@@ -2015,7 +2016,7 @@ void _showRenameGroupDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('修改群名'),
-      content: RawTextField(
+      content: AdaptiveTextField(
         controller: controller,
         hintText: '新群名',
         showChineseInput: true,
@@ -2047,7 +2048,7 @@ void _showInviteMemberDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('邀请成员'),
-      content: RawTextField(controller: controller, hintText: '用户名'),
+      content: AdaptiveTextField(controller: controller, hintText: '用户名'),
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(ctx),
@@ -2643,7 +2644,7 @@ void showGroupAnnouncementDialog(
                     const Text('公告将推送给全体成员',
                         style: TextStyle(fontSize: 12, color: Colors.grey)),
                     const SizedBox(height: 8),
-                    RawTextField(
+                    AdaptiveTextField(
                       controller: ctrl,
                       hintText: '输入群公告内容...',
                       showChineseInput: true,
@@ -2795,7 +2796,7 @@ void showQuickReplyPanel(
                 Row(
                   children: [
                     Expanded(
-                      child: RawTextField(
+                      child: AdaptiveTextField(
                         controller: addCtrl,
                         hintText: '输入新常用语...',
                         showChineseInput: true,
@@ -2943,7 +2944,7 @@ void showScheduleMessageDialog(
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              RawTextField(
+              AdaptiveTextField(
                 controller: textCtrl,
                 hintText: '输入定时消息内容...',
                 showChineseInput: true,
@@ -3435,7 +3436,7 @@ void showAdvancedSearchDialog(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                RawTextField(
+                AdaptiveTextField(
                   key: const ValueKey('adv_search_keyword'),
                   controller: keywordCtrl,
                   hintText: '关键词（可选）',
@@ -3817,7 +3818,8 @@ class _SearchDatePickerBodyState extends State<_SearchDatePickerBody> {
 /// R-P2（文件预览，参考微信）：文件卡片点击 → 预览。
 /// 文本类文件（≤1MB）与 Office/PDF（R-P9：docx/xlsx/pptx/pdf，纯 Dart
 /// 文本提取，尽力而为）内嵌预览；其余显示类型图标 + 基本信息；
-/// 提供"打开文件/打开所在目录"（系统默认程序，xdg-open）。
+/// 提供"打开文件/打开所在目录"（系统默认程序；Q0-3 经平台能力抽象，
+/// Linux=xdg-open，其他端按平台实现）。
 void showFilePreviewDialog(
   BuildContext context, {
   required String filename,
@@ -3911,14 +3913,14 @@ void showFilePreviewDialog(
       actions: [
         if (exists)
           TextButton.icon(
-            onPressed: () => Process.run('xdg-open', [File(path).parent.path]),
+            onPressed: () => PlatformCapabilities.fileLauncher.openDirectory(File(path).parent.path),
             icon: const Icon(Icons.folder_open_rounded, size: 18),
             label: const Text('打开所在目录'),
           ),
         if (exists)
           FilledButton(
             style: FilledButton.styleFrom(minimumSize: const Size(0, 40)),
-            onPressed: () => Process.run('xdg-open', [path]),
+            onPressed: () => PlatformCapabilities.fileLauncher.openFile(path),
             child: const Text('打开文件'),
           ),
         TextButton(
