@@ -32,6 +32,20 @@ dependencies:
   archive: ^4.2.0
   # Q0-6（证书指纹校验）：SHA-256(cert.der) 指纹计算
   crypto: ^3.0.0
+  # 阶段 R1（音视频通话）：libwebrtc 官方 Flutter 封装（五平台）
+  flutter_webrtc: ^1.4.1
+  # R1 真机排障（r1s6）：flutter_webrtc 的传递依赖，main() 转发 libwebrtc
+  # 原生日志需要显式引用（定位 Android 闪退后可移除）
+  logger: ^2.0.2
+
+# 阶段 R1 真机三轮（r1s4）：Android 接听瞬间 SIGABRT 闪退，根因是
+# 1.6.x Android 端 PeerConnectionObserver.onAddTrack 在信令线程调用
+# m150 的 getTransceivers()（dispose-all 语义，双重释放即崩，上游
+# issue #2162，无修复版本）——本地补丁副本见
+# third_party/flutter_webrtc/README-PATCH.md；上游修复发布后移除。
+dependency_overrides:
+  flutter_webrtc:
+    path: ../third_party/flutter_webrtc
 
 dev_dependencies:
   flutter_test:
@@ -41,6 +55,8 @@ dev_dependencies:
   mocktail: ^1.0.4
   # 测试强化新增：faker（生成随机用户名/文本/路径等数据，用于模糊/属性测试）
   faker: ^2.2.0
+  # 阶段 R1：通话状态机定时器测试（45s 响铃超时 / 2s 结束复位虚拟时钟）
+  fake_async: ^1.3.1
   # 测试重构新增：integration_test（Flutter 官方端到端测试绑定）
   integration_test:
     sdk: flutter

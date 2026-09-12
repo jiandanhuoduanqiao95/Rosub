@@ -29,6 +29,8 @@ dependencyResolutionManagement {
         maven("https://maven.aliyun.com/repository/public")
         // Q1 引擎制品（io.flutter:flutter_embedding/arm64_v8a_release 等）
         maven("https://storage.flutter-io.cn/download.flutter.io")
+        // 阶段 R1：flutter_webrtc 的 audioswitch 依赖仅发布在 JitPack
+        maven("https://jitpack.io")
     }
 }
 

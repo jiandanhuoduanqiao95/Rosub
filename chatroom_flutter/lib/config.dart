@@ -2,8 +2,13 @@
 ///
 /// 所有配置项在此集中管理。后续可从 config.yaml 读取。
 class AppConfig {
-  /// 服务器地址
-  static const String serverHost = '局域网IP';
+  /// 服务器地址（可变静态量，仿 serverPort：E2E 测试覆盖为本机回环）。
+  /// 真机安装包经构建参数编译期注入：--dart-define=CHATROOM_SERVER_HOST=<开发机局域网 IP>
+  /// （Q1 曾误提交硬编码局域网 IP，现默认值恒 127.0.0.1、源码不再为真机验证临时改动）
+  static String serverHost = const String.fromEnvironment(
+    'CHATROOM_SERVER_HOST',
+    defaultValue: '127.0.0.1',
+  );
 
   /// 服务器端口（E2E 测试可覆盖，避免多 E2E 文件并发争用同一端口）
   static int serverPort = 8090;
@@ -54,7 +59,7 @@ class AppConfig {
   /// 递增，显示在登录页页脚并打印到启动日志——多客户端排查"谁在跑
   /// 旧构建"（旧构建同时呈现黑白表情 + media_kit non-platform thread
   /// ERROR）时一眼可辨。每次修订轮次更新此值。
-  static const String buildStamp = 'q1r10';
+  static const String buildStamp = 'r1s9';
 
   /// 彩色 emoji 字体栈（R-P26 硬化）：首选内置 COLRv1 字体，第二兜底
   /// 系统 Noto Color Emoji（CBDT 彩色位图，Ubuntu 默认安装、覆盖全部

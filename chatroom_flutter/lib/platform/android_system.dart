@@ -39,6 +39,20 @@ class AndroidSystem {
     }
   }
 
+  /// 阶段 R1：通话运行时权限——语音=RECORD_AUDIO，视频追加 CAMERA
+  /// （全部授予才 true；拒绝时不发起通话）。非 Android 平台恒 true。
+  static Future<bool> requestCallPermissions({required bool video}) async {
+    if (!_isAndroid) return true;
+    try {
+      return await _channel.invokeMethod<bool>('requestCallPermissions', {
+            'video': video,
+          }) ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// 启动前台服务保活（登录成功进入聊天页时调用；重复调用幂等）
   static Future<bool> startKeepAlive() async {
     if (!_isAndroid) return false;
@@ -80,8 +94,7 @@ class AndroidSystem {
   static Future<bool> setupMessageChannel() async {
     if (!_isAndroid) return false;
     try {
-      return await _channel.invokeMethod<bool>('setupMessageChannel') ??
-          false;
+      return await _channel.invokeMethod<bool>('setupMessageChannel') ?? false;
     } catch (_) {
       return false;
     }
@@ -113,9 +126,8 @@ class AndroidSystem {
   /// 可见位置的唯一可靠通道；经 FileProvider 只读 URI）。fire-and-forget。
   static void shareFile(String path) {
     if (!_isAndroid) return;
-    _channel
-        .invokeMethod<bool>('shareFile', {'path': path})
-        .then((_) {}, onError: (_) {});
+    _channel.invokeMethod<bool>('shareFile', {'path': path}).then((_) {},
+        onError: (_) {});
   }
 
   /// 清除应用外消息通知（回前台已读语义）

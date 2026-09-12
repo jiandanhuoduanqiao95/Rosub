@@ -132,6 +132,10 @@ class ChatView extends StatefulWidget {
   final bool searchInputVisible;
   final ValueChanged<bool>? onSearchVisibilityChanged;
 
+  // 阶段 R1：通话入口（仅私聊会话由 ChatScreen 提供；null 不渲染）
+  final VoidCallback? onVoiceCall;
+  final VoidCallback? onVideoCall;
+
   const ChatView({
     super.key,
     required this.chatKey,
@@ -183,6 +187,8 @@ class ChatView extends StatefulWidget {
     this.headerVisible = true,
     this.searchInputVisible = false,
     this.onSearchVisibilityChanged,
+    this.onVoiceCall,
+    this.onVideoCall,
   });
 
   static void _noopSearch(String _) {}
@@ -679,6 +685,19 @@ class _ChatViewState extends State<ChatView> {
                   ),
             ),
           ),
+          // 阶段 R1：通话入口（私聊会话，ChatScreen 提供）
+          if (widget.onVoiceCall != null)
+            IconButton(
+              icon: const Icon(Icons.call_rounded),
+              tooltip: '语音通话',
+              onPressed: widget.onVoiceCall,
+            ),
+          if (widget.onVideoCall != null)
+            IconButton(
+              icon: const Icon(Icons.videocam_rounded),
+              tooltip: '视频通话',
+              onPressed: widget.onVideoCall,
+            ),
           // 搜索模式：返回按钮；非搜索模式：搜索入口（仅私聊会话）
           if (widget.isSearchMode)
             IconButton(

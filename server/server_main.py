@@ -12,6 +12,7 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database import Database
+from server.server_call_handler import CallHandler
 from server.server_client_handler import ClientHandler
 from server.server_group_handler import GroupHandler
 from config import config
@@ -30,6 +31,8 @@ class Server:
         # 群组处理器（Server 级引用，供定时消息投递等非会话路径复用；
         # 与 MessageHandler 内的实例同为无状态薄封装）
         self.group_handler = GroupHandler(self)
+        # 通话信令处理器（阶段 R1：邀请/应答/挂断中继 + 占线状态，纯内存）
+        self.call_handler = CallHandler(self)
         # 最近日志环形缓冲（阶段 M4：P1-19 服务端状态面板 recent_logs）
         self.recent_logs = collections.deque(maxlen=200)
         self._attach_recent_log_handler()
@@ -498,7 +501,7 @@ class Server:
     SCHEDULER_INTERVAL = 5.0  # 定时器扫描周期（秒）
 
     def scheduler_scan(self, now=None):
-        """单次到期扫描（O5）：投递全部到点的 pending 定时消息。
+        """单次到期扫描（O5）：投递全部到期的 pending 定时消息。
 
         可独立调用（测试直接驱动，仿 watchdog_scan）；
         start_scheduler 周期性调用。返回已投递的 message_id 列表。
@@ -509,6 +512,10 @@ class Server:
             （message_id=f"{id}_{成员}", group_id）+ notify_group_members
             群推送（跳过发送者）
         """
+        try:
+            self.call_handler.expire_calls(now=now)
+        except Exception as e:
+            logging.error(f"通话邀请过期清理异常: {e}")
         due = self.db.get_due_scheduled_messages(now)
         delivered_ids = []
         for item in due:

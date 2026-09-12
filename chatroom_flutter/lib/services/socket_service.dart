@@ -13,7 +13,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:dart_protocol/protocol.dart';
-import 'package:flutter/foundation.dart' show TargetPlatform;
+import 'package:flutter/foundation.dart' show TargetPlatform, visibleForTesting;
 
 import '../config.dart';
 import '../platform/android_system.dart';
@@ -21,6 +21,8 @@ import '../platform/capabilities.dart';
 import 'focus_tracker.dart';
 import '../models/chat_models.dart';
 import 'app_paths.dart';
+import 'call_engine.dart';
+import 'call_service.dart';
 import 'certificate_trust.dart';
 import 'message_cache.dart';
 import 'sent_file_store.dart';
@@ -29,8 +31,27 @@ import 'taskbar_notifier.dart';
 import 'theme_settings.dart';
 import 'state_manager.dart';
 
-class SocketService {
+class SocketService implements CallSignaling {
   final AppState state = AppState.instance;
+
+  /// 阶段 R1：测试引擎注入（E2E 真实服务端 + 假 WebRTC 引擎）——
+  /// 首次访问 callService 前设置生效；生产路径恒 null（真实引擎）
+  @visibleForTesting
+  static CallEngine? callEngineOverride;
+
+  /// 阶段 R1：通话服务（状态机 + WebRTC 会话）——信令经本类收发。
+  /// 惰性初始化：未收到/未发起通话的测试与普通会话不触碰 WebRTC。
+  late final CallService callService =
+      CallService(signaling: this, engine: callEngineOverride)
+        ..addListener(_forwardCallPhase);
+
+  /// 阶段 R1：通话状态变化回调（ChatScreen 挂载通话界面路由用）。
+  /// 回调字段而非 getter：MockSocketService（mocktail）未打桩的
+  /// 非空 getter 返回 null 会在读取时抛 TypeError——void 字段赋值
+  /// 在 mock 上是安全 no-op，既有测试零适配。
+  void Function()? onCallPhaseChanged;
+
+  void _forwardCallPhase() => onCallPhaseChanged?.call();
 
   // ---- 阶段 L1（P0-7，2026-08-20 用户决策）：设备类别标识（按平台）----
   // 登录时以 device_id 头发送，服务端据此区分会话：
@@ -151,8 +172,7 @@ class SocketService {
     }
     // Q1 七轮（问题1）：后台/锁屏期间的传输进度系统通知（应用前台由
     // 全局传输指示条承载，不重复打扰）
-    _notifyTransferProgressBackground(
-        filename, transferred, total, isSend);
+    _notifyTransferProgressBackground(filename, transferred, total, isSend);
   }
 
   /// 后台传输进度系统通知（仅 Android 且应用不在前台；1s 节流）
@@ -163,8 +183,7 @@ class SocketService {
       if (FocusTracker.instance.focused) return;
       final now = DateTime.now();
       if (_lastTransferNotifyBg != null &&
-          now.difference(_lastTransferNotifyBg!) <
-              const Duration(seconds: 1)) {
+          now.difference(_lastTransferNotifyBg!) < const Duration(seconds: 1)) {
         return;
       }
       _lastTransferNotifyBg = now;
@@ -303,6 +322,7 @@ class SocketService {
     _cancelReconnect();
     _running = false;
     _receivingFile = false;
+    callService.handleDisconnected();
     _closeTransferSocket();
     _reader?.close();
     try {
@@ -323,6 +343,15 @@ class SocketService {
       _transferSocket?.close();
     } catch (_) {}
     _transferSocket = null;
+  }
+
+  /// 阶段 R1：发送通话信令（CallSignaling 实现，经既有发送队列）
+  @override
+  Future<void> sendCall(String type, String to, String callId,
+      {String? callType, String? body}) {
+    final headers = <String, dynamic>{'to': to, 'call_id': callId};
+    if (callType != null) headers['call_type'] = callType;
+    return _sendMessage(type, body ?? '', extraHeaders: headers);
   }
 
   // ============================================================
@@ -486,6 +515,7 @@ class SocketService {
     _stopKeepalive();
     _running = false;
     _receivingFile = false;
+    callService.handleDisconnected();
     _closeTransferSocket();
     try {
       _reader?.close();
@@ -1259,6 +1289,20 @@ class SocketService {
             );
             gotGroupList = true;
           } catch (_) {}
+          break;
+
+        case 'call_invite':
+        case 'call_accept':
+        case 'call_active':
+        case 'call_reject':
+        case 'call_cancel':
+        case 'call_hangup':
+        case 'call_failed':
+        case 'call_offer':
+        case 'call_answer':
+        case 'call_ice':
+          // 阶段 R1：登录/重连初始数据窗口内到达的通话信令不得丢弃
+          callService.handleSignal(type!, header, body as Uint8List);
           break;
 
         default:
@@ -2214,6 +2258,20 @@ class SocketService {
           state.log('错误: $errorText');
           state.showNotice('错误: $errorText');
         }
+        break;
+
+      case 'call_invite':
+      case 'call_accept':
+      case 'call_active':
+      case 'call_reject':
+      case 'call_cancel':
+      case 'call_hangup':
+      case 'call_failed':
+      case 'call_offer':
+      case 'call_answer':
+      case 'call_ice':
+        // 阶段 R1：通话信令转交通话服务（状态机 + WebRTC）
+        callService.handleSignal(type!, header, body);
         break;
 
       default:
@@ -3372,8 +3430,7 @@ class SocketService {
 
   /// 字节直发副本落盘（Q1 五轮问题2）：sent_files/<messageId>_<safeName>
   /// （messageId 前缀防同名互覆）；失败返回 null（不阻塞发送）
-  String? _persistSentCopy(
-      String messageId, String filename, Uint8List bytes) {
+  String? _persistSentCopy(String messageId, String filename, Uint8List bytes) {
     try {
       final safeName = sanitizeFilename(filename);
       final dir = Directory(AppPaths.sentFilesDir);

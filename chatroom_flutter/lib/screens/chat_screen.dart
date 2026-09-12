@@ -18,6 +18,8 @@ import '../models/chat_models.dart';
 import '../platform/android_system.dart';
 import '../platform/battery_optimization.dart';
 import '../platform/capabilities.dart';
+import '../screens/call_screen.dart';
+import '../services/call_service.dart';
 import '../services/chat_exporter.dart';
 import '../services/app_paths.dart';
 import '../services/export_saver.dart';
@@ -58,6 +60,9 @@ class _ChatScreenState extends State<ChatScreen>
   /// 到期自动关闭免打扰开关并 SnackBar 提醒——声音通道随即恢复）
   Timer? _dndExpiryTimer;
 
+  /// 阶段 R1：通话界面路由占用标志（防重复 push；关闭后复位）
+  bool _callRouteOpen = false;
+
   /// 阶段 M2：群邀请以入口保留（AppBar badge + 列表对话框），无即时弹窗
 
   @override
@@ -65,6 +70,10 @@ class _ChatScreenState extends State<ChatScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _state.addListener(_onStateChanged);
+    // 阶段 R1：来电/去电进入通话界面（idle→活跃即 push，通话界面自回）。
+    // 经回调字段接线（见 SocketService.onCallPhaseChanged 注释）——
+    // 直接读 callService getter 会在 MockSocketService 上抛 TypeError
+    widget.socketService.onCallPhaseChanged = _onCallChanged;
     _dndExpiryTimer =
         Timer.periodic(const Duration(seconds: 30), (_) => _checkDndExpiry());
     // 阶段 N3（P2-4 文件拖拽发送）/ Q1-2：经平台能力抽象接收拖入的
@@ -131,6 +140,7 @@ class _ChatScreenState extends State<ChatScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     SessionLifecycleGuard.instance.unbind();
+    widget.socketService.onCallPhaseChanged = null;
     // Q1 五轮（问题1）：离开聊天页/退出登录停止前台服务（防退后台
     // 启动后残留）；未启动时 stopService 为无害 no-op
     if (effectiveTargetPlatform() == TargetPlatform.android) {
@@ -1250,6 +1260,64 @@ class _ChatScreenState extends State<ChatScreen>
     return page;
   }
 
+  /// 阶段 R1：通话状态变化——来电/去电时全屏进入通话界面
+  /// （通话界面在服务回 idle 时自行返回；路由关闭后复位占用标志）
+  void _onCallChanged() {
+    if (!mounted) return;
+    final svc = widget.socketService.callService;
+    if (svc.phase != CallPhase.idle && !_callRouteOpen) {
+      _callRouteOpen = true;
+      Navigator.of(context, rootNavigator: true)
+          .push(MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => CallScreen(callService: svc),
+      ))
+          .then((_) => _callRouteOpen = false);
+    }
+  }
+
+  /// 阶段 R1：通话类型选择（微信式底部弹层；compact 单入口）
+  void _showCallTypePicker() {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.call_rounded),
+              title: const Text('语音通话'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                _startCall(CallType.audio);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.videocam_rounded),
+              title: const Text('视频通话'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                _startCall(CallType.video);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 阶段 R1：发起通话（私聊专属入口）
+  Future<void> _startCall(CallType type) async {
+    final peer = _state.currentChat;
+    if (peer == null || !_isPrivateChat(peer)) return;
+    await startOutgoingCall(context, widget.socketService.callService, peer,
+        type);
+  }
+
+  /// 阶段 R1：私聊会话判定（系统会话/群聊不支持通话）
+  bool _isPrivateChat(String chatKey) =>
+      chatKey != '服务器' && !chatKey.startsWith('group_');
+
   /// Q1 真机反馈 #3：compact 聊天态 AppBar 动作——搜索 + 导出
   /// （系统会话不提供）+ 固定文件管理入口（Q1 四轮问题4 恢复）。
   /// Q1 真机反馈二轮（收到文件请求无感知）：聊天态同置待处理文件
@@ -1269,6 +1337,14 @@ class _ChatScreenState extends State<ChatScreen>
               onPressed: _showFileRequests,
             ),
           ),
+        ),
+      // 阶段 R1：通话入口（单按钮收敛——compact AppBar 图标预算紧张，
+      // 语音/视频经底部弹层选择；群聊/系统会话不提供）
+      if (!isSystem && !current.startsWith('group_'))
+        IconButton(
+          tooltip: '通话',
+          icon: const Icon(Icons.call_rounded),
+          onPressed: _showCallTypePicker,
         ),
       if (!isSystem)
         IconButton(
@@ -1527,6 +1603,13 @@ class _ChatScreenState extends State<ChatScreen>
             searchInputVisible: _chatSearchVisible,
             onSearchVisibilityChanged: compactChat
                 ? (v) => setState(() => _chatSearchVisible = v)
+                : null,
+            // 阶段 R1：宽屏头部通话入口（仅私聊会话提供）
+            onVoiceCall: _isPrivateChat(_state.currentChat!)
+                ? () => _startCall(CallType.audio)
+                : null,
+            onVideoCall: _isPrivateChat(_state.currentChat!)
+                ? () => _startCall(CallType.video)
                 : null,
             onRetrySend: _retrySendMessage,
             // 阶段 K2：输入变化 → 本地草稿状态 + 防抖自动保存

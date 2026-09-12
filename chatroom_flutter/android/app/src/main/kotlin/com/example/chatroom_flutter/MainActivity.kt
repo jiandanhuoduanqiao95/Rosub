@@ -43,6 +43,13 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // 阶段 R1 真机二轮：flutter_webrtc 1.6.x 在 getUserMedia 启动时经
+        // AudioSwitchManager（JitPack audioswitch）改音频模式/请求焦点/枚举
+        // 蓝牙路由——真机（OneUI）在该时刻闪退，Linux 无此组件同代码正常。
+        // 关闭其音频会话管理，WebRTC 采播走 Android 默认路由；崩溃栈拿到
+        // 前不再回开。
+        com.cloudwebrtc.webrtc.audio.AudioSwitchManager
+            .setAudioSessionManagementEnabled(false)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "chatroom/platform")
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -120,6 +127,7 @@ class MainActivity : FlutterActivity() {
                                 this, Manifest.permission.POST_NOTIFICATIONS
                             ) != PackageManager.PERMISSION_GRANTED
                         ) {
+                            permissionResult?.success(false)
                             permissionResult = result
                             ActivityCompat.requestPermissions(
                                 this,
@@ -128,6 +136,35 @@ class MainActivity : FlutterActivity() {
                             )
                         } else {
                             result.success(true)
+                        }
+                    }
+                    // ---- 阶段 R1：通话运行时权限（audio=RECORD_AUDIO，
+                    // video 追加 CAMERA；S+ 追加蓝牙路由所需的
+                    // BLUETOOTH_CONNECT；全部授予才返回 true） ----
+                    "requestCallPermissions" -> {
+                        val video = call.argument<Boolean>("video") ?: false
+                        val wanted = mutableListOf(Manifest.permission.RECORD_AUDIO)
+                        if (video) wanted.add(Manifest.permission.CAMERA)
+                        if (Build.VERSION.SDK_INT >= 31) {
+                            wanted.add(Manifest.permission.BLUETOOTH_CONNECT)
+                        }
+                        val missing = wanted.filter {
+                            ContextCompat.checkSelfPermission(this, it) !=
+                                    PackageManager.PERMISSION_GRANTED
+                        }
+                        if (missing.isEmpty()) {
+                            result.success(true)
+                        } else {
+                            // 应答槽位防覆盖：上一个权限请求未回时先按拒绝
+                            // 收口（对已完成的 Result 重复 reply 会
+                            // IllegalStateException 闪退）
+                            permissionResult?.success(false)
+                            permissionResult = result
+                            ActivityCompat.requestPermissions(
+                                this,
+                                missing.toTypedArray(),
+                                REQ_CALL_PERMISSIONS,
+                            )
                         }
                     }
                     "moveToBackground" -> {
@@ -163,6 +200,12 @@ class MainActivity : FlutterActivity() {
         if (requestCode == REQ_POST_NOTIFICATIONS) {
             val granted = grantResults.isNotEmpty() &&
                     grantResults[0] == PackageManager.PERMISSION_GRANTED
+            permissionResult?.success(granted)
+            permissionResult = null
+        }
+        if (requestCode == REQ_CALL_PERMISSIONS) {
+            val granted = grantResults.isNotEmpty() &&
+                    grantResults.all { it == PackageManager.PERMISSION_GRANTED }
             permissionResult?.success(granted)
             permissionResult = null
         }
@@ -475,5 +518,6 @@ class MainActivity : FlutterActivity() {
         const val TRANSFER_CHANNEL_ID = "chatroom_transfer"
         const val TRANSFER_NOTIF_ID = 2002
         const val REQ_POST_NOTIFICATIONS = 1001
+        const val REQ_CALL_PERMISSIONS = 1002
     }
 }

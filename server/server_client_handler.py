@@ -306,5 +306,13 @@ class ClientHandler:
                             self.server.broadcast_presence(username, False)
                     except Exception as e:
                         logging.warning(f"presence 下线广播失败: 用户={username}, 错误={e}")
+                    # 阶段 R1：全部会话下线 → 清理通话占用并通知对方
+                    # （多会话下仅最后会话断开触发；在 client_map_lock
+                    # 之外调用，锁序 call_lock -> client_map_lock）
+                    try:
+                        if not self.server.has_any_session(username):
+                            self.server.call_handler.cleanup_user(username)
+                    except Exception as e:
+                        logging.warning(f"通话断开清理失败: 用户={username}, 错误={e}")
             logging.info(f"客户端断开连接: {client_address}")
             client_socket.close()

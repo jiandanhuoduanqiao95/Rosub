@@ -47,3 +47,10 @@ build/
 project_files.txt
 *_tmp.dart
 *_tmp.py
+
+# 阶段 R1 真机三轮：vendored flutter_webrtc 补丁副本（见
+# third_party/flutter_webrtc/README-PATCH.md）——桌面端 libwebrtc 预编译缓存
+# 由 CMake 构建时自动下载再生，不入库
+third_party/flutter_webrtc/third_party/downloads/
+third_party/flutter_webrtc/third_party/libwebrtc/
+third_party/flutter_webrtc/.dart_tool/

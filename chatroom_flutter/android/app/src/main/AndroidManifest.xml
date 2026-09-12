@@ -1,5 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- 阶段 R1 真机（r1s7，Android 接听闪退真根因）：libwebrtc 的 Java
+         NetworkMonitor 在网络线程启动 ICE 时调用 getActiveNetworkInfo()，
+         缺此权限抛 SecurityException → JNI 侧 jvm.cc:81 fatal CHECK →
+         network_thread SIGABRT（发出 offer/answer 的接通瞬间必崩）。
+         flutter_webrtc 自带 manifest 为空（上游打包缺陷），须在应用侧声明 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <!-- Q1 真机反馈二轮：应用外新消息通知（横幅/提示音）与震动 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
@@ -8,6 +14,14 @@
          前台服务是后台收消息的唯一可靠机制（通知仅后台期间存在） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <!-- 阶段 R1：音视频通话（语音=麦克风；视频追加摄像头；音频路由调整） -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+    <!-- 蓝牙耳机路由（Android 12+ 需运行时 BLUETOOTH_CONNECT；AudioSwitch
+         枚举蓝牙设备依赖，缺失时部分 ROM 蓝牙路径异常） -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
 
     <application
         android:label="聊天室"

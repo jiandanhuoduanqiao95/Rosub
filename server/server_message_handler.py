@@ -754,6 +754,13 @@ class MessageHandler:
                     if message.lower() == "quit":
                         break
 
+                elif msg_type.startswith("call_"):
+                    # 阶段 R1：通话信令中继（invite/accept/reject/cancel/hangup/
+                    # offer/answer/ice）——状态与转发逻辑在 CallHandler，
+                    # 异常隔离沿用本 try/except（连接不断开）
+                    self.server.call_handler.handle(
+                        username, ssock, msg_type, header, data)
+
                 elif msg_type == "schedule_message":
                     # 阶段 O5（P2-5 定时消息）：预约发送——先入 pending 队列，
                     # 服务端定时器（scheduler_scan）到点投递。schedule_at 统一

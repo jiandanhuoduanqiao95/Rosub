@@ -1,0 +1,11 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  package="com.cloudwebrtc.webrtc">
+  <!-- PATCH(chatroom, r1s7): NetworkMonitorAutoDetect calls
+       ConnectivityManager.getActiveNetworkInfo() on the network thread when
+       ICE gathering starts; without ACCESS_NETWORK_STATE the Java call throws
+       SecurityException and the JNI layer aborts the process
+       (jvm.cc fatal check, SIGABRT at the moment a remote offer/answer is
+       applied). Upstream ships an empty manifest (also empty in
+       flutter-webrtc#2162-era releases). -->
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+</manifest>
