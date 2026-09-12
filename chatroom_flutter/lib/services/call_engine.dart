@@ -2,6 +2,8 @@
 ///
 /// CallEngine 为可注入接口（CallService 状态机单测用假实现驱动）；
 /// WebRtcCallEngine 为真实现。SDP/ICE 经信令传输时统一转 Map 序列化。
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
@@ -25,6 +27,9 @@ abstract class CallEngine {
     RTCVideoRenderer? remote,
     RTCVideoRenderer? local,
   });
+  Future<void> setMicMuted(bool muted);
+  Future<void> setCameraEnabled(bool enabled);
+  Future<void> setSpeakerphoneOn(bool on);
   Future<void> close();
 }
 
@@ -40,6 +45,13 @@ class WebRtcCallEngine implements CallEngine {
   RTCPeerConnection? _pc;
   MediaStream? _local;
   MediaStream? _remote;
+  // Linux 本端预览回环（r1s11）：m150 SDK 桌面端本地 VideoTrack 不向
+  // 渲染器扇出帧（AddRenderer 后 onFirstFrameRendered 永不触发，远端
+  // 轨道正常，spike 探针实锤）——用一对隐藏 PC 把本地轨道"远端化"，
+  // 预览渲染走已验证可用的远端轨道路径。Android/其他平台为 null 直用。
+  RTCPeerConnection? _loopA;
+  RTCPeerConnection? _loopB;
+  MediaStream? _previewStream;
   CallEngineListener? _listener;
   bool _hasVideo = false;
   RTCVideoRenderer? _remoteRenderer;
@@ -94,7 +106,59 @@ class WebRtcCallEngine implements CallEngine {
           : name.toLowerCase();
       _listener?.onConnectionState(normalized);
     };
-    _localRenderer?.srcObject = _local;
+    if (Platform.isLinux && video) {
+      await _startLoopbackPreview();
+    } else {
+      _localRenderer?.srcObject = _local;
+    }
+  }
+
+  /// Linux 本端预览回环：m150 SDK 桌面端本地 VideoTrack 不向渲染器扇出
+  /// 帧（AddRenderer 后 onFirstFrameRendered 永不触发；远端轨道正常；
+  /// spike 探针实锤，lib/dev/webrtc_spike.dart localvideo 模式可复现）。
+  /// 用一对隐藏 PC 把本地视频轨道"远端化"，预览渲染走已验证可用的
+  /// 远端轨道路径。仅预览用：不含音频，candidates 进程内直换。
+  Future<void> _startLoopbackPreview() async {
+    try {
+      final a = await createPeerConnection(const {'iceServers': <dynamic>[]});
+      final b = await createPeerConnection(const {'iceServers': <dynamic>[]});
+      for (final track in _local!.getVideoTracks()) {
+        await a.addTrack(track, _local!);
+      }
+      b.onTrack = (event) {
+        if (event.streams.isEmpty) return;
+        _previewStream = event.streams.first;
+        _localRenderer?.srcObject = _previewStream;
+      };
+      final offer = await a.createOffer(_sdpConstraints);
+      await a.setLocalDescription(offer);
+      await b.setRemoteDescription(offer);
+      final answer = await b.createAnswer(_sdpConstraints);
+      await b.setLocalDescription(answer);
+      await a.setRemoteDescription(answer);
+      // SDP 定型后再挂 candidate 泵（早到的候选会在对端无 remote 描述时
+      // 被拒）；回环候选本机直连，量小无碍
+      a.onIceCandidate = (c) => b.addCandidate(c);
+      b.onIceCandidate = (c) => a.addCandidate(c);
+      _loopA = a;
+      _loopB = b;
+    } catch (_) {
+      // 回环失败降级为黑小窗（不影响通话主体），清理半建状态
+      await _stopLoopbackPreview();
+    }
+  }
+
+  Future<void> _stopLoopbackPreview() async {
+    final a = _loopA;
+    final b = _loopB;
+    _loopA = null;
+    _loopB = null;
+    _previewStream = null;
+    for (final pc in [a, b]) {
+      try {
+        await pc?.close();
+      } catch (_) {}
+    }
   }
 
   // 显式空 constraints：flutter_webrtc 缺省会注入 OfferToReceiveAudio/Video
@@ -154,7 +218,35 @@ class WebRtcCallEngine implements CallEngine {
     _remoteRenderer = remote;
     if (remote != null && _remote != null) remote.srcObject = _remote;
     _localRenderer = local;
-    if (local != null && _local != null) local.srcObject = _local;
+    // Linux 回环预览：渲染回环"远端"流而非本地轨道（后者在 m150 桌面
+    // SDK 上不扇出帧）；其余平台 _previewStream 恒 null 直用本地流
+    if (local != null && _local != null) {
+      local.srcObject = _previewStream ?? _local;
+    }
+  }
+
+  @override
+  Future<void> setMicMuted(bool muted) async {
+    // track.enabled=false 即停止发送（发静音包），是标准的麦克风静音
+    for (final track in _local?.getAudioTracks() ?? const <MediaStreamTrack>[]) {
+      track.enabled = !muted;
+    }
+  }
+
+  @override
+  Future<void> setCameraEnabled(bool enabled) async {
+    for (final track in _local?.getVideoTracks() ?? const <MediaStreamTrack>[]) {
+      track.enabled = enabled;
+    }
+  }
+
+  @override
+  Future<void> setSpeakerphoneOn(bool on) async {
+    // 听筒/免提路由仅移动端有意义（桌面恒系统输出设备）；Android 走
+    // AudioSwitch（r1s9 起恢复启用——接听闪退真根因是清单权限，与
+    // AudioSwitch 无关），iOS 待 Q4 接入
+    if (!Platform.isAndroid) return;
+    Helper.setSpeakerphoneOn(on);
   }
 
   @override
@@ -164,6 +256,7 @@ class WebRtcCallEngine implements CallEngine {
     final local = _local;
     _local = null;
     _remote = null;
+    await _stopLoopbackPreview();
     // 先摘掉渲染器对流的引用（native 纹理仍持有 stream 时 dispose 会
     // 在原生层产生悬空引用——Linux 关闭卡死的加固项）
     _remoteRenderer?.srcObject = null;

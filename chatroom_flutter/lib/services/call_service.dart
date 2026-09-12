@@ -43,6 +43,16 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   String? endReason;
   DateTime? activeSince;
 
+  /// R1 真机十轮（微信式交互）：最小化——用户离开通话界面返回会话
+  /// 界面操作而不挂断；由通话页"最小化"按钮置位，ChatScreen 据此
+  /// 关闭通话路由并显示悬浮返回条，来电/去电新呼叫时复位
+  bool minimized = false;
+
+  /// 通话中控制开关（静音麦克风 / 关闭摄像头 / 免提外放）
+  bool micMuted = false;
+  bool cameraOff = false;
+  bool speakerOn = false;
+
   CallPhase get phase => _phase;
   String? get peer => _peer;
   CallType? get type => _type;
@@ -73,6 +83,50 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   // 用户操作
   // ============================================================
 
+  /// 最小化通话界面（不挂断）：ChatScreen 收到通知后关闭通话路由并
+  /// 显示悬浮返回条；ended/idle 态不允许最小化
+  void minimize() {
+    if (_phase == CallPhase.idle || _phase == CallPhase.ended) return;
+    minimized = true;
+    notifyListeners();
+  }
+
+  /// 从最小化恢复：ChatScreen 悬浮条点击后调用，重新打开通话界面
+  void restore() {
+    minimized = false;
+    notifyListeners();
+  }
+
+  /// 静音/取消静音本端麦克风（停止发送音频，发静音包）
+  Future<void> toggleMic() async {
+    micMuted = !micMuted;
+    notifyListeners();
+    await _engine.setMicMuted(micMuted);
+  }
+
+  /// 开关本端摄像头（仅视频通话）
+  Future<void> toggleCamera() async {
+    if (_type != CallType.video) return;
+    cameraOff = !cameraOff;
+    notifyListeners();
+    await _engine.setCameraEnabled(!cameraOff);
+  }
+
+  /// 免提外放/听筒切换
+  Future<void> toggleSpeaker() async {
+    speakerOn = !speakerOn;
+    notifyListeners();
+    await _engine.setSpeakerphoneOn(speakerOn);
+  }
+
+  void _resetToggles(CallType type) {
+    minimized = false;
+    micMuted = false;
+    cameraOff = false;
+    // 微信式默认路由：语音通话听筒、视频通话外放
+    speakerOn = type == CallType.video;
+  }
+
   /// 发起通话（UI 已完成运行时权限请求后调用）
   Future<bool> startCall(String peer, CallType type) async {
     if (isBusy) return false;
@@ -83,6 +137,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     activeSince = null;
     _remoteDescSet = false;
     _pendingCandidates.clear();
+    _resetToggles(type);
     _trace('startCall type=$type peer=$peer id=$_callId');
     _setPhase(CallPhase.calling);
     try {
@@ -117,6 +172,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
       try {
         _trace('callee engine.open(video=${_type == CallType.video}) start');
         await _engine.open(video: _type == CallType.video);
+        await _engine.setSpeakerphoneOn(speakerOn);
         _trace('callee engine.open done');
       } catch (e) {
         _trace('callee engine.open FAILED: $e');
@@ -195,6 +251,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
         activeSince = null;
         _remoteDescSet = false;
         _pendingCandidates.clear();
+        _resetToggles(_type!);
         _trace('incoming call_invite from=$from id=$id type=$_type');
         _setPhase(CallPhase.ringing);
         break;
@@ -269,6 +326,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     try {
       _trace('caller engine.open(video=${_type == CallType.video}) start');
       await _engine.open(video: _type == CallType.video);
+      await _engine.setSpeakerphoneOn(speakerOn);
       _trace('caller engine.open done');
       final offer = await _engine.createOffer();
       _trace('caller offer created');
@@ -393,6 +451,8 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     _ringTimer = null;
     _endedTimer?.cancel();
     endReason = reason;
+    micMuted = false;
+    cameraOff = false;
     _engine.close();
     _remoteDescSet = false;
     _pendingCandidates.clear();
@@ -404,6 +464,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
         _type = null;
         _callId = null;
         activeSince = null;
+        minimized = false;
         notifyListeners();
       }
     });

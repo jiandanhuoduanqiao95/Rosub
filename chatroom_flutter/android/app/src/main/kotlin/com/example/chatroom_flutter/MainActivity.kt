@@ -43,13 +43,11 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        // 阶段 R1 真机二轮：flutter_webrtc 1.6.x 在 getUserMedia 启动时经
-        // AudioSwitchManager（JitPack audioswitch）改音频模式/请求焦点/枚举
-        // 蓝牙路由——真机（OneUI）在该时刻闪退，Linux 无此组件同代码正常。
-        // 关闭其音频会话管理，WebRTC 采播走 Android 默认路由；崩溃栈拿到
-        // 前不再回开。
-        com.cloudwebrtc.webrtc.audio.AudioSwitchManager
-            .setAudioSessionManagementEnabled(false)
+        // 阶段 R1 真机十轮（r1s10）：AudioSwitchManager 恢复默认启用——
+        // 二轮曾因"接听闪退"假说关闭其会话管理，三轮定位真根因为清单缺
+        // ACCESS_NETWORK_STATE（与 AudioSwitch 无关）后，免提/听筒路由
+        // （Helper.setSpeakerphoneOn → AudioSwitchManager）需要它工作。
+        // BLUETOOTH_CONNECT 运行时请求保留（S+ 蓝牙路由枚举所需）。
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "chatroom/platform")
             .setMethodCallHandler { call, result ->
                 when (call.method) {

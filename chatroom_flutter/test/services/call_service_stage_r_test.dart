@@ -51,6 +51,9 @@ class _Harness {
     when(() => engine.open(video: any(named: 'video')))
         .thenAnswer((_) async {});
     when(() => engine.close()).thenAnswer((_) async {});
+    when(() => engine.setMicMuted(any())).thenAnswer((_) async {});
+    when(() => engine.setCameraEnabled(any())).thenAnswer((_) async {});
+    when(() => engine.setSpeakerphoneOn(any())).thenAnswer((_) async {});
     when(() => engine.createOffer())
         .thenAnswer((_) async => {'sdp': 'offer-sdp', 'type': 'offer'});
     when(() => engine.createAnswer())
@@ -309,6 +312,125 @@ void main() {
       expect(ok, isFalse);
       expect(svc.peer, 'alice');
       expect(h.sent('call_invite'), isFalse);
+    });
+  });
+
+  group('真机十轮：最小化与通话中开关（微信式交互）', () {
+    test('minimize：通话中置位、ended 保持、idle 复位', () {
+      fakeAsync((async) {
+        final h = _Harness();
+        final svc = h.build();
+        svc.startCall('bob', CallType.audio);
+        svc.minimize();
+        expect(svc.minimized, isTrue);
+        expect(svc.phase, CallPhase.calling);
+        svc.cancelOutgoing();
+        expect(svc.phase, CallPhase.ended);
+        // ended 期间保持最小化（悬浮条显示结束原因）
+        expect(svc.minimized, isTrue);
+        async.elapse(const Duration(seconds: 3));
+        expect(svc.phase, CallPhase.idle);
+        expect(svc.minimized, isFalse);
+      });
+    });
+
+    test('restore 复位最小化标志', () async {
+      final h = _Harness();
+      final svc = h.build();
+      await svc.startCall('bob', CallType.audio);
+      svc.minimize();
+      expect(svc.minimized, isTrue);
+      svc.restore();
+      expect(svc.minimized, isFalse);
+      svc.cancelOutgoing();
+    });
+
+    test('ended/idle 态 minimize 不生效', () async {
+      final h = _Harness();
+      final svc = h.build();
+      await svc.startCall('bob', CallType.audio);
+      svc.cancelOutgoing();
+      expect(svc.phase, CallPhase.ended);
+      svc.minimize();
+      expect(svc.minimized, isFalse);
+    });
+
+    test('toggleMic 切换并驱动引擎，teardown 复位', () async {
+      final h = _Harness();
+      final svc = h.build();
+      await svc.startCall('bob', CallType.audio);
+      expect(svc.micMuted, isFalse);
+      await svc.toggleMic();
+      expect(svc.micMuted, isTrue);
+      verify(() => h.engine.setMicMuted(true)).called(1);
+      await svc.toggleMic();
+      expect(svc.micMuted, isFalse);
+      verify(() => h.engine.setMicMuted(false)).called(1);
+      svc.cancelOutgoing();
+      expect(svc.micMuted, isFalse);
+    });
+
+    test('toggleCamera 仅视频通话生效', () async {
+      final h = _Harness();
+      final svc = h.build();
+      await svc.startCall('bob', CallType.audio);
+      await svc.toggleCamera();
+      expect(svc.cameraOff, isFalse);
+      verifyNever(() => h.engine.setCameraEnabled(any()));
+      svc.cancelOutgoing();
+
+      final h2 = _Harness();
+      final svc2 = h2.build();
+      await svc2.startCall('bob', CallType.video);
+      await svc2.toggleCamera();
+      expect(svc2.cameraOff, isTrue);
+      verify(() => h2.engine.setCameraEnabled(false)).called(1);
+      svc2.cancelOutgoing();
+      expect(svc2.cameraOff, isFalse);
+    });
+
+    test('免提默认路由：语音=听筒 关、视频=外放 开，媒体建立后应用', () async {
+      final h = _Harness();
+      final svc = h.build();
+      await svc.startCall('bob', CallType.audio);
+      expect(svc.speakerOn, isFalse);
+      _signal(svc, 'call_accept', 'bob', h.last('call_invite').callId);
+      await Future<void>.delayed(Duration.zero);
+      verify(() => h.engine.setSpeakerphoneOn(false)).called(1);
+      svc.cancelOutgoing();
+
+      final h2 = _Harness();
+      final svc2 = h2.build();
+      await svc2.startCall('bob', CallType.video);
+      expect(svc2.speakerOn, isTrue);
+      _signal(svc2, 'call_accept', 'bob', h2.last('call_invite').callId);
+      await Future<void>.delayed(Duration.zero);
+      verify(() => h2.engine.setSpeakerphoneOn(true)).called(1);
+      svc2.cancelOutgoing();
+    });
+
+    test('toggleSpeaker 切换并驱动引擎', () async {
+      final h = _Harness();
+      final svc = h.build();
+      await svc.startCall('bob', CallType.audio);
+      await svc.toggleSpeaker();
+      expect(svc.speakerOn, isTrue);
+      verify(() => h.engine.setSpeakerphoneOn(true)).called(1);
+      svc.cancelOutgoing();
+    });
+
+    test('最小化通话中收到新邀请：自动拒绝且不影响最小化状态', () async {
+      final h = _Harness();
+      final svc = h.build();
+      await svc.startCall('bob', CallType.video);
+      await svc.toggleCamera();
+      svc.minimize();
+      _signal(svc, 'call_invite', 'alice', 'c-new', callType: 'audio');
+      expect(svc.phase, CallPhase.calling, reason: '占线中，新邀请被自动拒绝');
+      expect(svc.minimized, isTrue);
+      expect(svc.cameraOff, isTrue, reason: '开关属于当前通话，不受新邀请影响');
+      expect(h.sent('call_reject'), isTrue);
+      svc.cancelOutgoing();
     });
   });
 }

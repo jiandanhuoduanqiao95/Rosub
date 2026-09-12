@@ -1194,7 +1194,9 @@ class _ChatScreenState extends State<ChatScreen>
                 ? _buildCompactChatActions()
                 : _buildToolbarActions(),
           ),
-          body: Column(
+          body: Stack(
+            children: [
+              Column(
             children: [
               // === 重连中横幅 ===
               if (_state.connectionStatus == ConnectionStatus.reconnecting)
@@ -1242,6 +1244,18 @@ class _ChatScreenState extends State<ChatScreen>
               ),
             ],
           ),
+              // R1 真机十轮：最小化通话的悬浮返回条（微信式，通话中恒显示，
+              // 点击恢复通话界面；ended 期间显示结束原因，idle 自动消失）
+              if (_callSnapshotMinimized &&
+                  _callSnapshotPhase != CallPhase.idle)
+                Positioned(
+                  top: 8,
+                  left: 0,
+                  right: 0,
+                  child: Center(child: _buildCallMinimizePill()),
+                ),
+            ],
+          ),
         );
       },
     );
@@ -1260,12 +1274,25 @@ class _ChatScreenState extends State<ChatScreen>
     return page;
   }
 
-  /// 阶段 R1：通话状态变化——来电/去电时全屏进入通话界面
-  /// （通话界面在服务回 idle 时自行返回；路由关闭后复位占用标志）
+  /// 阶段 R1：通话状态变化——来电/去电时全屏进入通话界面。
+  /// R1 真机十轮（微信式最小化）：minimized 置位时通话页自己 pop（本处
+  /// 不 pop——与通话页 idle 自返叠加会双 pop 弹空导航栈→黑屏闪退），
+  /// 本页仅显示悬浮返回条；restore() 时重新 push。
+  ///
+  /// 本回调仅经 onCallPhaseChanged 触发（SocketService 转发 CallService
+  /// 的全部 notifyListeners，含最小化/恢复），MockSocketService 从不
+  /// 触发——因此此处读取 callService getter 安全；build 里一律使用
+  /// 下方快照字段（直读 getter 会在 Mock 上抛 TypeError，见 initState 注释）。
   void _onCallChanged() {
     if (!mounted) return;
     final svc = widget.socketService.callService;
-    if (svc.phase != CallPhase.idle && !_callRouteOpen) {
+    _callSnapshotSvc = svc;
+    _callSnapshotPhase = svc.phase;
+    _callSnapshotPeer = svc.peer;
+    _callSnapshotActiveSince = svc.activeSince;
+    _callSnapshotEndReason = svc.endReason;
+    _callSnapshotMinimized = svc.minimized;
+    if (!svc.minimized && svc.phase != CallPhase.idle && !_callRouteOpen) {
       _callRouteOpen = true;
       Navigator.of(context, rootNavigator: true)
           .push(MaterialPageRoute(
@@ -1274,6 +1301,62 @@ class _ChatScreenState extends State<ChatScreen>
       ))
           .then((_) => _callRouteOpen = false);
     }
+    setState(() {});
+  }
+
+  // 通话悬浮条快照（build 不得直读 callService getter——Mock 安全）
+  CallService? _callSnapshotSvc;
+  CallPhase _callSnapshotPhase = CallPhase.idle;
+  String? _callSnapshotPeer;
+  DateTime? _callSnapshotActiveSince;
+  String? _callSnapshotEndReason;
+  bool _callSnapshotMinimized = false;
+
+  /// R1 真机十轮：最小化通话的悬浮返回条（微信式）——通话中恒显示，
+  /// 点击恢复通话界面
+  Widget _buildCallMinimizePill() {
+    final label = switch (_callSnapshotPhase) {
+      CallPhase.calling => '正在呼叫…',
+      CallPhase.connecting => '接通中…',
+      CallPhase.ended => _callSnapshotEndReason ?? '通话已结束',
+      _ => '通话中 ${_callDurationText(_callSnapshotActiveSince)}',
+    };
+    return Material(
+      color: Colors.black87,
+      borderRadius: BorderRadius.circular(24),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(24),
+        onTap: () => _callSnapshotSvc?.restore(),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                _callSnapshotPhase == CallPhase.ended
+                    ? Icons.call_end_rounded
+                    : Icons.phone_in_talk_rounded,
+                color: Colors.white70,
+                size: 18,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                '${_callSnapshotPeer ?? ''} $label',
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _callDurationText(DateTime? since) {
+    if (since == null) return '00:00';
+    final secs = DateTime.now().difference(since).inSeconds;
+    final m = (secs ~/ 60).toString().padLeft(2, '0');
+    final s = (secs % 60).toString().padLeft(2, '0');
+    return '$m:$s';
   }
 
   /// 阶段 R1：通话类型选择（微信式底部弹层；compact 单入口）

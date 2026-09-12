@@ -34,6 +34,11 @@ void main() async {
     runApp(const WebrtcSpikeApp());
     return;
   }
+  if (const bool.fromEnvironment('dart.vm.product') == false &&
+      Platform.environment['CHATROOM_WEBRTC_SPIKE'] == 'localvideo') {
+    runApp(const WebrtcLocalVideoApp());
+    return;
+  }
   // R-P27（用户复测"表情黑白"轮换出现）：构建标识打印到启动日志——
   // 多客户端排查"谁在跑旧构建"时与登录页页脚互为印证；旧构建同时呈现
   // 黑白表情 + media_kit non-platform thread ERROR

@@ -59,6 +59,15 @@ class FakeE2eEngine implements CallEngine {
   void setListener(CallEngineListener? listener) {}
 
   @override
+  Future<void> setMicMuted(bool muted) async {}
+
+  @override
+  Future<void> setCameraEnabled(bool enabled) async {}
+
+  @override
+  Future<void> setSpeakerphoneOn(bool on) async {}
+
+  @override
   bool get hasVideo => false;
 
   @override

@@ -4,6 +4,9 @@
 // 拦截并回调 onPopInvokedWithResult(didPop:false)，其 idle 分支再次
 // maybePop 造成无限递归（Android 栈溢出闪退 / Linux 卡死）。
 // 本测试锁定：取消通话后 2s（ended→idle）自动 pop 回上一页且仅一次。
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:chatroom_flutter/screens/call_screen.dart';
 import 'package:chatroom_flutter/services/call_engine.dart';
 import 'package:chatroom_flutter/services/call_service.dart';
@@ -59,9 +62,55 @@ class _FakeEngine implements CallEngine {
 
   @override
   MediaStream? get localStream => null;
+
+  @override
+  Future<void> setMicMuted(bool muted) async {}
+
+  @override
+  Future<void> setCameraEnabled(bool enabled) async {}
+
+  @override
+  Future<void> setSpeakerphoneOn(bool on) async {}
 }
 
 void main() {
+  testWidgets('通话中控制排：静音/挂断/最小化（语音通话无摄像头键；桌面无免提键）',
+      (tester) async {
+    final signaling = _FakeSignaling();
+    final svc = CallService(signaling: signaling, engine: _FakeEngine());
+    // testWidgets 跑在 FakeAsync zone：Future.delayed 永不完成，
+    // 用 tester.pump 推进零时长定时器驱动状态机
+    await svc.startCall('bob', CallType.audio);
+    svc.handleSignal('call_accept',
+        {'from': 'bob', 'call_id': svc.callId}, Uint8List(0));
+    await tester.pump();
+    svc.handleSignal(
+        'call_answer',
+        {'from': 'bob', 'call_id': svc.callId},
+        Uint8List.fromList(utf8.encode('{"sdp":"a","type":"answer"}')));
+    await tester.pump();
+    expect(svc.phase, CallPhase.active);
+
+    await tester.pumpWidget(MaterialApp(home: CallScreen(callService: svc)));
+    await tester.pump();
+    expect(find.byTooltip('最小化（不挂断）'), findsOneWidget);
+    expect(find.byIcon(Icons.mic_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.call_end), findsOneWidget);
+    expect(find.byIcon(Icons.videocam_rounded), findsNothing,
+        reason: '语音通话不显示摄像头开关');
+    expect(find.byIcon(Icons.volume_up_rounded), findsNothing,
+        reason: '桌面宿主不显示免提键（恒系统输出）');
+
+    await svc.toggleMic();
+    await tester.pump();
+    expect(find.byIcon(Icons.mic_off_rounded), findsOneWidget);
+
+    await tester.tap(find.byTooltip('最小化（不挂断）'));
+    await tester.pump();
+    expect(svc.minimized, isTrue);
+    svc.cancelOutgoing();
+  });
+
   testWidgets('取消通话后 2s 自动返回上一页（maybePop 递归回归锁）', (tester) async {
     final signaling = _FakeSignaling();
     final svc = CallService(signaling: signaling, engine: _FakeEngine());

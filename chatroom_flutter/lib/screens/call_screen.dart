@@ -1,14 +1,18 @@
-/// 阶段 R1：通话界面（最小三态——视觉细化后置）
+/// 阶段 R1：通话界面
 ///
 /// ringing（来电：接听/拒绝）/ calling+connecting（去话：取消）/
-/// active（通话中：挂断 + 视频画面）/ ended（结束原因，2s 自动返回）。
-/// 语音/视频共用本界面：视频类型挂载远端全屏 + 本地小窗。
+/// active（通话中：挂断 + 视频画面 + 静音/免提/关画面 + 最小化）/
+/// ended（结束原因，2s 自动返回）。
+/// 语音/视频共用本界面：视频类型挂载远端全屏 + 本地小窗（可拖动，
+/// Cover 满幅裁剪，微信式）。最小化=离开界面继续通话（ChatScreen
+/// 显示悬浮返回条）。
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../platform/android_system.dart';
+import '../platform/capabilities.dart';
 import '../services/call_service.dart';
 
 class CallScreen extends StatefulWidget {
@@ -25,6 +29,9 @@ class _CallScreenState extends State<CallScreen> {
   RTCVideoRenderer? _localRenderer;
   Timer? _ticker;
   bool _renderersReady = false;
+
+  /// 本地小窗左上角位置（null=默认右上）；随拖动更新
+  Offset? _pipOffset;
 
   /// 自动返回已执行标志（防 idle 通知重复 pop / 返回链递归）
   bool _autoPopped = false;
@@ -65,11 +72,14 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   void _onPhaseChanged() {
-    // 通话结束（服务 2s 后回 idle）→ 自动返回。
-    // 必须用 pop() 而非 maybePop()：本页根部 PopScope(canPop:false) 会拦截
-    // maybePop 并回调 onPopInvokedWithResult(didPop:false)，其 idle 分支若
-    // 再走 maybePop 即无限递归（真机二轮：Android 栈溢出闪退、Linux 卡死）
-    if (_svc.phase == CallPhase.idle && mounted && !_autoPopped) {
+    // pop 一律由本页执行（ChatScreen 不做 pop）：
+    // - idle（服务 2s 后回 idle）→ 自动返回上一页；
+    // - minimized → 用户"最小化（不挂断）"离开，ChatScreen 悬浮条接管。
+    // 若 ChatScreen 也 pop 会与本页 idle 自返叠加成双 pop（r1s10 回归：
+    // 连弹两层路由→导航栈弹空→黑屏卡死闪退）。
+    if (mounted &&
+        !_autoPopped &&
+        (_svc.phase == CallPhase.idle || _svc.minimized)) {
       _autoPopped = true;
       Navigator.of(context).pop();
     }
@@ -139,6 +149,8 @@ class _CallScreenState extends State<CallScreen> {
   Widget build(BuildContext context) {
     final phase = _svc.phase;
     final showVideo = _renderersReady && phase == CallPhase.active;
+    final showControls =
+        phase == CallPhase.connecting || phase == CallPhase.active;
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
@@ -174,7 +186,18 @@ class _CallScreenState extends State<CallScreen> {
               child: SafeArea(
                 child: Column(
                   children: [
-                    const SizedBox(height: 48),
+                    // R1 真机十轮：最小化（离开不挂断，微信式）——仅媒体
+                    // 已建立的阶段提供；calling/ringing 仍走取消/拒绝
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: showControls
+                          ? _circleIconButton(
+                              icon: Icons.keyboard_arrow_left_rounded,
+                              tooltip: '最小化（不挂断）',
+                              onTap: _svc.minimize,
+                            )
+                          : const SizedBox(height: 44, width: 52),
+                    ),
                     Text(
                       _svc.peer ?? '',
                       style: const TextStyle(
@@ -197,30 +220,63 @@ class _CallScreenState extends State<CallScreen> {
                           fontSize: 15),
                     ),
                     const Spacer(),
-                    if (showVideo && _localRenderer != null)
-                      Align(
-                        alignment: Alignment.centerRight,
-                        child: Container(
-                          margin: const EdgeInsets.only(right: 16, bottom: 16),
-                          width: 110,
-                          height: 160,
-                          decoration: BoxDecoration(
-                            color: Colors.black26,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                                color: Colors.white.withValues(alpha: .2)),
-                          ),
-                          clipBehavior: Clip.antiAlias,
-                          child: RTCVideoView(_localRenderer!, mirror: true),
-                        ),
-                      ),
                     _buildControls(phase),
                     const SizedBox(height: 48),
                   ],
                 ),
               ),
             ),
+            // 本地小窗：可拖动 + Cover 满幅裁剪（真机十轮：原 Contain 在
+            // 竖框内上下留黑边；微信式小窗应满幅）
+            if (showVideo && _localRenderer != null) _buildLocalPip(context),
           ],
+        ),
+      ),
+    );
+  }
+
+  Offset _defaultPipOffset(Size screen) =>
+      Offset(screen.width - 110 - 16, 96);
+
+  Offset _clampPip(Offset o, Size screen) => Offset(
+        o.dx.clamp(8.0, screen.width - 110 - 8),
+        o.dy.clamp(8.0, screen.height - 160 - 120),
+      );
+
+  Widget _buildLocalPip(BuildContext context) {
+    final screen = MediaQuery.sizeOf(context);
+    final pos = _clampPip(_pipOffset ?? _defaultPipOffset(screen), screen);
+    return Positioned(
+      left: pos.dx,
+      top: pos.dy,
+      child: GestureDetector(
+        onPanUpdate: (details) => setState(() {
+          _pipOffset = _clampPip(
+              (_pipOffset ?? _defaultPipOffset(screen)) + details.delta,
+              screen);
+        }),
+        child: Container(
+          width: 110,
+          height: 160,
+          decoration: BoxDecoration(
+            color: Colors.black26,
+            borderRadius: BorderRadius.circular(12),
+            border:
+                Border.all(color: Colors.white.withValues(alpha: .2)),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: _svc.cameraOff
+              ? const ColoredBox(
+                  color: Colors.black54,
+                  child: Center(
+                    child: Icon(Icons.videocam_off_rounded,
+                        color: Colors.white54, size: 30),
+                  ),
+                )
+              : RTCVideoView(_localRenderer!,
+                  mirror: true,
+                  objectFit:
+                      RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
         ),
       ),
     );
@@ -252,10 +308,42 @@ class _CallScreenState extends State<CallScreen> {
         );
       case CallPhase.connecting:
       case CallPhase.active:
-        return _roundButton(
-          icon: Icons.call_end,
-          color: Colors.red,
-          onPressed: _svc.hangup,
+        // 微信式控制排：静音麦克风 / 免提（移动端）/ 关摄像头（视频）/ 挂断
+        final platform = effectiveTargetPlatform();
+        final showSpeaker = platform == TargetPlatform.android ||
+            platform == TargetPlatform.iOS;
+        return Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            _toggleButton(
+              icon: _svc.micMuted
+                  ? Icons.mic_off_rounded
+                  : Icons.mic_rounded,
+              active: _svc.micMuted,
+              onTap: _svc.toggleMic,
+            ),
+            if (showSpeaker)
+              _toggleButton(
+                icon: _svc.speakerOn
+                    ? Icons.volume_up_rounded
+                    : Icons.volume_down_rounded,
+                active: _svc.speakerOn,
+                onTap: _svc.toggleSpeaker,
+              ),
+            if (_svc.type == CallType.video)
+              _toggleButton(
+                icon: _svc.cameraOff
+                    ? Icons.videocam_off_rounded
+                    : Icons.videocam_rounded,
+                active: _svc.cameraOff,
+                onTap: _svc.toggleCamera,
+              ),
+            _roundButton(
+              icon: Icons.call_end,
+              color: Colors.red,
+              onPressed: _svc.hangup,
+            ),
+          ],
         );
       case CallPhase.ended:
         return const CircularProgressIndicator(color: Colors.white54);
@@ -278,6 +366,50 @@ class _CallScreenState extends State<CallScreen> {
         child: Padding(
           padding: const EdgeInsets.all(18),
           child: Icon(icon, color: Colors.white, size: 30),
+        ),
+      ),
+    );
+  }
+
+  /// 开关类圆钮：置位态白底黑图标（微信式按下高亮），否则半透明白图标
+  Widget _toggleButton({
+    required IconData icon,
+    required bool active,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: active ? Colors.white : Colors.white24,
+      shape: const CircleBorder(),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Icon(icon,
+              color: active ? Colors.black87 : Colors.white, size: 26),
+        ),
+      ),
+    );
+  }
+
+  /// 小圆图标钮（最小化等顶角控件）
+  Widget _circleIconButton({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback onTap,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: Colors.white24,
+        shape: const CircleBorder(),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.all(6),
+            child: Icon(icon, color: Colors.white, size: 26),
+          ),
         ),
       ),
     );
