@@ -63,6 +63,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:chatroom_flutter/config.dart';
 import 'package:chatroom_flutter/platform/capabilities.dart';
 import 'package:chatroom_flutter/services/file_drop.dart';
 import 'package:chatroom_flutter/services/taskbar_notifier.dart';
@@ -178,8 +179,7 @@ void main() {
   });
 
   group('Q0-3 —— 通知闪烁/提示音接线（TaskbarNotifier 经能力抽象路由）', () {
-    test('TaskbarNotifier.flash() → 注入的 notification.flash()（enabled）',
-        () {
+    test('TaskbarNotifier.flash() → 注入的 notification.flash()（enabled）', () {
       final fake = FakeNotification();
       PlatformCapabilities.notificationOverride = fake;
       TaskbarNotifier.flash();
@@ -251,8 +251,8 @@ void main() {
       debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       PlatformCapabilities.resetForTest();
       expect(PlatformCapabilities.fileDrop.isSupported, isTrue);
-      expect(identical(PlatformCapabilities.fileDrop, FileDrop.instance),
-          isTrue,
+      expect(
+          identical(PlatformCapabilities.fileDrop, FileDrop.instance), isTrue,
           reason: 'Linux 拖拽逻辑原样保留（N3 契约），抽象只做分发');
     });
 
@@ -279,7 +279,8 @@ void main() {
   });
 
   group('Q0-3 —— 默认实现安全降级（FLUTTER_TEST/无窗口环境不崩）', () {
-    test('android/ios：flash/clearUrgency/playNotifySound/openFile/openDirectory '
+    test(
+        'android/ios：flash/clearUrgency/playNotifySound/openFile/openDirectory '
         '调用安全（应用内徽标语义，无 FFI/无子进程依赖崩溃）', () async {
       for (final platform in {TargetPlatform.android, TargetPlatform.iOS}) {
         debugDefaultTargetPlatformOverride = platform;
@@ -287,9 +288,11 @@ void main() {
         expect(() => PlatformCapabilities.notification.flash(), returnsNormally,
             reason: '$platform 通知能力安全');
         expect(() => PlatformCapabilities.notification.clearUrgency(),
-            returnsNormally, reason: '$platform 清除通知安全');
-        await expectLater(PlatformCapabilities.sound.playNotifySound(),
-            completes, reason: '$platform 提示音能力安全');
+            returnsNormally,
+            reason: '$platform 清除通知安全');
+        await expectLater(
+            PlatformCapabilities.sound.playNotifySound(), completes,
+            reason: '$platform 提示音能力安全');
         await expectLater(
             PlatformCapabilities.fileLauncher.openFile('/nonexistent'),
             completes,
@@ -300,8 +303,7 @@ void main() {
       }
     });
 
-    test('windows/macos：默认实现调用安全（子进程/通道缺失时静默降级）',
-        () async {
+    test('windows/macos：默认实现调用安全（子进程/通道缺失时静默降级）', () async {
       for (final platform in {TargetPlatform.windows, TargetPlatform.macOS}) {
         debugDefaultTargetPlatformOverride = platform;
         PlatformCapabilities.resetForTest();
@@ -314,14 +316,14 @@ void main() {
       }
     });
 
-    test('linux：默认 flash/clearUrgency/playSound 调用安全（FFI 降级惯例）',
-        () async {
+    test('linux：默认 flash/clearUrgency/playSound 调用安全（FFI 降级惯例）', () async {
       debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       PlatformCapabilities.resetForTest();
       expect(() => PlatformCapabilities.notification.flash(), returnsNormally);
       expect(() => PlatformCapabilities.notification.clearUrgency(),
           returnsNormally);
-      await expectLater(PlatformCapabilities.sound.playNotifySound(), completes);
+      await expectLater(
+          PlatformCapabilities.sound.playNotifySound(), completes);
     });
 
     test('fileLauncher 契约：注入 fake 时路径透传与结果返回', () async {
@@ -330,16 +332,15 @@ void main() {
       final ok = await PlatformCapabilities.fileLauncher.openFile('/tmp/a.txt');
       expect(ok, isTrue);
       expect(fake.lastFile, '/tmp/a.txt');
-      final dirOk = await PlatformCapabilities.fileLauncher
-          .openDirectory('/tmp/somedir');
+      final dirOk =
+          await PlatformCapabilities.fileLauncher.openDirectory('/tmp/somedir');
       expect(dirOk, isTrue);
       expect(fake.lastDir, '/tmp/somedir');
     });
   });
 
   group('Q0-3 —— 打开文件 3 处 xdg-open 收敛（源码扫描锁定）', () {
-    test('chat_screen.dart 不再直接调用 xdg-open（视频回退"使用系统播放器"）',
-        () {
+    test('chat_screen.dart 不再直接调用 xdg-open（视频回退"使用系统播放器"）', () {
       final src = srcOf('screens/chat_screen.dart');
       expect(countOf(src, "Process.run('xdg-open'"), 0,
           reason: '原 chat_screen.dart:1455 迁入 fileLauncher 能力');
@@ -348,8 +349,7 @@ void main() {
           reason: '打开文件走平台能力抽象');
     });
 
-    test('dialogs.dart 不再直接调用 xdg-open（文件预览"打开文件/打开所在目录"）',
-        () {
+    test('dialogs.dart 不再直接调用 xdg-open（文件预览"打开文件/打开所在目录"）', () {
       final src = srcOf('widgets/dialogs.dart');
       expect(countOf(src, "Process.run('xdg-open'"), 0,
           reason: '原 dialogs.dart:3914/3921 迁入 fileLauncher 能力');
@@ -357,11 +357,43 @@ void main() {
           greaterThanOrEqualTo(1));
     });
 
-    test('capabilities.dart 自身保留 Linux xdg-open 实现（行为等价迁移，非删除）',
-        () {
+    test('capabilities.dart 自身保留 Linux xdg-open 实现（行为等价迁移，非删除）', () {
       final src = srcOf('platform/capabilities.dart');
       expect(src.contains("xdg-open"), isTrue,
           reason: 'Linux 打开文件语义不变（仅收敛到能力层）');
+    });
+  });
+
+  // ============================================================
+  // Q1 真机反馈二轮 —— 混排 emoji 兜底按平台裁剪（"数字发黑"根因）
+  //
+  // Android 实测：气泡 fontFamilyFallback 含 emoji 字体时，ASCII
+  // 数字/#/* 命中 emoji 字体内的键帽基字形（黑色）——显式 fontFamily
+  // 也压不住（引擎对带 Emoji 属性码点优先尝试 fallback 链中的 emoji
+  // 字体）。Android/iOS 系统链自带彩色 emoji，不挂显式兜底；Linux
+  // 保留 R-P10/R-P26 显式栈（fontconfig 黑白字形问题）。
+  // ============================================================
+  group('Q1 二轮 —— emojiTextFallback 按平台裁剪', () {
+    test('Linux：保留显式兜底栈（R-P10/R-P26 契约）', () {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      expect(emojiTextFallback(), AppConfig.emojiFontStack);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    test('Android/iOS：空栈（系统链自带彩字；防数字键帽黑字形）', () {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      expect(emojiTextFallback(), isEmpty);
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      expect(emojiTextFallback(), isEmpty);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    test('Windows/macOS：空栈（系统链自带 Segoe UI Emoji / Apple Color Emoji）', () {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      expect(emojiTextFallback(), isEmpty);
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      expect(emojiTextFallback(), isEmpty);
+      debugDefaultTargetPlatformOverride = null;
     });
   });
 }

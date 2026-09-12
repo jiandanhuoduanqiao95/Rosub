@@ -691,6 +691,14 @@ bool isVideoFilename(String filename) {
   return extensions.any(lower.endsWith);
 }
 
+/// 文件名是否为本应用表情包贴纸（Q1 三轮问题4：通知正文显示
+/// "[动画表情]"而非原始文件名，参考微信）。贴纸发送经 sendFileBytes
+/// 复用图片通道，文件名恒为 StickerStore 命名 'sticker_<id>.png'。
+bool isStickerFilename(String filename) {
+  final base = filename.toLowerCase().split(RegExp(r'[/\\]')).last;
+  return base.startsWith('sticker_') && base.endsWith('.png');
+}
+
 /// 文件字节数转人类可读大小（阶段 P1：富媒体气泡大小行）。
 /// <1KB 显示整数 B；KB/MB/GB 显示 1 位小数；0 → '0 B'。
 String formatFileSize(int bytes) {

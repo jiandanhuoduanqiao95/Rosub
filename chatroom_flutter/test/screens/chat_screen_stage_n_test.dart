@@ -108,7 +108,7 @@ void main() {
           tester.widget<RawTextField>(find.byType(RawTextField).first);
       input.onImagePasted?.call(pngBytes);
       await tester.pumpAndSettle();
-      await tester.tap(find.text('取消'));
+      await tester.tap(find.byTooltip('取消'));
       await tester.pumpAndSettle();
 
       verifyNever(() => socket.sendFileBytes(any(), any(), any()));

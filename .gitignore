@@ -33,6 +33,9 @@ received_files/
 # 客户端运行时用户数据（阶段 P2 StickerStore 表情包存储，R-P28 起忽略）
 chatroom_flutter/stickers/
 
+# 客户端运行时用户数据（Q1 五轮 SentFileStore 已发送文件副本，字节直发落盘）
+chatroom_flutter/sent_files/
+
 # 构建产物与 IDE 配置
 .dart_tool/
 .packages

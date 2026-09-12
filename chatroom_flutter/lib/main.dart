@@ -11,10 +11,12 @@ import 'services/app_paths.dart';
 import 'services/focus_tracker.dart';
 import 'services/ime_bridge.dart';
 import 'services/message_cache.dart';
+import 'services/sent_file_store.dart';
 import 'services/session_lifecycle.dart';
 import 'services/sticker_store.dart';
 import 'services/taskbar_notifier.dart';
 import 'services/theme_settings.dart';
+import 'platform/android_system.dart';
 
 import 'config.dart';
 
@@ -28,6 +30,8 @@ void main() async {
   // 阶段 Q0-4：解析平台存储目录（Linux 兼容既有 CWD 相对路径；
   // 其余平台走 path_provider 文档目录）——先于任何落盘调用
   await AppPaths.ensureInitialized();
+  // Q1 五轮（问题2）：已发送文件路径映射预载（文件管理页同步回看）
+  await SentFileStore.init();
   // 阶段 L3（P0-4）：初始化本地消息缓存（启动秒开 + 离线可读）；失败不阻塞启动
   MessageCache.init().then((_) {}, onError: (_) {});
   // R-P8（视频画面黑屏修复）：media_kit 要求在 runApp 前完成初始化
@@ -77,11 +81,19 @@ class _ChatroomAppState extends State<ChatroomApp> with WidgetsBindingObserver {
       // 应用即将退出，清理 IME 桥接进程，避免窗口残留
       ImeBridgeManager.instance.shutdown();
     }
+    if (state == AppLifecycleState.paused) {
+      // Q1 五轮（问题1）：真后台暂停透传——SocketService 记录暂停
+      // 时刻，回前台探测据此把"冻结打断的文件接收"判死重连
+      SessionLifecycleGuard.instance.handlePaused();
+    }
     if (state == AppLifecycleState.resumed) {
       // 阶段 Q0-5：回前台校验 socket 存活并重连——paused（退后台）
       // 下断开属预期，恢复后走既有重连 + 离线补发链路；桌面最小化
       // 恢复时 socket 存活，此调用无操作（接线天然无害）
       SessionLifecycleGuard.instance.handleResumed();
+      // Q1 真机反馈二轮（问题5）：回前台清除应用外消息通知（已读语义；
+      // 仅 Android 生效，其余平台安全 no-op）
+      AndroidSystem.cancelMessageNotifications();
     }
     // 窗口焦点检测（阶段 H1）：resumed = 聚焦，inactive/paused = 失焦。
     // 任务栏闪烁（H2）仅在未聚焦时触发。

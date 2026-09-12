@@ -106,6 +106,23 @@ void main() {
       expect(notified, 2, reason: '每次 setter 触发 notifyListeners');
     });
 
+    test('Q1 反馈（跟手）：startStroke/extendStroke 逐点通知画布重绘', () {
+      final controller = AnnotationController();
+      var notified = 0;
+      controller.addListener(() => notified++);
+
+      controller.startStroke(const Offset(1, 1));
+      final afterStart = notified;
+      controller.extendStroke(const Offset(2, 2));
+      controller.extendStroke(const Offset(3, 3));
+      controller.endStroke();
+      final afterEnd = notified;
+
+      expect(afterStart, 1, reason: '起笔即通知（落笔痕迹立即可见）');
+      expect(afterEnd, greaterThanOrEqualTo(3),
+          reason: '拖动过程逐点通知（笔迹随手指实时延伸，不等松手）');
+    });
+
     test('新笔画使用当前颜色/线宽', () {
       final controller = AnnotationController();
       controller

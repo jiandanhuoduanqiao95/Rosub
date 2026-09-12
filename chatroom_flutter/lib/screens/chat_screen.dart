@@ -6,20 +6,21 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../l10n/app_strings.dart';
 import '../models/chat_models.dart';
+import '../platform/android_system.dart';
+import '../platform/battery_optimization.dart';
 import '../platform/capabilities.dart';
 import '../services/chat_exporter.dart';
 import '../services/app_paths.dart';
-import '../services/file_drop.dart';
+import '../services/export_saver.dart';
 import '../services/ime_bridge.dart';
 import '../services/session_lifecycle.dart';
 import '../services/session_store.dart';
@@ -28,10 +29,12 @@ import '../services/sticker_store.dart';
 import '../services/theme_settings.dart';
 import '../services/state_manager.dart';
 import '../services/taskbar_notifier.dart';
+import '../widgets/app_feedback.dart';
 import '../widgets/chat_view.dart';
 import '../widgets/dialogs.dart';
 import '../widgets/image_annotation_editor.dart';
 import '../widgets/adaptive_text_field.dart';
+import '../widgets/responsive_layout.dart';
 import '../widgets/sidebar.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -43,7 +46,8 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<ChatScreen>
+    with WidgetsBindingObserver {
   final _state = AppState.instance;
   final _inputCtrl = TextEditingController();
 
@@ -59,17 +63,50 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _state.addListener(_onStateChanged);
     _dndExpiryTimer =
         Timer.periodic(const Duration(seconds: 30), (_) => _checkDndExpiry());
-    // 阶段 N3（P2-4 文件拖拽发送）：接收 GTK 拖入的文件路径
-    FileDrop.instance.ensureListening();
-    FileDrop.instance.setOnFilesDropped(_onFilesDropped);
-    // 阶段 Q0-5：会话生命周期守护——回前台校验 socket 存活并重连
+    // 阶段 N3（P2-4 文件拖拽发送）/ Q1-2：经平台能力抽象接收拖入的
+    // 文件路径（Linux=GTK channel 原样；移动端 isSupported=false 不注册）
+    PlatformCapabilities.fileDrop.ensureListening();
+    PlatformCapabilities.fileDrop.setOnFilesDropped(_onFilesDropped);
+    // 阶段 Q0-5：会话生命周期守护——回前台校验 socket 存活并重连。
+    // Q1 五轮（问题1 重大回归修复）：isSocketAlive 改为恒 false——
+    // 原 `socket != null` 判定把"僵尸 socket"（服务端看门狗踢线/系统
+    // 冻结后连接单侧死亡，但 Dart 侧对象仍在）当作存活，resumed 时
+    // guard 直接短路返回，ensureConnectedOnResume 的僵死探测
+    // （ping + 10s 看门狗）永远走不到 → 前台也不重连，只能重新登录。
+    // 恒 false = resume 恒走 ensureConnectedOnResume：真正的存活判定
+    // 由其内部完成（僵尸 → 重连链路；健康连接 → 一次探测 ping，幂等
+    // 无害），幂等保护（_reconnecting/_intentionalDisconnect/凭据）均在其中。
     SessionLifecycleGuard.instance.bind(
-      isSocketAlive: () => widget.socketService.socket != null,
+      isSocketAlive: () => false,
       reconnect: () => widget.socketService.ensureConnectedOnResume(),
+      onPause: () => widget.socketService.markAppPaused(),
     );
+    // Q1 五轮（问题1 重大回归修复）：恢复"生命周期门控前台服务"——
+    // 四轮的普通服务方案被国产 ROM 深度休眠冻结/回收，后台彻底收不到
+    // 新消息（无前台状态不被 Android 12+ 冻结机制豁免；侧载应用无厂商
+    // 推送通道）。前台使用期间服务不运行（零通知）；退后台（paused）
+    // 启动 FGS 维持进程与消息连接，回前台（resumed）立即停止——通知
+    // 仅在后台期间存在，为后台收消息的系统强制代价
+    // 阶段 Q1-4：电池优化白名单引导（仅 Android 且未白名单时弹一次；
+    // 桌面/已白名单天然不弹）。
+    // Q1 真机反馈二轮：前置通知权限请求（问题5——应用外通知需
+    // Android 13+ POST_NOTIFICATIONS），后置上次崩溃日志展示（问题8 排障）
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      // Q1 六轮（问题3）：消息通知渠道改用应用提示音（客户端内外
+      // 统一；Q1 八轮起提示音为打包内置资源，原生侧自取）
+      await AndroidSystem.setupMessageChannel();
+      if (!mounted) return;
+      await AndroidSystem.requestNotificationPermission();
+      if (!mounted) return;
+      await maybeShowBatteryOptimizationGuide(context);
+      if (!mounted) return;
+      await _maybeShowLastCrashDialog();
+    });
     // 阶段 O1 修订（2026-08-31 多公告并存）：进入聊天页时对当前会话
     // （重连恢复场景）拉取群公告历史
     final initial = _state.currentChat;
@@ -78,10 +115,28 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Q1 五轮（问题1）：生命周期门控保活——退后台（paused）启动前台
+  /// 服务维持进程与消息连接（后台通知为系统强制项）；回前台（resumed）
+  /// 立即停止（前台期间零通知）。仅 Android 生效（内部有平台门控）。
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      unawaited(AndroidSystem.startKeepAlive());
+    } else if (state == AppLifecycleState.resumed) {
+      unawaited(AndroidSystem.stopKeepAlive());
+    }
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     SessionLifecycleGuard.instance.unbind();
-    FileDrop.instance.setOnFilesDropped(null);
+    // Q1 五轮（问题1）：离开聊天页/退出登录停止前台服务（防退后台
+    // 启动后残留）；未启动时 stopService 为无害 no-op
+    if (effectiveTargetPlatform() == TargetPlatform.android) {
+      unawaited(AndroidSystem.stopKeepAlive());
+    }
+    PlatformCapabilities.fileDrop.setOnFilesDropped(null);
     _draftDebounce?.cancel();
     _dndExpiryTimer?.cancel();
     _state.removeListener(_onStateChanged);
@@ -120,6 +175,67 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Q1 真机反馈二轮（问题8"首开闪退"排障）：上次 Java 层未捕获
+  /// 异常的面包屑展示——存在则弹对话框（可复制），关闭即清除。
+  /// 仅 Android；无日志/非 Android 静默。
+  Future<void> _maybeShowLastCrashDialog() async {
+    if (effectiveTargetPlatform() != TargetPlatform.android) return;
+    final log = await AndroidSystem.getLastCrashLog();
+    if (log == null || log.isEmpty || !mounted) return;
+    await showResponsiveDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('检测到上次异常退出'),
+        content: SizedBox(
+          width: double.infinity,
+          height: 320,
+          child: SingleChildScrollView(
+            child: SelectableText(
+              log,
+              style: const TextStyle(
+                fontSize: 11,
+                fontFamily: 'monospace',
+                height: 1.3,
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: log));
+              showNoticeBar(ctx, '已复制崩溃日志');
+            },
+            child: const Text('复制日志'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+    await AndroidSystem.clearCrashLog();
+  }
+
+  /// Q1 真机反馈二轮（问题5b）：Android 返回键/侧滑逐级返回——
+  /// 表情面板 → 搜索行 → compact 聊天区回列表 → 转后台（不退出进程）
+  void _handleAndroidBack() {
+    if (_emojiPanelVisible) {
+      setState(() => _emojiPanelVisible = false);
+      return;
+    }
+    if (_chatSearchVisible) {
+      setState(() => _chatSearchVisible = false);
+      return;
+    }
+    if (_inCompactChat) {
+      setState(() => _compactShowChat = false);
+      return;
+    }
+    AndroidSystem.moveToBackground();
+  }
+
   /// 阶段 K2：输入变化 → 立即写本地草稿状态 + 防抖同步服务端
   /// （修复：仅在切换会话/发送时才同步 → 输入后直接退出草稿丢失）
   /// 系统消息会话（'服务器'）只读：不写草稿元数据、不同步服务端，
@@ -152,12 +268,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final notice = _state.noticeQueue.first;
       _state.consumeNotice();
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(notice),
-            duration: const Duration(seconds: 3),
-          ),
-        );
+        showNoticeBar(context, notice);
       }
     }
     if (mounted && !_state.isLoggedIn) {
@@ -387,7 +498,7 @@ class _ChatScreenState extends State<ChatScreen> {
         text: _state.profileOf(_state.username!)?.nickname ?? '');
     final signatureCtrl = TextEditingController(
         text: _state.profileOf(_state.username!)?.signature ?? '');
-    showDialog(
+    showResponsiveDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('编辑资料'),
@@ -607,7 +718,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _confirmRecall(String messageId) async {
     final current = _state.currentChat;
     if (current == null) return;
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showResponsiveDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('撤回消息'),
@@ -656,6 +767,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// 阶段 N3b（P2-4 扩展）：点击内联图片 → 黑底全屏查看（参考微信）。
   /// 字节优先 Image.memory，否则本地路径 Image.file；点击关闭，可缩放。
+  /// Q1 真机反馈二轮（问题8）：解码降采样到屏幕宽度像素——超大照片
+  /// （如 50MP）全分辨率解码常驻数百 MB，低端机易被 LMK 查杀（闪退）。
   void _openImageViewer(ChatMessage message) {
     final bytes = message.fileData;
     String? path = message.filePath;
@@ -664,26 +777,44 @@ class _ChatScreenState extends State<ChatScreen> {
       path = '${AppPaths.receivedFilesDir}/$base';
     }
     if (bytes == null && (path == null || !File(path).existsSync())) return;
-    showDialog<void>(
+    showResponsiveDialog<void>(
       context: context,
       barrierColor: Colors.black,
       barrierDismissible: true,
-      builder: (ctx) => GestureDetector(
-        onTap: () => Navigator.of(ctx).pop(),
-        child: Center(
-          child: InteractiveViewer(
-            minScale: 0.5,
-            maxScale: 4,
-            child:
-                bytes != null ? Image.memory(bytes) : Image.file(File(path!)),
+      builder: (ctx) {
+        final dpr = MediaQuery.devicePixelRatioOf(ctx);
+        final cacheWidth =
+            (MediaQuery.sizeOf(ctx).width * dpr).ceil().clamp(720, 4096);
+        return GestureDetector(
+          onTap: () => Navigator.of(ctx).pop(),
+          child: Center(
+            child: InteractiveViewer(
+              minScale: 0.5,
+              maxScale: 4,
+              child: bytes != null
+                  ? Image.memory(bytes, cacheWidth: cacheWidth)
+                  : Image.file(File(path!), cacheWidth: cacheWidth),
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
   // R-P14（微信式）：表情/表情包面板挂载状态（true = 显示在输入栏上方）
   bool _emojiPanelVisible = false;
+
+  /// 阶段 Q1-1：compact（手机窄屏）单屏状态——true = 显示聊天区，
+  /// false = 显示会话列表；宽屏（≥600）忽略此状态（双栏恒可见）
+  bool _compactShowChat = false;
+
+  /// Q1 真机反馈 #3：compact 聊天态 AppBar 的搜索入口（受控驱动
+  /// ChatView 搜索输入行显隐；切换会话时复位）
+  bool _chatSearchVisible = false;
+
+  /// 当前是否处于"compact 聊天态"（AppBar 最简化：返回+居中标题+
+  /// 搜索/导出/文件管理；工具栏图标收进会话列表态）
+  bool get _inCompactChat => _compactShowChat && _state.currentChat != null;
 
   /// 阶段 P2（R-P3 修订）：表情面板开关——表情模块点击插入输入框（光标处），
   /// 表情包模块点击贴纸按图片消息通道发送到当前会话。
@@ -830,7 +961,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final base = message.filename!.split(RegExp(r'[/\\]')).last;
       path = '${AppPaths.receivedFilesDir}/$base';
     }
-    showDialog<void>(
+    showResponsiveDialog<void>(
       context: context,
       barrierColor: Colors.black,
       barrierDismissible: false,
@@ -845,14 +976,17 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   /// 阶段 N2（P2-1 聊天记录导出）：当前会话导出 TXT/JSON
-  /// （数据主权闭环：JSON 含完整元数据，TXT 人工可读；保存路径由用户选择）
+  /// （数据主权闭环：JSON 含完整元数据，TXT 人工可读）。
+  /// Q1 真机反馈 #8 修订：落盘改经 ExportSaver 平台分流——移动端
+  /// 直接写 AppPaths.exportsDir（FilePicker.saveFile 移动端无路径，
+  /// 原实现点击 TXT/JSON 无反应），桌面保持系统"另存为"对话框。
   Future<void> _exportChat() async {
     final key = _state.currentChat;
     if (key == null || key == '服务器') return;
     final messages = _state.getMessages(key);
     // 阶段 N2 修订（用户反馈）：TXT 与 JSON 地位相同——
     // 两个并列按钮，避免主/次按钮暗示格式有主次之分
-    final format = await showDialog<String>(
+    final format = await showResponsiveDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('导出聊天记录'),
@@ -876,17 +1010,16 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
     );
     if (format == null || !mounted) return;
-    final safeName = key.replaceAll(RegExp(r'[^\w\-]'), '_');
-    final path = await FilePicker.platform.saveFile(
-      dialogTitle: '导出聊天记录',
-      fileName: 'chat_$safeName.$format',
-    );
-    if (path == null) return;
     final content = format == 'txt'
         ? ChatExporter.exportTxt(chatKey: key, messages: messages)
         : ChatExporter.exportJson(chatKey: key, messages: messages);
     try {
-      File(path).writeAsStringSync(content);
+      final path = await ExportSaver.saveExportFile(
+        baseName: 'chat_${key.replaceAll(RegExp(r'[^\w\-]'), '_')}',
+        format: format,
+        content: content,
+      );
+      if (path == null) return;
       _state.showNotice('已导出 ${messages.length} 条消息到 $path');
     } catch (e) {
       _state.showNotice('导出失败: $e');
@@ -898,7 +1031,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final current = _state.currentChat;
     if (current == null || current == '服务器') return;
     final ctrl = TextEditingController();
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showResponsiveDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('引用回复'),
@@ -924,8 +1057,13 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// 阶段 K5（P1-3）：转发目标选择对话框（好友 + 群组）
-  Future<void> _showForwardTargetDialog(String messageId) async {
+  /// 阶段 K5（P1-3）：转发目标选择对话框（好友 + 群组）。
+  /// Q1 三轮（问题8）：文件转发经 onTarget 回调走"本地文件重发"通道，
+  /// 文字消息仍走服务端 forward 协议（默认路径）。
+  Future<void> _showForwardTargetDialog(
+    String messageId, {
+    void Function(String targetChatKey)? onTarget,
+  }) async {
     final targets = [
       for (final f in _state.friends)
         ChatTarget(key: f, displayName: _state.displayNameForChat(f)),
@@ -936,7 +1074,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _state.showNotice('暂无可转发的好友或群组');
       return;
     }
-    final target = await showDialog<ChatTarget>(
+    final target = await showResponsiveDialog<ChatTarget>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('转发到'),
@@ -964,115 +1102,87 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
     );
-    if (target != null) {
+    if (target == null) return;
+    if (onTarget != null) {
+      onTarget(target.key);
+    } else {
       widget.socketService.forwardMessage(messageId, target.key);
     }
   }
 
+  /// Q1 三轮（问题8）：文件转发（纯客户端实现，服务端/协议零改动）。
+  /// 服务端 forward 协议对文件消息恒拒绝（"文件消息暂不支持转发"），
+  /// 故对已下载到本机的文件改走既有 sendFile 上传通道重新发送——
+  /// 服务端视为一次普通文件发送（以转发人为第一手，语义一致）。
+  /// 未下载（file_meta 元数据气泡/已清缓存）时提示并中止。
+  void _forwardFile(ChatMessage message) {
+    var path = message.filePath;
+    if (path == null && message.filename != null) {
+      final base = message.filename!.split(RegExp(r'[/\\]')).last;
+      path = '${AppPaths.receivedFilesDir}/$base';
+    }
+    if (path == null || !File(path).existsSync()) {
+      _state.showNotice('文件尚未下载到本机，无法转发');
+      return;
+    }
+    final filename = message.filename ?? path.split(RegExp(r'[/\\]')).last;
+    final resolved = path;
+    _showForwardTargetDialog(
+      message.messageId,
+      onTarget: (key) {
+        if (key == '服务器') return;
+        widget.socketService.sendFile(key, resolved, filename);
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
+    // 阶段 Q1-1：手机窄屏（<600）单屏布局，桌面/平板（≥600）双栏不变
+    final compact = isCompactLayout(context);
+    final inCompactChat = compact && _inCompactChat;
+    // Q1 四轮（问题3）：Android 会话列表态 AppBar 不再显示
+    // "聊天室 - 用户名"字样（聊天态会话名保留）；桌面基线不变
+    final hideListTitle =
+        effectiveTargetPlatform() == TargetPlatform.android;
+    final page = ListenableBuilder(
       listenable: _state,
       builder: (context, _) {
         return Scaffold(
           appBar: AppBar(
-            title: Text('${t('appTitle')} - ${_state.username ?? ""}'),
-            actions: [
-              // 文件请求指示器
-              if (_state.hasPendingFileRequests)
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: Badge(
-                    label: Text('${_state.pendingFileRequests.length}'),
-                    child: IconButton(
-                      icon: const Icon(Icons.folder_rounded),
-                      tooltip: '待处理文件请求',
-                      onPressed: _showFileRequests,
-                    ),
-                  ),
-                ),
-
-              // 好友请求指示器
-              if (_state.pendingRequests.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: Badge(
-                    label: Text('${_state.pendingRequests.length}'),
-                    child: IconButton(
-                      icon: const Icon(Icons.people_rounded),
-                      tooltip: '待处理好友请求',
-                      onPressed: _showFriendRequests,
-                    ),
-                  ),
-                ),
-
-              // 群邀请入口（阶段 M：P-11 用户反馈——邀请像好友申请一样
-              // 保留入口，离线登录补发后同样在此显示）
-              if (_state.invitations.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: Badge(
-                    label: Text('${_state.invitations.length}'),
-                    child: IconButton(
-                      icon: const Icon(Icons.group_add_rounded),
-                      tooltip: '待处理群邀请',
-                      onPressed: _showGroupInvites,
-                    ),
-                  ),
-                ),
-
-              // 管理员面板
-              if (_state.isAdmin)
-                IconButton(
-                  icon: const Icon(Icons.admin_panel_settings),
-                  tooltip: '管理面板',
-                  onPressed: _showAdminPanel,
-                ),
-
-              // 设置（阶段 K3：提示音/免打扰）
-              IconButton(
-                icon: const Icon(Icons.settings_rounded),
-                tooltip: t('settings'),
-                onPressed: () => showSettingsDialog(context),
-              ),
-
-              // 文件管理（阶段 M8：P1-7 文件收发管理页）
-              IconButton(
-                icon: const Icon(Icons.folder_open_rounded),
-                tooltip: '文件管理',
-                onPressed: () =>
-                    showFileListDialog(context, widget.socketService),
-              ),
-
-              // 设备管理（阶段 N6：P2-6 登录设备管理——列表/远程下线）
-              IconButton(
-                icon: const Icon(Icons.devices_rounded),
-                tooltip: '设备管理',
-                onPressed: () =>
-                    showDeviceManagementDialog(context, widget.socketService),
-              ),
-
-              // 个人资料（阶段 J：P0-2）
-              IconButton(
-                icon: const Icon(Icons.account_circle_rounded),
-                tooltip: '个人资料',
-                onPressed: () => _showProfileDialog(_state.username!),
-              ),
-
-              // 修改密码（阶段 G3）
-              IconButton(
-                icon: const Icon(Icons.lock_outline_rounded),
-                tooltip: '修改密码',
-                onPressed: _showChangePasswordDialog,
-              ),
-
-              // 退出
-              IconButton(
-                icon: const Icon(Icons.logout),
-                tooltip: t('logout'),
-                onPressed: _logout,
-              ),
-            ],
+            automaticallyImplyLeading: false,
+            // 阶段 Q1-1：compact 单屏聊天区显示返回控件（回会话列表）
+            leading: inCompactChat
+                ? IconButton(
+                    tooltip: '返回',
+                    icon: const Icon(Icons.arrow_back_rounded),
+                    onPressed: () => setState(() => _compactShowChat = false),
+                  )
+                : null,
+            // Q1 真机反馈 #3：compact 聊天态只居中显示会话名（用户名/群名），
+            // 设置/文件/设备/资料/密码/退出工具栏收进会话列表态。
+            // Q1 六轮（问题2）：Android 宽屏（平板/横屏/大屏缩放）选中
+            // 会话时 AppBar 也显示会话名（此前宽屏选中会话时标题为空）。
+            // Q1 八轮（问题1 回归修复）：**紧凑列表态（返回主界面）不得
+            // 残留会话名**——currentChat 常驻（selectChat 语义），六轮
+            // 条件 `currentChat != null` 未排除"已返回列表"状态，导致
+            // 左上角显示对方名称。
+            // 桌面（Linux）宽屏双栏保持"聊天室 - 用户名"基线不变
+            // （ChatView 内部自带"与 xx 的聊天"标题栏）。
+            centerTitle: inCompactChat,
+            title: _state.currentChat != null &&
+                    (inCompactChat ||
+                        (hideListTitle && !compact))
+                ? Text(
+                    _state.displayNameForChat(_state.currentChat!),
+                    overflow: TextOverflow.ellipsis,
+                  )
+                : (hideListTitle
+                    ? null
+                    : Text('${t('appTitle')} - ${_state.username ?? ""}')),
+            actions: inCompactChat
+                ? _buildCompactChatActions()
+                : _buildToolbarActions(),
           ),
           body: Column(
             children: [
@@ -1109,222 +1219,423 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                   ),
                 ),
-              Expanded(
-                child: Row(
-                  children: [
-                    // === 左侧：会话列表 ===
-                    Sidebar(
-                      chatTargets: _state.chatTargets,
-                      currentChat: _state.currentChat,
-                      onSelectChat: (key) {
-                        _maybeFetchGroupAnnouncements(key);
-                        // 阶段 K2：切换会话前同步保存旧会话草稿（本地 + 服务端），
-                        // 再恢复新会话草稿到输入栏（先 selectChat，避免草稿回写
-                        // 到旧会话）
-                        // 系统消息会话（'服务器'）只读：不写本地草稿元数据（P-46 缺陷修复）
-                        final previous = _state.currentChat;
-                        if (previous != null &&
-                            previous != key &&
-                            previous != '服务器') {
-                          _state.setConversationDraft(
-                              previous, _inputCtrl.text);
-                          _flushDraft();
-                        }
-                        _state.selectChat(key);
-                        _inputCtrl.text = _state.draftOf(key);
-                        _maybeLoadInitialHistory(key);
-                        // R-P14：切换会话收起表情面板
-                        if (_emojiPanelVisible) {
-                          setState(() => _emojiPanelVisible = false);
-                        }
-                      },
-                      onAddFriend: _showAddFriendDialog,
-                      onCreateGroup: _showCreateGroupDialog,
-                      onJoinGroup: _showJoinGroupDialog,
-                      unreadOf: _state.unreadOf,
-                      onDeleteFriend: _showFriendMenuDialog,
-                      onGroupLongPress: _showGroupMenuDialog,
-                      isOnline: _state.isOnline,
-                      friendGroups: _state.friendsByGroup,
-                      isPinned: _state.isPinned,
-                      isMuted: _state.isMuted,
-                    ),
-
-                    // 分隔线
-                    const VerticalDivider(width: 1),
-
-                    // === 右侧：聊天区域 ===
-                    Expanded(
-                      child: Column(
-                        children: [
-                          Expanded(
-                            child: _state.currentChat != null
-                                ? ChatView(
-                                    chatKey: _state.currentChat!,
-                                    chatTitle: _state.displayNameForChat(
-                                        _state.currentChat!),
-                                    messages: _state
-                                            .isSearchMode(_state.currentChat!)
-                                        ? _state
-                                            .searchResults(_state.currentChat!)
-                                        : _state
-                                            .getMessages(_state.currentChat!),
-                                    username: _state.username!,
-                                    inputCtrl: _inputCtrl,
-                                    canSend: _state.currentChat != '服务器',
-                                    onSend: _sendMessage,
-                                    onSendFile: _sendFile,
-                                    onRecall: _confirmRecall,
-                                    onLoadHistory: (beforeId) => _loadHistory(
-                                        _state.currentChat!, beforeId),
-                                    hasMoreHistory: _state.hasMoreHistory,
-                                    transferFraction: _state.transferFraction,
-                                    isSearchMode: _state
-                                        .isSearchMode(_state.currentChat!),
-                                    searchQuery: _state
-                                        .searchQueryOf(_state.currentChat!),
-                                    onSearch: _runSearch,
-                                    onSearchExit: _exitSearch,
-                                    onRetrySend: (messageId) => widget
-                                        .socketService
-                                        .retryPendingMessage(messageId),
-                                    // 阶段 K2：输入变化 → 本地草稿状态 + 防抖自动保存
-                                    onInputChanged: _onInputChanged,
-                                    // 阶段 K5：消息操作（引用/转发/表情/仅我删除）
-                                    onReplyMessage: _showReplyMessageDialog,
-                                    onForwardMessage: _showForwardTargetDialog,
-                                    onAddReaction: (messageId, emoji) {
-                                      final key = _state.currentChat;
-                                      if (key != null) {
-                                        widget.socketService
-                                            .addReaction(messageId, emoji, key);
-                                      }
-                                    },
-                                    onDeleteMessage: (messageId) {
-                                      final key = _state.currentChat;
-                                      if (key != null) {
-                                        _state.removeMessageLocally(
-                                            key, messageId);
-                                      }
-                                    },
-                                    // 阶段 N1（P2-2 永久删除）：本地缓存中彻底移除
-                                    onDeletePermanently: (messageId) {
-                                      final key = _state.currentChat;
-                                      if (key != null) {
-                                        widget.socketService
-                                            .permanentlyDeleteMessage(
-                                                key, messageId);
-                                      }
-                                    },
-                                    // 阶段 N3（P2-4）/ R-P5 修订：剪贴板图片
-                                    // → 自动进入标注编辑器（可编辑后发送，
-                                    // 也可直接发送原图）
-                                    onImagePasted: (bytes) {
-                                      if (isSupportedImage(bytes)) {
-                                        _sendImageWithEditor(bytes,
-                                            filename: 'pasted_image.png');
-                                      }
-                                    },
-                                    // 阶段 N3b：点击内联图片 → 全屏查看
-                                    onImageTap: _openImageViewer,
-                                    // 阶段 P1：点击视频气泡 → 全屏查看
-                                    onVideoTap: _openVideoViewer,
-                                    // R-P2：点击文件卡片 → 文件预览
-                                    onFileTap: _openFilePreview,
-                                    // R-P3：图片消息菜单"添加到表情包"
-                                    onSaveSticker: _saveMessageSticker,
-                                    // 阶段 P2：贴纸面板入口
-                                    onShowStickerPicker: _showStickerPicker,
-                                    // R-P14：嵌入式表情面板（输入栏上方）
-                                    emojiPanel: _buildEmojiPanel(),
-                                    // 阶段 P3：高级搜索入口
-                                    onAdvancedSearch: _showAdvancedSearch,
-                                    // 阶段 N2（P2-1）：聊天记录导出（TXT/JSON）
-                                    onExportChat: _exportChat,
-                                    // ---- 阶段 O 接线 ----
-                                    // O1/O2：群公告横幅 + 群置顶横幅
-                                    // （数据源 list_groups 推送的 Group 字段）
-                                    // 多公告/多置顶并存（2026-08-31 修订）：
-                                    // 公告横幅 = state.groupAnnouncements
-                                    //（选中群时拉取 + 实时推送追加）；
-                                    // 置顶横幅 = list_groups 的全量置顶列表
-                                    announcements: _state.groupAnnouncements
-                                        .map((a) => a.content)
-                                        .toList(),
-                                    // R-O12：公告横幅 ✕ 删除按钮（仅群主）
-                                    announcementItems:
-                                        _state.groupAnnouncements,
-                                    onDeleteAnnouncement: _canPinCurrent
-                                        ? (messageId) {
-                                            final group = _currentGroup!;
-                                            widget.socketService
-                                                .deleteGroupAnnouncement(
-                                                    group.id, messageId);
-                                            _state.removeGroupAnnouncement(
-                                                messageId);
-                                            widget.socketService
-                                                .fetchGroupAnnouncements(
-                                                    group.id);
-                                          }
-                                        : null,
-                                    pinnedItems: _currentGroup?.pinnedMessages,
-                                    // O2：群主置顶群消息入口
-                                    // （对已置顶消息菜单显示"取消置顶"）
-                                    pinnedMessageId:
-                                        _currentGroup?.pinnedMessageId,
-                                    onPinMessage: _canPinCurrent
-                                        ? (messageId) {
-                                            final group = _currentGroup!;
-                                            if (group.pinnedMessageId ==
-                                                messageId) {
-                                              widget.socketService
-                                                  .unpinGroupMessage(group.id);
-                                            } else {
-                                              widget.socketService
-                                                  .pinGroupMessage(
-                                                      group.id, messageId);
-                                            }
-                                          }
-                                        : null,
-                                    // O2 修订（多置顶并存）：横幅快捷取消
-                                    onUnpinMessage: _canPinCurrent
-                                        ? (messageId) => widget.socketService
-                                            .unpinGroupMessage(
-                                                _currentGroup!.id,
-                                                messageId: messageId)
-                                        : null,
-                                    // O4：快捷回复面板
-                                    onQuickReply: _showQuickReplyPanel,
-                                    // O5：定时发送对话框
-                                    onScheduleMessage: _showScheduleDialog,
-                                  )
-                                : Center(
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        const Icon(Icons.chat_rounded,
-                                            size: 64, color: Colors.grey),
-                                        const SizedBox(height: 16),
-                                        Text(
-                                          t('selectChatToStart'),
-                                          style: const TextStyle(
-                                              color: Colors.grey, fontSize: 16),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
+              // Q1 七轮（问题1）：全局传输指示条——任何界面（列表态/
+              // 聊天态/宽屏）恒可见，点击跳转到传输所属会话
+              if (_state.activeTransfers.isNotEmpty)
+                _TransferBanner(
+                  transfers: _state.activeTransfers,
+                  filenameOf: (id) => _state.messageById(id)?.filename,
+                  onTapTransfer: _jumpToTransferChat,
                 ),
+              Expanded(
+                child: compact ? _buildCompactBody() : _buildWideBody(),
               ),
             ],
           ),
         );
       },
     );
+    // Q1 真机反馈二轮（问题5b）：仅 Android 拦截根路由返回——逐级返回
+    // /转后台而非退出应用；桌面关闭按钮不经 Navigator pop，语义不变
+    if (effectiveTargetPlatform() == TargetPlatform.android) {
+      return PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) {
+          if (didPop) return;
+          _handleAndroidBack();
+        },
+        child: page,
+      );
+    }
+    return page;
+  }
+
+  /// Q1 真机反馈 #3：compact 聊天态 AppBar 动作——搜索 + 导出
+  /// （系统会话不提供）+ 固定文件管理入口（Q1 四轮问题4 恢复）。
+  /// Q1 真机反馈二轮（收到文件请求无感知）：聊天态同置待处理文件
+  /// 请求徽标入口（与列表态工具栏一致）。
+  List<Widget> _buildCompactChatActions() {
+    final current = _state.currentChat!;
+    final isSystem = current == '服务器';
+    return [
+      if (_state.hasPendingFileRequests)
+        Padding(
+          padding: const EdgeInsets.only(right: 4),
+          child: Badge(
+            label: Text('${_state.pendingFileRequests.length}'),
+            child: IconButton(
+              icon: const Icon(Icons.folder_rounded),
+              tooltip: '待处理文件请求',
+              onPressed: _showFileRequests,
+            ),
+          ),
+        ),
+      if (!isSystem)
+        IconButton(
+          tooltip: '搜索消息',
+          icon: const Icon(Icons.search_rounded),
+          onPressed: () =>
+              setState(() => _chatSearchVisible = !_chatSearchVisible),
+        ),
+      if (!isSystem)
+        IconButton(
+          tooltip: '导出聊天记录',
+          icon: const Icon(Icons.ios_share_rounded),
+          onPressed: _exportChat,
+        ),
+      // 文件管理（阶段 M8 文件收发管理页；Q1 真机反馈 #3：聊天内外均
+      // 可管理文件；Q1 四轮问题4：固定按键恢复）
+      IconButton(
+        tooltip: '文件管理',
+        icon: const Icon(Icons.folder_open_rounded),
+        onPressed: () => showFileListDialog(context, widget.socketService),
+      ),
+    ];
+  }
+
+  /// 会话列表态 / 宽屏双栏态 AppBar 动作（既有工具栏，Q0 前语义不变）
+  List<Widget> _buildToolbarActions() {
+    return [
+      // 文件请求指示器
+      if (_state.hasPendingFileRequests)
+        Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: Badge(
+            label: Text('${_state.pendingFileRequests.length}'),
+            child: IconButton(
+              icon: const Icon(Icons.folder_rounded),
+              tooltip: '待处理文件请求',
+              onPressed: _showFileRequests,
+            ),
+          ),
+        ),
+
+      // 好友请求指示器
+      if (_state.pendingRequests.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: Badge(
+            label: Text('${_state.pendingRequests.length}'),
+            child: IconButton(
+              icon: const Icon(Icons.people_rounded),
+              tooltip: '待处理好友请求',
+              onPressed: _showFriendRequests,
+            ),
+          ),
+        ),
+
+      // 群邀请入口（阶段 M：P-11 用户反馈——邀请像好友申请一样
+      // 保留入口，离线登录补发后同样在此显示）
+      if (_state.invitations.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: Badge(
+            label: Text('${_state.invitations.length}'),
+            child: IconButton(
+              icon: const Icon(Icons.group_add_rounded),
+              tooltip: '待处理群邀请',
+              onPressed: _showGroupInvites,
+            ),
+          ),
+        ),
+
+      // 管理员面板
+      if (_state.isAdmin)
+        IconButton(
+          icon: const Icon(Icons.admin_panel_settings),
+          tooltip: '管理面板',
+          onPressed: _showAdminPanel,
+        ),
+
+      // 设置（阶段 K3：提示音/免打扰）
+      IconButton(
+        icon: const Icon(Icons.settings_rounded),
+        tooltip: t('settings'),
+        onPressed: () => showSettingsDialog(context),
+      ),
+
+      // 文件管理（阶段 M8：P1-7 文件收发管理页；Q1 四轮问题4：固定按键恢复）
+      IconButton(
+        icon: const Icon(Icons.folder_open_rounded),
+        tooltip: '文件管理',
+        onPressed: () => showFileListDialog(context, widget.socketService),
+      ),
+
+      // 设备管理（阶段 N6：P2-6 登录设备管理——列表/远程下线）
+      IconButton(
+        icon: const Icon(Icons.devices_rounded),
+        tooltip: '设备管理',
+        onPressed: () =>
+            showDeviceManagementDialog(context, widget.socketService),
+      ),
+
+      // 个人资料（阶段 J：P0-2）
+      IconButton(
+        icon: const Icon(Icons.account_circle_rounded),
+        tooltip: '个人资料',
+        onPressed: () => _showProfileDialog(_state.username!),
+      ),
+
+      // 修改密码（阶段 G3）
+      IconButton(
+        icon: const Icon(Icons.lock_outline_rounded),
+        tooltip: '修改密码',
+        onPressed: _showChangePasswordDialog,
+      ),
+
+      // 退出
+      IconButton(
+        icon: const Icon(Icons.logout),
+        tooltip: t('logout'),
+        onPressed: _logout,
+      ),
+    ];
+  }
+
+  /// 选择会话（侧栏点击与全局传输条跳转共用；原 inline 闭包提取）
+  void _selectChat(String key) {
+    _maybeFetchGroupAnnouncements(key);
+    // 阶段 K2：切换会话前同步保存旧会话草稿（本地 + 服务端），
+    // 再恢复新会话草稿到输入栏（先 selectChat，避免草稿回写
+    // 到旧会话）
+    // 系统消息会话（'服务器'）只读：不写本地草稿元数据（P-46 缺陷修复）
+    final previous = _state.currentChat;
+    if (previous != null && previous != key && previous != '服务器') {
+      _state.setConversationDraft(previous, _inputCtrl.text);
+      _flushDraft();
+    }
+    _state.selectChat(key);
+    _inputCtrl.text = _state.draftOf(key);
+    _maybeLoadInitialHistory(key);
+    // R-P14：切换会话收起表情面板
+    if (_emojiPanelVisible) {
+      setState(() => _emojiPanelVisible = false);
+    }
+    // Q1 真机反馈 #3：切换会话复位 AppBar 搜索入口
+    if (_chatSearchVisible) {
+      setState(() => _chatSearchVisible = false);
+    }
+    // 阶段 Q1-1：compact 单屏切换到聊天区
+    if (isCompactLayout(context)) {
+      setState(() => _compactShowChat = true);
+    }
+  }
+
+  /// Q1 七轮（问题1）：点击全局传输条跳转到传输所属会话
+  void _jumpToTransferChat(String messageId) {
+    final key = _state.chatKeyOfMessage(messageId);
+    if (key == null || key == _state.currentChat) return;
+    _selectChat(key);
+  }
+
+  /// Q1 七轮（问题1）：发送失败重试——文字消息走既有 pending 队列；
+  /// 文件消息经 sendFile 重新走完整上传通道（源文件必须仍在本机）
+  void _retrySendMessage(String messageId) {
+    final msg = _state.messageById(messageId);
+    if (msg == null) return;
+    if (msg.type != 'file') {
+      widget.socketService.retryPendingMessage(messageId);
+      return;
+    }
+    final key = _state.currentChat;
+    if (key == null || key == '服务器') return;
+    var path = msg.filePath;
+    if (path == null && msg.filename != null) {
+      final base = msg.filename!.split(RegExp(r'[/\\]')).last;
+      path = '${AppPaths.receivedFilesDir}/$base';
+    }
+    if (path == null || !File(path).existsSync() || msg.filename == null) {
+      _state.showNotice('源文件不在本机，无法重新发送');
+      return;
+    }
+    widget.socketService.sendFile(key, path, msg.filename!);
+  }
+
+  /// 阶段 Q1-1：compact（手机窄屏 <600）单屏布局——会话列表 ↔ 聊天区
+  /// 切换（列表铺满屏宽；选中会话进聊天区，AppBar 返回控件回列表）
+  Widget _buildCompactBody() {
+    if (_compactShowChat && _state.currentChat != null) {
+      return _buildChatArea();
+    }
+    return _buildSidebar(expanded: true);
+  }
+
+  /// 宽屏（桌面/平板 ≥600）：既有双栏布局（会话列表 + 聊天区同现）
+  Widget _buildWideBody() {
+    return Row(
+      children: [
+        _buildSidebar(),
+        const VerticalDivider(width: 1),
+        Expanded(
+          child: Column(
+            children: [
+              Expanded(child: _buildChatArea()),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSidebar({bool expanded = false}) {
+    return Sidebar(
+      chatTargets: _state.chatTargets,
+      currentChat: _state.currentChat,
+      onSelectChat: _selectChat,
+      onAddFriend: _showAddFriendDialog,
+      onCreateGroup: _showCreateGroupDialog,
+      onJoinGroup: _showJoinGroupDialog,
+      unreadOf: _state.unreadOf,
+      onDeleteFriend: _showFriendMenuDialog,
+      onGroupLongPress: _showGroupMenuDialog,
+      isOnline: _state.isOnline,
+      friendGroups: _state.friendsByGroup,
+      isPinned: _state.isPinned,
+      isMuted: _state.isMuted,
+      expanded: expanded,
+    );
+  }
+
+  /// 聊天区域（选中会话 → ChatView；未选 → 占位提示）。
+  /// 宽屏由 _buildWideBody 的 Expanded 包裹；compact 聊天区直接铺满。
+  Widget _buildChatArea() {
+    // Q1 真机反馈 #3：compact 聊天态隐藏 ChatView 自带标题栏
+    // （标题/搜索/导出移至 AppBar），搜索输入行由 AppBar 入口受控
+    final compactChat = isCompactLayout(context) && _inCompactChat;
+    return _state.currentChat != null
+        ? ChatView(
+            chatKey: _state.currentChat!,
+            chatTitle: _state.displayNameForChat(_state.currentChat!),
+            messages: _state.isSearchMode(_state.currentChat!)
+                ? _state.searchResults(_state.currentChat!)
+                : _state.getMessages(_state.currentChat!),
+            username: _state.username!,
+            inputCtrl: _inputCtrl,
+            canSend: _state.currentChat != '服务器',
+            onSend: _sendMessage,
+            onSendFile: _sendFile,
+            onRecall: _confirmRecall,
+            onLoadHistory: (beforeId) =>
+                _loadHistory(_state.currentChat!, beforeId),
+            hasMoreHistory: _state.hasMoreHistory,
+            transferFraction: _state.transferFraction,
+            isSearchMode: _state.isSearchMode(_state.currentChat!),
+            searchQuery: _state.searchQueryOf(_state.currentChat!),
+            onSearch: _runSearch,
+            onSearchExit: _exitSearch,
+            headerVisible: !compactChat,
+            searchInputVisible: _chatSearchVisible,
+            onSearchVisibilityChanged: compactChat
+                ? (v) => setState(() => _chatSearchVisible = v)
+                : null,
+            onRetrySend: _retrySendMessage,
+            // 阶段 K2：输入变化 → 本地草稿状态 + 防抖自动保存
+            onInputChanged: _onInputChanged,
+            // 阶段 K5：消息操作（引用/转发/表情/仅我删除）
+            onReplyMessage: _showReplyMessageDialog,
+            onForwardMessage: _showForwardTargetDialog,
+            onAddReaction: (messageId, emoji) {
+              final key = _state.currentChat;
+              if (key != null) {
+                widget.socketService.addReaction(messageId, emoji, key);
+              }
+            },
+            onDeleteMessage: (messageId) {
+              final key = _state.currentChat;
+              if (key != null) {
+                _state.removeMessageLocally(key, messageId);
+              }
+            },
+            // 阶段 N1（P2-2 永久删除）：本地缓存中彻底移除
+            onDeletePermanently: (messageId) {
+              final key = _state.currentChat;
+              if (key != null) {
+                widget.socketService.permanentlyDeleteMessage(key, messageId);
+              }
+            },
+            // 阶段 N3（P2-4）/ R-P5 修订：剪贴板图片
+            // → 自动进入标注编辑器（可编辑后发送，
+            // 也可直接发送原图）
+            onImagePasted: (bytes) {
+              if (isSupportedImage(bytes)) {
+                _sendImageWithEditor(bytes, filename: 'pasted_image.png');
+              }
+            },
+            // 阶段 N3b：点击内联图片 → 全屏查看
+            onImageTap: _openImageViewer,
+            // 阶段 P1：点击视频气泡 → 全屏查看
+            onVideoTap: _openVideoViewer,
+            // R-P2：点击文件卡片 → 文件预览
+            onFileTap: _openFilePreview,
+            // Q1 三轮（问题8）：文件消息菜单"转发"（已下载文件重发通道）
+            onForwardFile: _forwardFile,
+            // R-P3：图片消息菜单"添加到表情包"
+            onSaveSticker: _saveMessageSticker,
+            // 阶段 P2：贴纸面板入口
+            onShowStickerPicker: _showStickerPicker,
+            // R-P14：嵌入式表情面板（输入栏上方）
+            emojiPanel: _buildEmojiPanel(),
+            // 阶段 P3：高级搜索入口
+            onAdvancedSearch: _showAdvancedSearch,
+            // 阶段 N2（P2-1）：聊天记录导出（TXT/JSON）
+            onExportChat: _exportChat,
+            // ---- 阶段 O 接线 ----
+            // O1/O2：群公告横幅 + 群置顶横幅
+            // （数据源 list_groups 推送的 Group 字段）
+            // 多公告/多置顶并存（2026-08-31 修订）：
+            // 公告横幅 = state.groupAnnouncements
+            //（选中群时拉取 + 实时推送追加）；
+            // 置顶横幅 = list_groups 的全量置顶列表
+            announcements:
+                _state.groupAnnouncements.map((a) => a.content).toList(),
+            // R-O12：公告横幅 ✕ 删除按钮（仅群主）
+            announcementItems: _state.groupAnnouncements,
+            onDeleteAnnouncement: _canPinCurrent
+                ? (messageId) {
+                    final group = _currentGroup!;
+                    widget.socketService
+                        .deleteGroupAnnouncement(group.id, messageId);
+                    _state.removeGroupAnnouncement(messageId);
+                    widget.socketService.fetchGroupAnnouncements(group.id);
+                  }
+                : null,
+            pinnedItems: _currentGroup?.pinnedMessages,
+            // O2：群主置顶群消息入口
+            // （对已置顶消息菜单显示"取消置顶"）
+            pinnedMessageId: _currentGroup?.pinnedMessageId,
+            onPinMessage: _canPinCurrent
+                ? (messageId) {
+                    final group = _currentGroup!;
+                    if (group.pinnedMessageId == messageId) {
+                      widget.socketService.unpinGroupMessage(group.id);
+                    } else {
+                      widget.socketService.pinGroupMessage(group.id, messageId);
+                    }
+                  }
+                : null,
+            // O2 修订（多置顶并存）：横幅快捷取消
+            onUnpinMessage: _canPinCurrent
+                ? (messageId) => widget.socketService
+                    .unpinGroupMessage(_currentGroup!.id, messageId: messageId)
+                : null,
+            // O4：快捷回复面板
+            onQuickReply: _showQuickReplyPanel,
+            // O5：定时发送对话框
+            onScheduleMessage: _showScheduleDialog,
+          )
+        : Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.chat_rounded, size: 64, color: Colors.grey),
+                const SizedBox(height: 16),
+                Text(
+                  t('selectChatToStart'),
+                  style: const TextStyle(color: Colors.grey, fontSize: 16),
+                ),
+              ],
+            ),
+          );
   }
 
   void _showFriendRequests() {
@@ -1380,6 +1691,9 @@ class _VideoViewerPageState extends State<_VideoViewerPage> {
   StreamSubscription<dynamic>? _errorSub;
   bool _failed = false;
 
+  /// Q1 真机反馈 #5（沉浸式观看）：点击视频画面切换顶栏显隐
+  bool _topBarVisible = true;
+
   @override
   void initState() {
     super.initState();
@@ -1402,15 +1716,15 @@ class _VideoViewerPageState extends State<_VideoViewerPage> {
     try {
       MediaKit.ensureInitialized();
       final player = Player();
-      // R-P8（用户实测：有声无画）：强制 S/W 渲染（像素缓冲 Texture），
-      // 绕开 H/W 路径的 GL 上下文共享失败（虚拟机/llvmpipe/部分驱动下
-      // mpv_render_context 建成功但帧不上屏，音频正常画面全黑）；
-      // hwdec 同步关闭避免 VAAPI 初始化失败拖垮解码。
+      // R-P8 软渲染契约由渲染策略驱动（Q1-3）：仅 Linux 强制软渲染
+      // （虚拟机/llvmpipe/部分驱动下 H/W 路径帧不上屏），其余平台
+      // （Q1 Android 真机等）恢复默认硬解。
+      final software = videoSoftwareRendering();
       final controller = VideoController(
         player,
-        configuration: const VideoControllerConfiguration(
-          enableHardwareAcceleration: false,
-          hwdec: 'no',
+        configuration: VideoControllerConfiguration(
+          enableHardwareAcceleration: !software,
+          hwdec: software ? 'no' : null,
         ),
       );
       // R-P21（用户实测：接收方点开视频"一直加载中"）：改为 media_kit
@@ -1474,70 +1788,168 @@ class _VideoViewerPageState extends State<_VideoViewerPage> {
       body: SafeArea(
         child: Column(
           children: [
-            // 顶栏：关闭 + 文件名（点击文件名同样关闭，兼容既有交互）
-            Row(
-              children: [
-                IconButton(
-                  tooltip: '关闭',
-                  icon: const Icon(Icons.close_rounded, color: Colors.white),
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
-                Expanded(
-                  child: GestureDetector(
-                    onTap: () => Navigator.of(context).pop(),
-                    child: Text(
-                      widget.filename,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Colors.white, fontSize: 14),
-                    ),
+            // 顶栏：关闭 + 文件名（点击文件名同样关闭，兼容既有交互）；
+            // Q1 真机反馈 #5：点击画面区域切换顶栏显隐（沉浸式观看）
+            if (_topBarVisible)
+              Row(
+                children: [
+                  IconButton(
+                    tooltip: '关闭',
+                    icon: const Icon(Icons.close_rounded, color: Colors.white),
+                    onPressed: () => Navigator.of(context).pop(),
                   ),
-                ),
-              ],
-            ),
-            Expanded(
-              child: (player != null && controller != null)
-                  ? Video(controller: controller)
-                  : Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          // R-P21：初始化中显示加载指示器；仅失败态显示
-                          // 播放图标 + 系统播放器出口（不再"永久加载中"）
-                          if (_failed)
-                            const Icon(Icons.play_circle_rounded,
-                                size: 72, color: Colors.white70)
-                          else
-                            const SizedBox(
-                              width: 44,
-                              height: 44,
-                              child: CircularProgressIndicator(
-                                  strokeWidth: 3, color: Colors.white70),
-                            ),
-                          const SizedBox(height: 12),
-                          Text(
-                            widget.filename,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                color: Colors.white, fontSize: 15),
-                            textAlign: TextAlign.center,
-                          ),
-                          const SizedBox(height: 16),
-                          if (_failed && widget.path != null)
-                            TextButton.icon(
-                              onPressed: _openWithSystemPlayer,
-                              icon: const Icon(Icons.open_in_new_rounded,
-                                  size: 18, color: Colors.white70),
-                              label: const Text('使用系统播放器打开',
-                                  style: TextStyle(color: Colors.white70)),
-                            ),
-                        ],
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () => Navigator.of(context).pop(),
+                      child: Text(
+                        widget.filename,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style:
+                            const TextStyle(color: Colors.white, fontSize: 14),
                       ),
                     ),
+                  ),
+                ],
+              ),
+            Expanded(
+              child: GestureDetector(
+                onTap: () => setState(() => _topBarVisible = !_topBarVisible),
+                child: (player != null && controller != null)
+                    ? Video(controller: controller)
+                    : Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            // R-P21：初始化中显示加载指示器；仅失败态显示
+                            // 播放图标 + 系统播放器出口（不再"永久加载中"）
+                            if (_failed)
+                              const Icon(Icons.play_circle_rounded,
+                                  size: 72, color: Colors.white70)
+                            else
+                              const SizedBox(
+                                width: 44,
+                                height: 44,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 3, color: Colors.white70),
+                              ),
+                            const SizedBox(height: 12),
+                            Text(
+                              widget.filename,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  color: Colors.white, fontSize: 15),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 16),
+                            if (_failed && widget.path != null)
+                              TextButton.icon(
+                                onPressed: _openWithSystemPlayer,
+                                icon: const Icon(Icons.open_in_new_rounded,
+                                    size: 18, color: Colors.white70),
+                                label: const Text('使用系统播放器打开',
+                                    style: TextStyle(color: Colors.white70)),
+                              ),
+                          ],
+                        ),
+                      ),
+              ),
             ),
           ],
         ),
+      ),
+    );
+  }
+
+/// Q1 七轮（问题1）：全局传输指示条——任何界面（列表态/聊天态/宽屏）
+/// 恒可见；逐传输显示方向/文件名/百分比 + 细进度线，点击跳转到传输
+}
+
+class _TransferBanner extends StatelessWidget {
+  final List<TransferProgress> transfers;
+  final String? Function(String messageId) filenameOf;
+  final void Function(String messageId) onTapTransfer;
+
+  const _TransferBanner({
+    required this.transfers,
+    required this.filenameOf,
+    required this.onTapTransfer,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.secondaryContainer,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final t in transfers.take(3))
+            InkWell(
+              onTap: () => onTapTransfer(t.messageId),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                    child: Row(
+                      children: [
+                        Icon(
+                          t.isSend
+                              ? Icons.upload_rounded
+                              : Icons.download_rounded,
+                          size: 16,
+                          color: scheme.onSecondaryContainer,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            '${t.isSend ? "发送" : "接收"} '
+                            '${filenameOf(t.messageId) ?? "文件"}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: scheme.onSecondaryContainer,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          '${(t.fraction * 100).round()}%',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: scheme.onSecondaryContainer,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  LinearProgressIndicator(
+                    value: t.fraction,
+                    minHeight: 2,
+                    valueColor: AlwaysStoppedAnimation<Color>(
+                      scheme.onSecondaryContainer,
+                    ),
+                    backgroundColor:
+                        scheme.onSecondaryContainer.withValues(alpha: 0.2),
+                  ),
+                ],
+              ),
+            ),
+          if (transfers.length > 3)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              child: Text(
+                '共 ${transfers.length} 个传输任务',
+                style: TextStyle(
+                    fontSize: 11, color: scheme.onSecondaryContainer),
+              ),
+            ),
+        ],
       ),
     );
   }

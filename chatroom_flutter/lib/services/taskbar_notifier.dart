@@ -22,11 +22,13 @@
 /// 判定顺序：enabled → status/sender → 类型规则 → 静音/免打扰（置顶豁免）→ 响铃 → 聚焦 → 闪烁
 
 import 'dart:ffi';
+import 'package:flutter/foundation.dart';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../models/chat_models.dart';
+import '../platform/android_system.dart';
 import '../platform/capabilities.dart';
 import 'focus_tracker.dart';
 import 'state_manager.dart';
@@ -63,7 +65,7 @@ class TaskbarNotifier {
   /// （不打断消息处理管线）。
   static void _defaultPlaySound() {
     try {
-      final wav = _ensureChimeWav();
+      final wav = ensureChimeWav();
       if (wav == null) return;
       // fire-and-forget：播放失败不影响调用方
       _runPlayer(wav, 'paplay');
@@ -84,7 +86,12 @@ class TaskbarNotifier {
     }
   }
 
-  static String? _ensureChimeWav() {
+  /// 生成/复用科技感和弦提示音 WAV 并返回落盘路径（阶段 Q1-2 公开化）。
+  ///
+  /// 原 _ensureChimeWav 私有实现收敛为公开静态：Android 提示音
+  /// （AndroidSoundCapability）经媒体通道复用同一音色文件，避免双份
+  /// 生成代码漂移。生成/落盘失败返回 null（调用方静默降级）。
+  static String? ensureChimeWav() {
     if (_chimeWavPath != null) return _chimeWavPath;
     try {
       final file =
@@ -174,8 +181,9 @@ class TaskbarNotifier {
   /// 同步与异步（Future）错误均吞掉，不传播到调用方
   static void playSound() {
     try {
-      PlatformCapabilities.sound.playNotifySound().then((_) {},
-          onError: (_) {});
+      PlatformCapabilities.sound
+          .playNotifySound()
+          .then((_) {}, onError: (_) {});
     } catch (_) {}
   }
 
@@ -267,9 +275,51 @@ class TaskbarNotifier {
     final inDnd =
         dndEnabled && inDndWindow() && !AppState.instance.isPinned(chatKey);
     if (muted || inDnd) return;
-    if (soundEnabled) playSound();
-    if (FocusTracker.instance.focused) return;
+    // Q1 真机反馈二轮：Android 应用外提醒 = 系统通知（横幅+震动+提示音，
+    // 渠道承载）——后台时跳过应用内提示音避免双响；前台仍走生成式提示音
+    final background = !FocusTracker.instance.focused;
+    final androidBackground =
+        background && effectiveTargetPlatform() == TargetPlatform.android;
+    if (soundEnabled && !androidBackground) playSound();
+    if (!background) return;
     flash();
+    _notifyOutsideApp(msg, chatKey);
+  }
+
+  /// Q1 真机反馈二轮（问题5）：应用外新消息通知（仅 Android）。
+  /// 标题 = 会话显示名（群名/好友名/服务器）；正文 = 内容摘要
+  /// （群聊带发送者前缀；文件类消息展示 "[文件] 文件名"），超长截断。
+  static void _notifyOutsideApp(ChatMessage msg, String chatKey) {
+    if (effectiveTargetPlatform() != TargetPlatform.android) return;
+    try {
+      final state = AppState.instance;
+      String title;
+      if (chatKey.startsWith('group_')) {
+        final gid = int.tryParse(chatKey.substring(6));
+        final group = gid == null
+            ? null
+            : state.groups.where((g) => g.id == gid).firstOrNull;
+        title = group?.name ?? '群消息';
+      } else if (chatKey == '服务器') {
+        title = '服务器消息';
+      } else {
+        title = state.displayNameForChat(chatKey);
+      }
+      final isFileKind = msg.type == 'file' ||
+          msg.type == 'file_request' ||
+          msg.type == 'group_file_request';
+      // Q1 三轮（问题4，参考微信）：表情包贴纸通知显示 "[动画表情]"
+      // 而非原始文件名
+      var body = isFileKind
+          ? (msg.filename != null && isStickerFilename(msg.filename!)
+              ? '[动画表情]'
+              : '[文件] ${msg.filename ?? msg.content}')
+          : (chatKey.startsWith('group_') && msg.sender.isNotEmpty
+              ? '${msg.sender}: ${msg.content}'
+              : msg.content);
+      if (body.length > 80) body = '${body.substring(0, 80)}…';
+      AndroidSystem.showMessageNotification(title: title, body: body);
+    } catch (_) {}
   }
 }
 

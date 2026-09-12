@@ -13,12 +13,17 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:dart_protocol/protocol.dart';
+import 'package:flutter/foundation.dart' show TargetPlatform;
 
 import '../config.dart';
+import '../platform/android_system.dart';
+import '../platform/capabilities.dart';
+import 'focus_tracker.dart';
 import '../models/chat_models.dart';
 import 'app_paths.dart';
 import 'certificate_trust.dart';
 import 'message_cache.dart';
+import 'sent_file_store.dart';
 import 'sticker_store.dart';
 import 'taskbar_notifier.dart';
 import 'theme_settings.dart';
@@ -91,6 +96,9 @@ class SocketService {
   /// 进度通知节流时间戳（100ms 内最多通知一次 UI）
   DateTime _lastTransferNotify = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// 后台传输进度通知节流时间戳（1s 内最多更新一次系统通知）
+  DateTime? _lastTransferNotifyBg;
+
   /// 串行执行 socket 写入任务
   Future<T> _enqueueSend<T>(Future<T> Function() task) {
     final result = _sendTail.then((_) => task());
@@ -132,7 +140,7 @@ class SocketService {
   /// 若 UI 监听器抛出异常（如 debug 模式 "markNeedsBuild during build"）
   /// 会沿回调链传播并中断传输。这里吞掉 UI 侧异常，传输不受影响。
   void _updateTransferThrottled(String messageId, int transferred, int total,
-      {bool isSend = false}) {
+      {bool isSend = false, String? filename}) {
     final now = DateTime.now();
     final done = transferred >= total;
     if (done || now.difference(_lastTransferNotify).inMilliseconds >= 100) {
@@ -140,6 +148,56 @@ class SocketService {
       try {
         state.updateTransfer(messageId, transferred, total, isSend: isSend);
       } catch (_) {}
+    }
+    // Q1 七轮（问题1）：后台/锁屏期间的传输进度系统通知（应用前台由
+    // 全局传输指示条承载，不重复打扰）
+    _notifyTransferProgressBackground(
+        filename, transferred, total, isSend);
+  }
+
+  /// 后台传输进度系统通知（仅 Android 且应用不在前台；1s 节流）
+  void _notifyTransferProgressBackground(
+      String? filename, int transferred, int total, bool isSend) {
+    try {
+      if (effectiveTargetPlatform() != TargetPlatform.android) return;
+      if (FocusTracker.instance.focused) return;
+      final now = DateTime.now();
+      if (_lastTransferNotifyBg != null &&
+          now.difference(_lastTransferNotifyBg!) <
+              const Duration(seconds: 1)) {
+        return;
+      }
+      _lastTransferNotifyBg = now;
+      final percent = total <= 0 ? 0 : ((transferred / total) * 100).round();
+      AndroidSystem.showTransferNotification(
+        title: '${isSend ? "发送" : "接收"} ${filename ?? "文件"}',
+        progress: percent.clamp(0, 100),
+      );
+    } catch (_) {}
+  }
+
+  /// 传输结束后若无其余活跃传输，撤除后台进度通知
+  void _cancelTransferNotificationIfIdle() {
+    try {
+      if (state.activeTransfers.isEmpty) {
+        AndroidSystem.cancelTransferNotification();
+      }
+    } catch (_) {}
+  }
+
+  /// Q1 七轮（问题1）：直传转发中断提醒发送方——发送方字节已全部
+  /// 交予服务端，本地无异常可捕获（服务端 error 不携带 message_id）；
+  /// 传输通道串行，进行中的发送传输即失败的那个，标记气泡 failed
+  /// 并明确提醒"建议重新发送"
+  void _markActiveSendTransferFailed() {
+    final active =
+        state.activeTransfers.where((t) => t.isSend && !t.done).toList();
+    for (final t in active) {
+      state.markTransferFailed(t.messageId);
+    }
+    if (active.isNotEmpty) {
+      state.showNotice('文件传输失败，建议重新发送');
+      _cancelTransferNotificationIfIdle();
     }
   }
 
@@ -155,6 +213,21 @@ class SocketService {
   /// 排队中的消息，甚至中断接收导致文件损坏）。
   Timer? _pongWatchdog;
   bool _pingOutstanding = false;
+
+  /// 最近一次收到服务端消息的时间（Q1 五轮入站新鲜度哨兵数据源；
+  /// _listenLoop 每读完一条完整消息即刷新）
+  DateTime? _lastIncomingAt;
+
+  /// 最近一次"应用进入真后台"的时间（Q1 五轮；paused 透传经
+  /// SessionLifecycleGuard.onPause → markAppPaused）——与桌面
+  /// alt-tab（inactive/resumed，无 paused）区分
+  DateTime? _appPausedAt;
+
+  /// 记录应用进入真后台（ChatScreen bind 的 onPause 回调；仅 Android
+  /// 生命周期会产生 paused）
+  void markAppPaused() {
+    _appPausedAt = DateTime.now();
+  }
 
   /// 已连接的 socket（供外部查询）
   SecureSocket? get socket => _socket;
@@ -272,13 +345,30 @@ class SocketService {
   // 心跳（keepalive）
   // ============================================================
 
-  /// 启动心跳定时器：每 30s 发送 ping，超过 45s 未收到 pong 判定断开
+  /// 启动心跳定时器：每 30s 发送 ping，超过 45s 未收到 pong 判定断开。
+  /// Q1 五轮（问题1 僵尸连接自愈加固）：
+  /// ① ping 带 5s 超时——dart:io SecureSocket 的 add+flush 存在静默
+  ///   挂起竞态（阶段 J 已知），无超时的挂起会卡死整个发送队列
+  ///   （_sendTail 永不推进）→ 心跳/探测/发消息全部停摆且永不判死；
+  /// ② 入站新鲜度哨兵——pong 链路失效兜底：超过 120s 未收到任何
+  ///   服务端消息（pong/chat/推送均算）即判定连接僵死，强制走重连。
   void _startKeepalive() {
     _stopKeepalive();
     _pingOutstanding = false;
+    _lastIncomingAt = DateTime.now();
     _keepaliveTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (!_running || _socket == null) {
         _stopKeepalive();
+        return;
+      }
+      // 入站新鲜度哨兵：接收大文件期间除外（传输中无完整消息属正常）
+      final lastIncoming = _lastIncomingAt;
+      if (!_receivingFile &&
+          lastIncoming != null &&
+          DateTime.now().difference(lastIncoming) >
+              const Duration(seconds: 120)) {
+        state.log('连接疑似僵死（120s 未收到任何服务端消息），强制重连');
+        _onConnectionLost();
         return;
       }
       // 接收大文件期间不心跳：服务器转发通道禁止插入任何数据（含 pong）
@@ -286,7 +376,8 @@ class SocketService {
       _enqueueSend(() async {
         if (_socket == null) return;
         try {
-          await sendMessage(_socket!, 'ping', '');
+          await sendMessage(_socket!, 'ping', '')
+              .timeout(const Duration(seconds: 5));
           state.log('发送心跳 ping');
         } catch (e) {
           state.log('心跳发送失败: $e');
@@ -308,13 +399,13 @@ class SocketService {
     _pingOutstanding = false;
   }
 
-  /// pong 看门狗：ping 发出后 45s 内未收到对应 pong 判定连接断开。
-  ///
-  /// 收到 pong 时由 pong 处理器取消（见 _handleMessage 'pong' 分支）。
-  /// 接收大文件期间服务端会抑制 pong，此时不判死，顺延等待下一周期。
-  void _schedulePongWatchdog() {
+  /// pong 看门狗：ping 发出后 [timeout]（缺省 45s）内未收到对应 pong
+  /// 判定连接断开。收到 pong 时由 pong 处理器取消（见 _handleMessage
+  /// 'pong' 分支）。接收大文件期间服务端会抑制 pong，此时不判死，
+  /// 顺延等待下一周期（顺延恢复为常规 45s）。
+  void _schedulePongWatchdog({Duration timeout = const Duration(seconds: 45)}) {
     _pongWatchdog?.cancel();
-    _pongWatchdog = Timer(const Duration(seconds: 45), () {
+    _pongWatchdog = Timer(timeout, () {
       if (!_running || _socket == null) return;
       if (!_pingOutstanding) return; // pong 已收到
       if (_receivingFile) {
@@ -336,12 +427,55 @@ class SocketService {
   /// 已登录（重连凭据在内存）+ 非主动退出 + socket 已死 + 未在重连
   /// → 走既有 _onConnectionLost 链路（重连循环 + 重登录 + 离线补发）；
   /// 其余情况 no-op（幂等——未登录/主动退出/正在重连/连接存活）。
+  ///
+  /// Q1 真机反馈二轮（问题4 后台保活）：socket 对象仍在但连接可能已被
+  /// 系统/服务端单侧断开（进程冻结期间心跳停发）——立即探测一次
+  /// （发 ping + 10s 短看门狗），pong 未回即判死重连，不等 30s 心跳
+  /// 周期与 45s 常规看门狗。
   Future<void> ensureConnectedOnResume() async {
     if (_intentionalDisconnect) return;
     if (_reconnecting) return;
-    if (_socket != null) return;
     if (_savedUsername == null || _savedPassword == null) return;
-    _onConnectionLost();
+    if (_socket == null) {
+      _onConnectionLost();
+      return;
+    }
+    _probeOnResume();
+  }
+
+  /// 回前台探测：立即发 ping 并挂短看门狗（10s）；发送失败或超时未
+  /// 收到 pong → _onConnectionLost 走既有重连链路。
+  /// Q1 五轮（问题1 死锁修复）：接收大文件期间**不再跳过探测**——
+  /// 进程冻结期间进行中的接收必然已死，_receivingFile 卡真若直接
+  /// 返回，心跳与探测双双失效 = 僵尸连接永不自愈（只能重新登录）。
+  /// 现改为直接判死重连：传输由服务端离线补发/断点续传恢复。
+  void _probeOnResume() {
+    if (!_running || _socket == null || _reconnecting) return;
+    // 接收中回前台：仅当期间发生过"真后台暂停"（移动冻结）才判死——
+    // 冻结期间服务端早已单侧断开，传输必然已死；桌面 alt-tab（无
+    // paused）下的正常传输不在此列，维持旧语义（跳过探测不误杀）
+    final pausedDuringReceive = _receivingFile && _appPausedAt != null;
+    _appPausedAt = null;
+    if (pausedDuringReceive) {
+      state.log('后台冻结打断了文件接收，判定连接断开（离线补发恢复）');
+      _onConnectionLost();
+      return;
+    }
+    if (_receivingFile) return;
+    _enqueueSend(() async {
+      if (_socket == null) return;
+      try {
+        await sendMessage(_socket!, 'ping', '')
+            .timeout(const Duration(seconds: 5));
+        state.log('回前台探测 ping');
+      } catch (e) {
+        state.log('回前台探测失败: $e');
+        _onConnectionLost();
+        return;
+      }
+      _pingOutstanding = true;
+      _schedulePongWatchdog(timeout: const Duration(seconds: 10));
+    });
   }
 
   /// 网络断开时调用：切到 reconnecting 状态并启动重连循环
@@ -532,11 +666,16 @@ class SocketService {
             bodyLen,
             target,
             onProgress: (received, total) {
-              _updateTransferThrottled(fileId, received, total);
+              _updateTransferThrottled(fileId, received, total,
+                  filename: filename);
             },
           );
           state.removeTransfer(fileId);
-          if (written != bodyLen) break;
+          _cancelTransferNotificationIfIdle();
+          if (written != bodyLen) {
+            state.showNotice('文件「$filename」接收不完整，请让对方重新发送');
+            break;
+          }
         } else {
           final body = await readBody(_transferReader!, bodyLen);
           if (body == null) break;
@@ -573,6 +712,9 @@ class SocketService {
         _pendingFileChecks.clear();
         state.log('传输通道错误: $errorText');
         state.showNotice('错误: $errorText');
+        if (errorText.contains('传输')) {
+          _markActiveSendTransferFailed();
+        }
         break;
       default:
         state.log('传输通道未处理的消息类型: $type');
@@ -1167,6 +1309,9 @@ class SocketService {
         }
         final type = header['type'] as String?;
         final bodyLen = (header['length'] as num?)?.toInt() ?? 0;
+        // Q1 五轮（问题1）：入站新鲜度哨兵数据源——每读到一条完整
+        // 消息（含 pong）即刷新；120s 无任何入站由心跳周期强制重连
+        _lastIncomingAt = DateTime.now();
         // 阶段 P 防御（流错位检测）：与 _receiveInitialData 同规则——
         // 非 file 消息 body 超 1MB 即判定 TLS 流错位，主动断开重连自愈
         if (type != 'file' && bodyLen > _maxTextBodyLen) {
@@ -1195,13 +1340,17 @@ class SocketService {
             bodyLen,
             target,
             onProgress: (received, total) {
-              _updateTransferThrottled(fileId, received, total);
+              _updateTransferThrottled(fileId, received, total,
+                  filename: filename);
             },
           );
           _receivingFile = false;
           state.removeTransfer(fileId);
           if (written != bodyLen) {
             // 文件接收不完整 → 视为连接断开
+            state.removeTransfer(fileId);
+            _cancelTransferNotificationIfIdle();
+            state.showNotice('文件「$filename」接收不完整，请让对方重新发送');
             if (_running && !_intentionalDisconnect) {
               state.log('文件接收不完整（$written/$bodyLen），判定连接断开');
               _onConnectionLost();
@@ -1420,6 +1569,10 @@ class SocketService {
               filename: filename,
               filesize: filesize,
             ));
+            // Q1 真机反馈二轮（收到文件请求无感知）：实时到达即弹
+            // SnackBar 提醒（ChatScreen notice 队列渲染）——移动端
+            // compact 聊天态无工具栏徽标，聊天中无从感知
+            state.showNotice('收到文件请求：$filename（来自 $from）');
             // 桌面通知（阶段 H2）：未聚焦窗口时通知收到文件请求
             _notifyIncoming(
               ChatMessage(
@@ -1653,6 +1806,8 @@ class SocketService {
               filesize: filesize,
               groupId: gid,
             ));
+            // Q1 真机反馈二轮（收到文件请求无感知）：同私聊分支
+            state.showNotice('收到群文件请求：$filename（来自 $from）');
             // 桌面通知（阶段 H2）：未聚焦窗口时通知收到群文件请求
             _notifyIncoming(
               ChatMessage(
@@ -2242,9 +2397,12 @@ class SocketService {
   ///   接收方的聊天也不被抑制——这是问题2（传输中消息无法送达）的根治。
   /// 小文件（<= 阈值）仍走主连接（秒级完成，无阻塞问题）。
   /// 进度条显示在本地消息气泡上（非模态局部刷新）。
+  /// Q1 五轮（问题2）：发送即记录 messageId → 源路径（SentFileStore），
+  /// 文件管理页可回看自己发送的文件。
   Future<bool> sendFile(String to, String filePath, String filename) async {
     if (_socket == null) return false;
     final messageId = _generateMessageId();
+    unawaited(SentFileStore.record(messageId, filePath));
     try {
       final file = File(filePath);
       if (!await file.exists()) {
@@ -2301,7 +2459,8 @@ class SocketService {
                 'message_id': messageId,
               },
               onProgress: (sent, total) {
-                _updateTransferThrottled(messageId, sent, total, isSend: true);
+                _updateTransferThrottled(messageId, sent, total,
+                    isSend: true, filename: filename);
               },
             ));
       } else {
@@ -2316,15 +2475,21 @@ class SocketService {
                 'message_id': messageId,
               },
               onProgress: (sent, total) {
-                _updateTransferThrottled(messageId, sent, total, isSend: true);
+                _updateTransferThrottled(messageId, sent, total,
+                    isSend: true, filename: filename);
               },
             ));
       }
       state.removeTransfer(messageId);
+      _cancelTransferNotificationIfIdle();
       return true;
     } catch (e) {
       state.removeTransfer(messageId);
+      _cancelTransferNotificationIfIdle();
       state.log('文件发送失败: $e');
+      // Q1 七轮（问题1）：发送方明确感知失败（原实现仅日志，气泡无
+      // 任何失败提示）
+      state.showNotice('文件「$filename」传输失败，建议重新发送');
       // 主连接发送失败通常意味着连接已死 → 触发重连恢复；
       // 传输通道失败只影响本次传输（主连接不受影响，不重连）
       if (e is SocketException || e is StateError) {
@@ -3128,10 +3293,19 @@ class SocketService {
   /// 字节直发（阶段 N3：P2-4 图片粘贴直发/拖拽发送）。
   /// 与 sendFile 同一条上传通道（file 消息 + M8 大小分流逻辑由服务端
   /// 依据 filesize 头决定）；未连接返回 false、无副作用。
+  /// Q1 五轮（问题2）：字节本无本机路径——先落盘 sent_files 副本并记录
+  /// messageId → 路径（SentFileStore），文件管理页可回看（实际均为
+  /// 贴纸/图片等小文件）。
   Future<bool> sendFileBytes(
       String to, Uint8List bytes, String filename) async {
     if (_socket == null) return false;
     final messageId = _generateMessageId();
+    try {
+      final sentPath = _persistSentCopy(messageId, filename, bytes);
+      if (sentPath != null) {
+        unawaited(SentFileStore.record(messageId, sentPath));
+      }
+    } catch (_) {}
     try {
       final size = bytes.length;
       if (size > AppConfig.maxFileSize) {
@@ -3194,6 +3368,22 @@ class SocketService {
     final dir = Directory(AppPaths.receivedFilesDir);
     if (!dir.existsSync()) dir.createSync(recursive: true);
     return '${dir.path}/$safeName';
+  }
+
+  /// 字节直发副本落盘（Q1 五轮问题2）：sent_files/<messageId>_<safeName>
+  /// （messageId 前缀防同名互覆）；失败返回 null（不阻塞发送）
+  String? _persistSentCopy(
+      String messageId, String filename, Uint8List bytes) {
+    try {
+      final safeName = sanitizeFilename(filename);
+      final dir = Directory(AppPaths.sentFilesDir);
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      final file = File('${dir.path}/${messageId}_$safeName');
+      file.writeAsBytesSync(bytes);
+      return file.path;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// 保存接收到的文件，返回落盘路径（失败返回 null）。

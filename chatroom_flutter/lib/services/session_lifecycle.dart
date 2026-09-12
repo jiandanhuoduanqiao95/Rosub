@@ -21,21 +21,35 @@ class SessionLifecycleGuard {
 
   bool Function()? _isSocketAlive;
   VoidCallback? _reconnect;
+  VoidCallback? _onPause;
 
   /// 绑定当前会话的存活检查与重连回调（ChatScreen 登录后调用；
-  /// 重复 bind 覆盖旧回调）
+  /// 重复 bind 覆盖旧回调）。
+  /// Q1 五轮：新增 onPause（paused 透传——SocketService 记录"发生过
+  /// 真后台暂停"，用于把移动冻结打断的文件接收与桌面前台 alt-tab 下
+  /// 的正常传输区分开）。
   void bind({
     required bool Function() isSocketAlive,
     required VoidCallback reconnect,
+    void Function()? onPause,
   }) {
     _isSocketAlive = isSocketAlive;
     _reconnect = reconnect;
+    _onPause = onPause;
   }
 
-  /// 解绑（ChatScreen 退出时调用；未 bind 时 handleResumed 无操作）
+  /// 解绑（ChatScreen 退出时调用；未 bind 时 handleResumed/handlePaused
+  /// 无操作）
   void unbind() {
     _isSocketAlive = null;
     _reconnect = null;
+    _onPause = null;
+  }
+
+  /// AppLifecycleState.paused 透传（Q1 五轮）：通知会话"应用进入真后台"
+  /// （桌面 alt-tab/最小化不产生 paused，天然区分）
+  void handlePaused() {
+    _onPause?.call();
   }
 
   /// AppLifecycleState.resumed 专用：socket 已死则触发重连回调

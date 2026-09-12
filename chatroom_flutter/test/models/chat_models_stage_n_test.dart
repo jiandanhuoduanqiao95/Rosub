@@ -195,6 +195,23 @@ void main() {
     });
   });
 
+  group('Q1 三轮 —— isStickerFilename 贴纸命名识别（通知正文"[动画表情]"）', () {
+    test('StickerStore 命名 sticker_<id>.png 识别', () {
+      expect(isStickerFilename('sticker_1789055245371_535884.png'), isTrue);
+    });
+
+    test('大小写不敏感 + 路径前缀剥离', () {
+      expect(isStickerFilename('/tmp/STICKER_1_2.PNG'), isTrue);
+      expect(isStickerFilename('a\\b\\sticker_x.png'), isTrue);
+    });
+
+    test('普通图片/非 png 贴纸前缀不识别', () {
+      expect(isStickerFilename('photo.png'), isFalse);
+      expect(isStickerFilename('sticker_photo.jpg'), isFalse);
+      expect(isStickerFilename('nonsticker_1.png'), isFalse);
+    });
+  });
+
   group('N2 —— ChatExporter 聊天记录导出（P2-1）', () {
     final at = DateTime(2026, 8, 26, 10, 0, 0);
 

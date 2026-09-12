@@ -38,6 +38,18 @@ class AdaptiveTextField extends StatefulWidget {
   /// 移动端剪贴板无文件路径语义，入口按平台裁剪（§13.9 Q1）。
   final ValueChanged<Uint8List>? onImagePasted;
 
+  /// ---- 仅非 Linux（标准 TextField 路径）生效的移动端输入参数（Q1
+  /// 真机反馈二轮登录页优化）；RawTextField 忽略（无害冗余惯例） ----
+
+  /// 键盘类型（如 TextInputType.visiblePassword）
+  final TextInputType? keyboardType;
+
+  /// 键盘动作键（如 TextInputAction.next / done）
+  final TextInputAction? textInputAction;
+
+  /// 自动填充提示（密码管理器联动，如 AutofillHints.username）
+  final Iterable<String>? autofillHints;
+
   const AdaptiveTextField({
     super.key,
     required this.controller,
@@ -48,6 +60,9 @@ class AdaptiveTextField extends StatefulWidget {
     this.showChineseInput = false,
     this.onSubmitted,
     this.onImagePasted,
+    this.keyboardType,
+    this.textInputAction,
+    this.autofillHints,
   });
 
   @override
@@ -77,6 +92,9 @@ class _AdaptiveTextFieldState extends State<AdaptiveTextField> {
       focusNode: widget.focusNode,
       obscureText: _obscured,
       onSubmitted: widget.onSubmitted,
+      keyboardType: widget.keyboardType,
+      textInputAction: widget.textInputAction,
+      autofillHints: widget.autofillHints,
       decoration: InputDecoration(
         hintText: widget.hintText,
         suffixIcon: canToggle

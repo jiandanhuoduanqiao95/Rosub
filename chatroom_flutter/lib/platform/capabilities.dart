@@ -23,8 +23,10 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import '../config.dart';
 import '../services/file_drop.dart';
 import '../services/taskbar_notifier.dart';
+import 'capabilities_android.dart';
 
 /// 生效平台判定（Q0 平台分发的统一入口）：
 /// 显式 [debugDefaultTargetPlatformOverride] 优先——widget 测试经它模拟
@@ -41,6 +43,41 @@ TargetPlatform effectiveTargetPlatform() {
   if (Platform.isWindows) return TargetPlatform.windows;
   if (Platform.isMacOS) return TargetPlatform.macOS;
   return TargetPlatform.linux;
+}
+
+/// media_kit 视频渲染策略（阶段 Q1-3）：R-P8 软件渲染契约仅限 Linux
+/// （虚拟机/llvmpipe/部分驱动下默认 H/W 路径"建成功但帧不上屏"，
+/// 有声无画）；其余平台恢复默认硬解（真机硬件正常且省电）。
+/// 判定与 [effectiveTargetPlatform] 同源——widget 测试可经
+/// debugDefaultTargetPlatformOverride 模拟平台分支（§21.1 规约）。
+bool videoSoftwareRendering() =>
+    effectiveTargetPlatform() == TargetPlatform.linux;
+
+/// 混排文本的 emoji 兜底字体栈（Q1 真机反馈二轮"数字发黑"修订）：
+///
+/// - Linux：必须显式兜底 [AppConfig.emojiFontStack]（R-P10/R-P26 契约——
+///   fontconfig 默认兜底会命中 DejaVu/Noto Symbols 黑白字形）；
+/// - Android / iOS：**空栈**——系统字体链自带彩色 emoji（Skia 自动
+///   系统兜底）；显式把 emoji 字体放进 fontFamilyFallback 反而会让
+///   ASCII 数字/#/* 命中 emoji 字体内的键帽基字形（黑色）——"蓝气泡
+///   数字发黑"两轮实测根因（显式 fontFamily 也压不住，引擎对带
+///   Emoji 属性的码点优先尝试 fallback 链中的 emoji 字体）；
+/// - Windows / macOS：空栈（系统链自带 Segoe UI Emoji / Apple Color
+///   Emoji；Q2/Q3 若实测缺字再补显式栈）。
+///
+/// 独立成格的纯 emoji 文本（表情网格/回应盘）仍用 fontFamily 打头
+/// （R-P10 原契约，纯 emoji 无数字混排问题）。
+List<String> emojiTextFallback() {
+  switch (effectiveTargetPlatform()) {
+    case TargetPlatform.linux:
+      return AppConfig.emojiFontStack;
+    case TargetPlatform.android:
+    case TargetPlatform.iOS:
+    case TargetPlatform.windows:
+    case TargetPlatform.macOS:
+    case TargetPlatform.fuchsia:
+      return const [];
+  }
 }
 
 /// 通知闪烁（未聚焦收新消息；替代系统弹窗通知）
@@ -128,6 +165,13 @@ class PlatformCapabilities {
         _fileDrop = DesktopFileDropStub();
         break;
       case TargetPlatform.android:
+        // 阶段 Q1-2：Android 端接入按端适配器实现
+        // （capabilities_android.dart，按端拆文件的分支纪律）
+        _notification = AndroidNotificationCapability();
+        _sound = AndroidSoundCapability();
+        _fileLauncher = AndroidFileLauncherCapability();
+        _fileDrop = AndroidFileDropStub();
+        break;
       case TargetPlatform.iOS:
       case TargetPlatform.fuchsia:
         _notification = MobileNotificationCapability();

@@ -400,6 +400,28 @@ class AppState extends ChangeNotifier {
   /// 查询传输进度比例；无传输返回 null
   double? transferFraction(String messageId) => _transfers[messageId]?.fraction;
 
+  /// 全部活跃传输（Q1 七轮问题1：全局传输指示条数据源）
+  List<TransferProgress> get activeTransfers =>
+      UnmodifiableListView(_transfers.values);
+
+  /// messageId → 所属会话 key（全局传输条点击跳转；未找到返回 null）
+  String? chatKeyOfMessage(String messageId) {
+    for (final entry in _messages.entries) {
+      if (entry.value.any((m) => m.messageId == messageId)) {
+        return entry.key;
+      }
+    }
+    return null;
+  }
+
+  /// 文件传输失败（Q1 七轮问题1：传输异常提醒发送方）——移除进度条
+  /// 并把会话内气泡标记 failed（展示"传输失败，建议重新发送"）
+  void markTransferFailed(String messageId) {
+    _transfers.remove(messageId);
+    _messageMap[messageId]?.status = 'failed';
+    notifyListeners();
+  }
+
   /// 该消息是否仍在传输中（存在且未完成）
   bool isTransferring(String messageId) {
     final p = _transfers[messageId];

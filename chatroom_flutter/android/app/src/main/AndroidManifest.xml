@@ -1,6 +1,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Q1 真机反馈二轮：应用外新消息通知（横幅/提示音）与震动 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.VIBRATE"/>
+    <!-- Q1 五轮（问题1 重大回归修复）：恢复生命周期门控前台服务——
+         无前台状态时国产 ROM 深度休眠冻结/回收进程，后台收不到消息；
+         前台服务是后台收消息的唯一可靠机制（通知仅后台期间存在） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+
     <application
-        android:label="chatroom_flutter"
+        android:label="聊天室"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
@@ -25,6 +35,28 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Q1-2：FileProvider——openFile 经安全 URI 交给系统应用打开 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileProvider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths"/>
+        </provider>
+        <!-- Q1 五轮（问题1）：恢复前台服务——specialUse 类型（侧载无
+             Play 审核）；生命周期门控（退后台启动/回前台停止），通知
+             IMPORTANCE_MIN 静默 -->
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="persistent_chat_connection"/>
+        </service>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

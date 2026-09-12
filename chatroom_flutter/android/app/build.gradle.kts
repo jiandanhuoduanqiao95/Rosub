@@ -30,6 +30,12 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // Q1（2026-09-06）：本机无 NDK 且 dl.google.com 不可达（AGP 无法自动
+            // 安装 NDK 供 strip 使用）——跳过 native 库剥离（参与分发的 .so 上游
+            // 已剥离，体积代价近零）
+            packaging {
+                jniLibs.keepDebugSymbols.add("**/*.so")
+            }
         }
     }
 }

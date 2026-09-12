@@ -57,6 +57,7 @@ ChatView view(
   ValueChanged<String>? onRecall,
   Future<void> Function(String? beforeMessageId)? onLoadHistory,
   bool Function(String key)? hasMoreHistory,
+  ValueChanged<ChatMessage>? onForwardFile,
 }) {
   return ChatView(
     chatKey: chatKey,
@@ -76,6 +77,7 @@ ChatView view(
     onAddReaction: onAddReaction,
     onDeleteMessage: onDeleteMessage,
     onJumpToMessage: onJumpToMessage,
+    onForwardFile: onForwardFile,
   );
 }
 
@@ -438,6 +440,34 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('撤回'), findsNothing, reason: '对方文件不可撤回');
       expect(find.text('引用回复'), findsNothing);
+    });
+
+    testWidgets('Q1 三轮问题8：提供 onForwardFile 时文件菜单出现"转发"，点击回调携带消息',
+        (tester) async {
+      final forwarded = <ChatMessage>[];
+      await tester.pumpWidget(wrap(view(
+        [
+          ChatMessage(
+            sender: 'bob',
+            content: '[收到文件] b.pdf',
+            messageId: 'f3',
+            type: 'file',
+            filename: 'b.pdf',
+          ),
+        ],
+        onRecall: (_) {},
+        onForwardFile: forwarded.add,
+      )));
+      await tester.longPress(find.text('[收到文件] b.pdf'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('转发'), findsOneWidget,
+          reason: '文件转发入口（本地重发通道，服务端 forward 协议不适用）');
+      expect(find.text('引用回复'), findsNothing, reason: '文件不支持引用（语义不变）');
+
+      await tester.tap(find.text('转发'));
+      await tester.pumpAndSettle();
+      expect(forwarded.single.messageId, 'f3');
     });
   });
 }

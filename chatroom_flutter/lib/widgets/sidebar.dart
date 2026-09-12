@@ -30,6 +30,9 @@ class Sidebar extends StatelessWidget {
   /// 阶段 K3：会话静音判定（null = 不显示静音标识，回归兼容）
   final bool Function(String key)? isMuted;
 
+  /// 阶段 Q1-1：compact 单屏布局下会话列表铺满屏宽（默认 false = 桌面固定 270 侧栏）
+  final bool expanded;
+
   const Sidebar({
     super.key,
     required this.chatTargets,
@@ -45,6 +48,7 @@ class Sidebar extends StatelessWidget {
     this.friendGroups,
     this.isPinned,
     this.isMuted,
+    this.expanded = false,
   });
 
   @override
@@ -64,7 +68,7 @@ class Sidebar extends StatelessWidget {
     final groups = unpinned.where((t) => t.isGroup).toList();
 
     return Container(
-      width: 270,
+      width: expanded ? double.infinity : 270,
       color: Theme.of(context).colorScheme.surface,
       child: Column(
         children: [
@@ -78,12 +82,17 @@ class Sidebar extends StatelessWidget {
             ),
             child: Row(
               children: [
-                Expanded(
-                  child: Text(
-                    '会话',
-                    style: Theme.of(context).textTheme.titleSmall,
+                // Q1 四轮（问题3）：compact（Android 单屏列表态）不再显示
+                // "会话"标题字样（工具按钮保留）；桌面侧栏标题基线不变
+                if (!expanded) ...[
+                  Expanded(
+                    child: Text(
+                      '会话',
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
                   ),
-                ),
+                ] else
+                  const Spacer(),
                 IconButton(
                   icon: const Icon(Icons.person_add, size: 20),
                   tooltip: '添加好友',

@@ -5,9 +5,9 @@
 
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
@@ -15,9 +15,15 @@ import '../config.dart';
 import '../models/chat_models.dart';
 import '../l10n/app_strings.dart';
 import 'adaptive_text_field.dart';
+import 'app_feedback.dart';
+import 'responsive_layout.dart';
+import '../platform/android_system.dart';
 import '../platform/capabilities.dart';
+import '../services/app_paths.dart';
 import '../services/doc_preview.dart';
+import '../services/export_saver.dart';
 import '../services/quick_reply_store.dart';
+import '../services/sent_file_store.dart';
 import '../services/socket_service.dart';
 import '../services/sticker_store.dart';
 import '../services/state_manager.dart';
@@ -35,7 +41,7 @@ void showProfileDialog(
   VoidCallback? onEdit,
   VoidCallback? onRefresh,
 }) {
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => ListenableBuilder(
       // 阶段 J 修复：fetchProfile 为异步拉取，资料响应到达（updateProfile 通知）
@@ -122,7 +128,7 @@ void showUserSearchDialog(
 }) {
   final ctrl = TextEditingController();
   final state = AppState.instance;
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('搜索用户'),
@@ -152,9 +158,7 @@ void showUserSearchDialog(
                   onPressed: () {
                     final keyword = ctrl.text.trim();
                     if (keyword.isEmpty) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('请输入搜索关键字')),
-                      );
+                      showNoticeBar(context, '请输入搜索关键字');
                       return;
                     }
                     onSearch(keyword);
@@ -214,7 +218,7 @@ void _showAddFriendMessageDialog(
 ) {
   final ctrl = TextEditingController();
   final noteCtrl = TextEditingController();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: Text('添加好友 $username'),
@@ -263,7 +267,7 @@ void _showAddFriendMessageDialog(
 
 void showBlockConfirmDialog(
     BuildContext context, String username, VoidCallback onBlock) {
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('拉黑确认'),
@@ -305,7 +309,7 @@ void showFriendManageDialog(
   ValueChanged<bool>? onToggleMute,
 }) {
   final state = AppState.instance;
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => ListenableBuilder(
       listenable: state,
@@ -414,7 +418,7 @@ void showFriendManageDialog(
 void showSetFriendNoteDialog(
     BuildContext context, String username, ValueChanged<String> onSave) {
   final ctrl = TextEditingController();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: Text('设置备注 - $username'),
@@ -441,7 +445,7 @@ void showSetFriendNoteDialog(
 void showSetFriendGroupDialog(
     BuildContext context, String username, ValueChanged<String> onSave) {
   final ctrl = TextEditingController();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: Text('设置分组 - $username'),
@@ -471,7 +475,7 @@ void showSetFriendGroupDialog(
 
 void showAddFriendDialog(BuildContext context, ValueChanged<String> onAdd) {
   final ctrl = TextEditingController();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('添加好友'),
@@ -487,9 +491,7 @@ void showAddFriendDialog(BuildContext context, ValueChanged<String> onAdd) {
             final name = ctrl.text.trim();
             final valid = InputValidator.validateUsername(name);
             if (!valid.valid) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text(valid.error ?? '用户名不合法')),
-              );
+              showNoticeBar(context, valid.error ?? '用户名不合法');
               return;
             }
             onAdd(name);
@@ -509,7 +511,7 @@ void showAddFriendDialog(BuildContext context, ValueChanged<String> onAdd) {
 void showCreateGroupDialog(
     BuildContext context, ValueChanged<String> onCreate) {
   final ctrl = TextEditingController();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('创建群组'),
@@ -542,7 +544,7 @@ void showCreateGroupDialog(
 
 void showJoinGroupDialog(BuildContext context, ValueChanged<int> onJoin) {
   final ctrl = TextEditingController();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('加入群组'),
@@ -566,9 +568,7 @@ void showJoinGroupDialog(BuildContext context, ValueChanged<int> onJoin) {
           onPressed: () {
             final id = int.tryParse(ctrl.text.trim());
             if (id == null || id <= 0) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('请输入有效的群组 ID')),
-              );
+              showNoticeBar(context, '请输入有效的群组 ID');
               return;
             }
             onJoin(id);
@@ -589,7 +589,7 @@ void _showJoinMessageDialog(
   void Function(int groupId, String message) onRequestJoin,
 ) {
   final ctrl = TextEditingController();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('申请加入群组'),
@@ -635,7 +635,7 @@ void showGroupSearchDialog(
   final ctrl = TextEditingController();
   final idCtrl = TextEditingController();
   final state = AppState.instance;
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('搜索群组'),
@@ -661,9 +661,7 @@ void showGroupSearchDialog(
                   onPressed: () {
                     final keyword = ctrl.text.trim();
                     if (keyword.isEmpty) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('请输入搜索关键字')),
-                      );
+                      showNoticeBar(context, '请输入搜索关键字');
                       return;
                     }
                     onSearch(keyword);
@@ -768,7 +766,7 @@ void showFriendRequestsDialog(
   void Function(String username, bool accept, String note) onRespond,
 ) {
   final state = AppState.instance;
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('好友请求'),
@@ -831,7 +829,7 @@ void _showAcceptNoteDialog(
   void Function(String username, bool accept, String note) onRespond,
 ) {
   final ctrl = TextEditingController();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: Text('接受好友请求 - $username'),
@@ -878,7 +876,7 @@ void showFileRequestsDialog(
   List<FileRequest> requests,
   Function(FileRequest request, bool accept) onRespond,
 ) {
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('文件请求'),
@@ -898,7 +896,12 @@ void showFileRequestsDialog(
                           : '${req.filesize} B';
                   return ListTile(
                     leading: const Icon(Icons.insert_drive_file_rounded),
-                    title: Text(req.filename),
+                    // Q1 真机反馈 #4：文件名过长省略展示（不逐字折行影响观感）
+                    title: Text(
+                      req.filename,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                     subtitle: Text(
                       '${req.sender} · $sizeStr${req.isGroupFile ? " · 群文件" : ""}',
                     ),
@@ -942,7 +945,7 @@ void showFileRequestsDialog(
 // ============================================================
 
 void showAdminPanel(BuildContext context, SocketService service, AppState _) {
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Row(
@@ -1038,7 +1041,7 @@ void showAdminPanel(BuildContext context, SocketService service, AppState _) {
 void _showResetPasswordDialog(BuildContext context, SocketService service) {
   final userCtrl = TextEditingController();
   final pwCtrl = TextEditingController();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('重置用户密码'),
@@ -1071,9 +1074,7 @@ void _showResetPasswordDialog(BuildContext context, SocketService service) {
             final newPassword = pwCtrl.text;
             final valid = InputValidator.validatePassword(newPassword);
             if (!valid.valid) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text(valid.error ?? '新密码不合法')),
-              );
+              showNoticeBar(context, valid.error ?? '新密码不合法');
               return;
             }
             service.adminResetPassword(username, newPassword);
@@ -1088,7 +1089,7 @@ void _showResetPasswordDialog(BuildContext context, SocketService service) {
 
 void _showAnnouncementDialog(BuildContext context, SocketService service) {
   final ctrl = TextEditingController();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('发送系统公告'),
@@ -1117,7 +1118,7 @@ void _showAnnouncementDialog(BuildContext context, SocketService service) {
 
 void _showDeleteUserDialog(BuildContext context, SocketService service) {
   final ctrl = TextEditingController();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('删除用户'),
@@ -1134,9 +1135,7 @@ void _showDeleteUserDialog(BuildContext context, SocketService service) {
             final name = ctrl.text.trim();
             final valid = InputValidator.validateUsername(name);
             if (!valid.valid) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text(valid.error ?? '用户名不合法')),
-              );
+              showNoticeBar(context, valid.error ?? '用户名不合法');
               return;
             }
             service.adminCommand('delete_user', targetUser: name);
@@ -1167,9 +1166,7 @@ Future<({String path, String name})?> showFilePicker(
     return (path: path, name: file.name);
   } catch (e) {
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('文件选择失败: $e')),
-      );
+      showNoticeBar(context, '文件选择失败: $e');
     }
     return null;
   }
@@ -1181,7 +1178,7 @@ Future<({String path, String name})?> showFilePicker(
 
 void showDeleteFriendDialog(
     BuildContext context, String username, VoidCallback onDelete) {
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('删除好友'),
@@ -1210,7 +1207,7 @@ void showChangePasswordDialog(BuildContext context, SocketService service) {
   final oldCtrl = TextEditingController();
   final newCtrl = TextEditingController();
   final confirmCtrl = TextEditingController();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('修改密码'),
@@ -1252,15 +1249,11 @@ void showChangePasswordDialog(BuildContext context, SocketService service) {
             final confirm = confirmCtrl.text;
             final valid = InputValidator.validatePassword(newPw);
             if (!valid.valid) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text(valid.error ?? '新密码不合法')),
-              );
+              showNoticeBar(context, valid.error ?? '新密码不合法');
               return;
             }
             if (newPw != confirm) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('两次输入的新密码不一致')),
-              );
+              showNoticeBar(context, '两次输入的新密码不一致');
               return;
             }
             service.changePassword(old, newPw);
@@ -1293,7 +1286,7 @@ void showGroupMenuDialog(
   VoidCallback? onAnnouncement,
 }) {
   final state = AppState.instance;
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => ListenableBuilder(
       listenable: state,
@@ -1400,7 +1393,7 @@ void showGroupMenuDialog(
 
 void showGroupInfoDialog(BuildContext context, Group group) {
   final state = AppState.instance;
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => ListenableBuilder(
       listenable: state,
@@ -1470,7 +1463,7 @@ void showGroupInfoDialog(BuildContext context, Group group) {
 // ============================================================
 
 void showSettingsDialog(BuildContext context) {
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setState) {
@@ -1795,7 +1788,7 @@ void showGroupAdminDialog(
   final state = AppState.instance;
   // 打开即拉取待审批入群申请列表（P1-17 审批数据源）
   service.fetchJoinRequests(group.id);
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => ListenableBuilder(
       listenable: state,
@@ -1977,7 +1970,7 @@ void _showTransferOwnerDialog(BuildContext context, Group group,
   final candidates = members
       .where((m) => m != owner && m != AppState.instance.username)
       .toList();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('转让群主'),
@@ -2012,7 +2005,7 @@ void _showTransferOwnerDialog(BuildContext context, Group group,
 void _showRenameGroupDialog(
     BuildContext context, Group group, SocketService service) {
   final controller = TextEditingController(text: group.name);
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('修改群名'),
@@ -2044,7 +2037,7 @@ void _showRenameGroupDialog(
 void _showInviteMemberDialog(
     BuildContext context, Group group, SocketService service) {
   final controller = TextEditingController();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('邀请成员'),
@@ -2076,7 +2069,7 @@ void showGroupInvitesDialog(
   required List<GroupInvite> invites,
   required void Function(GroupInvite invite, bool accept) onRespond,
 }) {
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Row(
@@ -2145,7 +2138,7 @@ void showGroupInvitesDialog(
 void showServerStatusDialog(BuildContext context, SocketService service) {
   final state = AppState.instance;
   service.fetchServerStatus();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => ListenableBuilder(
       listenable: state,
@@ -2275,14 +2268,40 @@ Widget _statusRow(String label, String value) {
   );
 }
 
-/// 阶段 M8：文件收发管理页（按会话聚合）
+/// 阶段 M8：文件收发管理页（按会话聚合）。
+/// Q1 三轮（问题5）：已下载到本机的文件可点击访问——能打开的直接
+/// 用系统程序打开，打不开的（Android）打开预览弹层（分享导出）、
+/// 桌面转文件管理器定位所在目录；未下载的记录给出提示。
+/// Q1 五轮（问题4）：反馈不再走 SnackBar——compact 对话框全屏铺满
+/// 会把 Scaffold 上的 SnackBar 完全盖住（"被界面遮挡"根因），改用
+/// 弹层内嵌提示条（_FileListDialog）。Q1 五轮（问题2）：自己发送的
+/// 文件经 SentFileStore 映射同样可回看。
 void showFileListDialog(BuildContext context, SocketService service,
     {String? to, int? groupId}) {
-  final state = AppState.instance;
   service.fetchFileList(to: to, groupId: groupId);
-  showDialog(
+  showResponsiveDialog(
     context: context,
-    builder: (ctx) => ListenableBuilder(
+    builder: (ctx) => _FileListDialog(service: service),
+  );
+}
+
+class _FileListDialog extends StatefulWidget {
+  final SocketService service;
+
+  const _FileListDialog({required this.service});
+
+  @override
+  State<_FileListDialog> createState() => _FileListDialogState();
+}
+
+class _FileListDialogState extends State<_FileListDialog> {
+  /// 弹层内嵌提示（替代 SnackBar，见 showFileListDialog 注释）
+  String? _notice;
+
+  @override
+  Widget build(BuildContext context) {
+    final state = AppState.instance;
+    return ListenableBuilder(
       listenable: state,
       builder: (ctx, _) {
         final files = state.fileRecords;
@@ -2308,30 +2327,96 @@ void showFileListDialog(BuildContext context, SocketService service,
                           .toString()
                           .replaceFirst('.000', '')
                           .substring(0, 16);
+                      final path = _localPathOfRecord(f);
+                      final downloaded = path != null && File(path).existsSync();
                       return ListTile(
                         dense: true,
-                        leading: const Icon(Icons.insert_drive_file_outlined),
+                        leading: Icon(
+                          Icons.insert_drive_file_outlined,
+                          color: downloaded
+                              ? Theme.of(context).colorScheme.primary
+                              : Colors.grey,
+                        ),
                         title:
                             Text(f.filename, overflow: TextOverflow.ellipsis),
                         subtitle: Text(
                           '${f.sender} → ${f.isGroupFile ? '群组' : f.receiver} · '
-                          '${_formatBytes(f.filesize)} · $ts',
+                          '${_formatBytes(f.filesize)} · $ts'
+                          '${downloaded ? ' · 已下载' : ''}',
                           style: const TextStyle(fontSize: 11),
                         ),
+                        trailing: downloaded
+                            ? const Icon(Icons.open_in_new_rounded,
+                                size: 16, color: Colors.grey)
+                            : null,
+                        onTap: () => _openDownloadedFile(f),
                       );
                     },
                   ),
           ),
           actions: [
+            // Q1 五轮（问题4）：内嵌提示条（对话层内可见，不被遮挡）
+            if (_notice != null)
+              Padding(
+                padding: const EdgeInsets.only(right: 12),
+                child: Icon(Icons.info_outline,
+                    size: 18,
+                    color: Theme.of(context).colorScheme.error),
+              ),
             TextButton(
-              onPressed: () => Navigator.pop(ctx),
+              onPressed: () => Navigator.pop(context),
               child: const Text('关闭'),
             ),
           ],
         );
       },
-    ),
-  );
+    );
+  }
+
+  /// Q1 五轮（问题2）：点击文件记录——已下载直接打开；打不开时
+  /// Android 打开预览弹层（分享导出）、桌面回退文件管理器定位目录；
+  /// 未下载显示内嵌提示（含自己发送文件的 SentFileStore 解析）
+  Future<void> _openDownloadedFile(FileRecord f) async {
+    final path = _localPathOfRecord(f);
+    if (path == null || !File(path).existsSync()) {
+      setState(() => _notice = '「${f.filename}」尚未下载到本机');
+      return;
+    }
+    final opened = await PlatformCapabilities.fileLauncher.openFile(path);
+    if (opened) return;
+    if (!mounted) return;
+    if (effectiveTargetPlatform() == TargetPlatform.android) {
+      showFilePreviewDialog(
+        context,
+        filename: f.filename,
+        path: path,
+        filesize: f.filesize,
+        sender: f.sender,
+        timestamp: f.timestamp,
+      );
+      return;
+    }
+    final dirOpened = await PlatformCapabilities.fileLauncher
+        .openDirectory(File(path).parent.path);
+    if (!dirOpened && mounted) {
+      setState(() => _notice = '无法打开，文件位置：$path');
+    }
+  }
+}
+
+/// 文件记录对应的本机路径解析（Q1 五轮问题2 扩展）：
+/// ① 接收目录 + 安全文件名（收发双方记录同名，仅接收方实际落盘）；
+/// ② 自己发送的文件 → SentFileStore 的 messageId 路径映射
+///    （路径直发=源路径；字节直发=sent_files 副本）
+String? _localPathOfRecord(FileRecord f) {
+  if (f.filename.isEmpty) return null;
+  final safe = SocketService.sanitizeFilename(f.filename);
+  if (safe.isNotEmpty) {
+    final received = '${AppPaths.receivedFilesDir}/$safe';
+    if (File(received).existsSync()) return received;
+  }
+  final sent = SentFileStore.pathOf(f.messageId);
+  return (sent != null && File(sent).existsSync()) ? sent : null;
 }
 
 // ============================================================
@@ -2351,7 +2436,7 @@ String _formatActiveTime(DateTime dt) {
 void showDeviceManagementDialog(BuildContext context, SocketService service) {
   final state = AppState.instance;
   service.fetchSessions();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => ListenableBuilder(
       listenable: state,
@@ -2424,7 +2509,7 @@ void showDeviceManagementDialog(BuildContext context, SocketService service) {
 void showAuditLogDialog(BuildContext context, SocketService service) {
   final state = AppState.instance;
   service.fetchAuditLogs();
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => ListenableBuilder(
       listenable: state,
@@ -2518,7 +2603,7 @@ void showAuditLogDialog(BuildContext context, SocketService service) {
 /// 阶段 N7 补充：审计日志导出（TXT 每行一条 / JSON 完整字段）
 Future<void> _exportAuditLogs(
     BuildContext context, List<AuditLogEntry> logs) async {
-  final format = await showDialog<String>(
+  final format = await showResponsiveDialog<String>(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('导出审计日志'),
@@ -2547,11 +2632,6 @@ Future<void> _exportAuditLogs(
         '${pad(t.hour)}:${pad(t.minute)}:${pad(t.second)}';
   }
 
-  final path = await FilePicker.platform.saveFile(
-    dialogTitle: '导出审计日志',
-    fileName: 'audit_logs.$format',
-  );
-  if (path == null) return;
   final content = format == 'txt'
       ? [
           for (final e in logs)
@@ -2570,7 +2650,14 @@ Future<void> _exportAuditLogs(
             },
         ]);
   try {
-    File(path).writeAsStringSync(content);
+    // Q1 真机反馈 #8：落盘经 ExportSaver 平台分流（移动端直接写
+    // exports 目录；桌面保持系统另存为对话框）
+    final path = await ExportSaver.saveExportFile(
+      baseName: 'audit_logs',
+      format: format,
+      content: content,
+    );
+    if (path == null) return;
     AppState.instance.showNotice('已导出 ${logs.length} 条审计记录到 $path');
   } catch (e) {
     AppState.instance.showNotice('审计导出失败: $e');
@@ -2599,7 +2686,7 @@ void showGroupAnnouncementDialog(
   var tab = 0; // 0=发布公告 1=清除公告
   var loadedList = false;
 
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setState) => ListenableBuilder(
@@ -2736,7 +2823,7 @@ void showQuickReplyPanel(
     setState(() => phrases = list);
   }
 
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setState) {
@@ -2924,7 +3011,7 @@ void showScheduleMessageDialog(
   var minute = 0;
   var listenerBound = false;
 
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setState) {
@@ -2994,7 +3081,7 @@ void showScheduledManageDialog(
   required ValueChanged<String> onDelete,
 }) {
   var loaded = false;
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setState) => ListenableBuilder(
@@ -3140,23 +3227,15 @@ class _StickerPickerPanelState extends State<StickerPickerPanel> {
     await _reload();
     if (!mounted) return;
     if (added > 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-            content: Text('已添加 $added 张表情'),
-            duration: const Duration(seconds: 2)),
-      );
+      showNoticeBar(context, '已添加 $added 张表情');
     } else {
       // R-P11：不再静默失败——魔数校验未通过/落盘失败给明确反馈
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('添加失败：仅支持 PNG/JPG/GIF 图片'),
-            duration: Duration(seconds: 2)),
-      );
+      showNoticeBar(context, '添加失败：仅支持 PNG/JPG/GIF 图片');
     }
   }
 
   Future<void> _confirmDelete(Sticker sticker) async {
-    final ok = await showDialog<bool>(
+    final ok = await showResponsiveDialog<bool>(
       context: context,
       builder: (dctx) => AlertDialog(
         title: const Text('删除表情'),
@@ -3410,7 +3489,7 @@ void showAdvancedSearchDialog(
   SearchDateSelection? date;
   final selectedSenders = <String>{};
 
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setState) {
@@ -3444,8 +3523,8 @@ void showAdvancedSearchDialog(
                 ),
                 const SizedBox(height: 12),
                 Text('发送者（可多选）',
-                    style: TextStyle(
-                        fontSize: 12, color: Colors.grey.shade600)),
+                    style:
+                        TextStyle(fontSize: 12, color: Colors.grey.shade600)),
                 const SizedBox(height: 4),
                 if (candidates.isEmpty)
                   Padding(
@@ -3462,14 +3541,15 @@ void showAdvancedSearchDialog(
                       for (final name in candidates)
                         FilterChip(
                           key: ValueKey('adv_search_sender_chip_$name'),
-                          label: Text(
-                              name == myName ? '$name（我）' : name,
+                          label: Text(name == myName ? '$name（我）' : name,
                               style: const TextStyle(fontSize: 13)),
                           selected: selectedSenders.contains(name),
                           showCheckmark: true,
                           visualDensity: VisualDensity.compact,
                           onSelected: (v) => setState(() {
-                            v ? selectedSenders.add(name) : selectedSenders.remove(name);
+                            v
+                                ? selectedSenders.add(name)
+                                : selectedSenders.remove(name);
                           }),
                         ),
                     ],
@@ -3499,8 +3579,7 @@ void showAdvancedSearchDialog(
                     child: Row(
                       children: [
                         Icon(Icons.calendar_today_outlined,
-                            size: 18,
-                            color: Theme.of(ctx).colorScheme.primary),
+                            size: 18, color: Theme.of(ctx).colorScheme.primary),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
@@ -3509,9 +3588,7 @@ void showAdvancedSearchDialog(
                                 fontSize: 14,
                                 color: date == null
                                     ? Colors.grey.shade500
-                                    : Theme.of(ctx)
-                                        .colorScheme
-                                        .onSurface),
+                                    : Theme.of(ctx).colorScheme.onSurface),
                           ),
                         ),
                         Icon(Icons.expand_more,
@@ -3556,7 +3633,7 @@ void showSearchDatePickerDialog(
 }) {
   final now = DateTime.now();
   final years = [for (var y = now.year - 10; y <= now.year; y++) y];
-  showDialog(
+  showResponsiveDialog(
     context: context,
     builder: (ctx) => _SearchDatePickerBody(
       years: years,
@@ -3603,13 +3680,14 @@ class _SearchDatePickerBodyState extends State<_SearchDatePickerBody> {
   void initState() {
     super.initState();
     final initial = widget.initial;
-    _precision =
-        initial == null ? 2 : (initial.day != null ? 2 : (initial.month != null ? 1 : 0));
+    _precision = initial == null
+        ? 2
+        : (initial.day != null ? 2 : (initial.month != null ? 1 : 0));
     _yearIndex = widget.years.indexOf(initial?.year ?? widget.now.year);
     if (_yearIndex < 0) _yearIndex = widget.years.length - 1;
     _monthIndex = (initial?.month ?? widget.now.month) - 1;
-    final days = DateTime(
-            widget.years[_yearIndex], (initial?.month ?? widget.now.month) + 1, 0)
+    final days = DateTime(widget.years[_yearIndex],
+            (initial?.month ?? widget.now.month) + 1, 0)
         .day;
     _dayIndex = ((initial?.day ?? widget.now.day) - 1).clamp(0, days - 1);
     _yearCtrl = FixedExtentScrollController(initialItem: _yearIndex);
@@ -3625,8 +3703,7 @@ class _SearchDatePickerBodyState extends State<_SearchDatePickerBody> {
     super.dispose();
   }
 
-  int get _daysInMonth =>
-      DateTime(_year, _monthIndex + 2, 0).day;
+  int get _daysInMonth => DateTime(_year, _monthIndex + 2, 0).day;
 
   int get _year => widget.years[_yearIndex];
   int get _month => _monthIndex + 1;
@@ -3637,7 +3714,9 @@ class _SearchDatePickerBodyState extends State<_SearchDatePickerBody> {
       return SearchDateSelection(year: _year, month: _month);
     }
     return SearchDateSelection(
-        year: _year, month: _month, day: (_dayIndex + 1).clamp(1, _daysInMonth));
+        year: _year,
+        month: _month,
+        day: (_dayIndex + 1).clamp(1, _daysInMonth));
   }
 
   // 精度切换后重挂载的滚轮恢复到最近选中位置（控制器重建时
@@ -3701,8 +3780,8 @@ class _SearchDatePickerBodyState extends State<_SearchDatePickerBody> {
               decoration: BoxDecoration(
                 color: scheme.primary.withValues(alpha: 0.08),
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                    color: scheme.primary.withValues(alpha: 0.35)),
+                border:
+                    Border.all(color: scheme.primary.withValues(alpha: 0.35)),
               ),
             ),
           ),
@@ -3820,6 +3899,13 @@ class _SearchDatePickerBodyState extends State<_SearchDatePickerBody> {
 /// 文本提取，尽力而为）内嵌预览；其余显示类型图标 + 基本信息；
 /// 提供"打开文件/打开所在目录"（系统默认程序；Q0-3 经平台能力抽象，
 /// Linux=xdg-open，其他端按平台实现）。
+/// 文件预览对话框（R-P2）
+///
+/// Q1 真机反馈二轮（问题8"首开闪退"根因修订）：文本/文档预览读取改
+/// **异步**——原实现在 build 路径同步读盘+解析（Office/PDF 最高 50MB），
+/// 冷读（首次打开）在 UI 线程阻塞数秒触发 ANR 被系统查杀，页缓存热
+/// （第二次）则低于阈值"正常打开"。现文本（≤1MB）保持轻量同步读取，
+/// 文档预览经 compute 下放后台 isolate，读取中显示加载指示。
 void showFilePreviewDialog(
   BuildContext context, {
   required String filename,
@@ -3828,21 +3914,102 @@ void showFilePreviewDialog(
   String? sender,
   DateTime? timestamp,
 }) {
-  final exists = path != null && File(path).existsSync();
-  final sizeLine = filesize != null ? formatFileSize(filesize) : null;
-  final textPreview = _readTextPreview(path, filesize) ??
-      _readDocumentPreview(path, filesize);
-
-  showDialog(
+  showResponsiveDialog(
     context: context,
-    builder: (ctx) => AlertDialog(
+    builder: (ctx) => _FilePreviewDialog(
+      filename: filename,
+      path: path,
+      filesize: filesize,
+      sender: sender,
+      timestamp: timestamp,
+    ),
+  );
+}
+
+/// compute 入口（文档预览后台计算；参数 [path, filesize]）
+String? _computeDocumentPreview(List<Object?> args) {
+  return _readDocumentPreview(args[0] as String?, args[1] as int?);
+}
+
+class _FilePreviewDialog extends StatefulWidget {
+  final String filename;
+  final String? path;
+  final int? filesize;
+  final String? sender;
+  final DateTime? timestamp;
+
+  const _FilePreviewDialog({
+    required this.filename,
+    required this.path,
+    required this.filesize,
+    required this.sender,
+    required this.timestamp,
+  });
+
+  @override
+  State<_FilePreviewDialog> createState() => _FilePreviewDialogState();
+}
+
+class _FilePreviewDialogState extends State<_FilePreviewDialog> {
+  String? _textPreview;
+  bool _docLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPreview();
+  }
+
+  Future<void> _loadPreview() async {
+    final path = widget.path;
+    final filesize = widget.filesize;
+    // 文本预览（≤1MB）轻量同步；文档预览（docx/xlsx/pptx/pdf，≤50MB）
+    // 异步 compute——防 UI 线程冷读阻塞（Q1 问题8）
+    final text = _readTextPreview(path, filesize);
+    if (text != null) {
+      if (mounted) setState(() => _textPreview = text);
+      return;
+    }
+    final lower = path?.toLowerCase() ?? '';
+    const docExtensions = ['.docx', '.xlsx', '.pptx', '.pdf'];
+    if (path == null || !docExtensions.any(lower.endsWith)) return;
+    if (mounted) setState(() => _docLoading = true);
+    try {
+      // 测试环境（FakeAsync）下 compute 的 isolate 回投无法送达——同步
+      // 计算（既有惯例：按绑定类型判定，见视频查看器/Android 提示音）
+      final String? result;
+      if (WidgetsBinding.instance.runtimeType.toString() ==
+          'AutomatedTestWidgetsFlutterBinding') {
+        result = _computeDocumentPreview([path, filesize]);
+      } else {
+        result = await compute(_computeDocumentPreview, [path, filesize]);
+      }
+      if (mounted) {
+        setState(() {
+          _textPreview = result;
+          _docLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _docLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final path = widget.path;
+    final exists = path != null && File(path).existsSync();
+    final sizeLine =
+        widget.filesize != null ? formatFileSize(widget.filesize!) : null;
+    final textPreview = _textPreview;
+    return AlertDialog(
       title: Row(
         children: [
           const Icon(Icons.insert_drive_file_rounded),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-              filename,
+              widget.filename,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -3860,8 +4027,9 @@ void showFilePreviewDialog(
                 Text('大小：${sizeLine ?? '未知'}',
                     style: const TextStyle(fontSize: 12)),
                 const SizedBox(width: 16),
-                if (sender != null)
-                  Text('来自：$sender', style: const TextStyle(fontSize: 12)),
+                if (widget.sender != null)
+                  Text('来自：${widget.sender}',
+                      style: const TextStyle(fontSize: 12)),
               ],
             ),
             const SizedBox(height: 10),
@@ -3872,7 +4040,8 @@ void showFilePreviewDialog(
                   width: double.infinity,
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
-                    color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
+                    color:
+                        Theme.of(context).colorScheme.surfaceContainerHighest,
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: SingleChildScrollView(
@@ -3884,13 +4053,24 @@ void showFilePreviewDialog(
                   ),
                 ),
               )
+            else if (_docLoading)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(
+                  child: SizedBox(
+                    width: 26,
+                    height: 26,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+              )
             else
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 18),
                 child: Center(
                   child: Column(
                     children: [
-                      Icon(_fileIconFor(filename),
+                      Icon(_fileIconFor(widget.filename),
                           size: 56, color: Colors.grey),
                       // R-P21（用户反馈）：不再显示"该类型暂不支持内嵌预览"——
                       // 无法预览时仅展示文件图标，直接用"打开文件/打开所在
@@ -3899,8 +4079,7 @@ void showFilePreviewDialog(
                         const SizedBox(height: 8),
                         const Text(
                           '文件尚未下载到本地',
-                          style:
-                              TextStyle(fontSize: 12, color: Colors.grey),
+                          style: TextStyle(fontSize: 12, color: Colors.grey),
                         ),
                       ],
                     ],
@@ -3911,11 +4090,25 @@ void showFilePreviewDialog(
         ),
       ),
       actions: [
-        if (exists)
+        // Q1 四轮（问题5）：Android 移除"打开所在目录"——接收目录位于
+        // 应用内部存储，文件管理器不可见，该功能在移动端无意义（导出
+        // 走"分享"）；桌面保持 xdg-open/系统打开目录语义
+        if (exists &&
+            effectiveTargetPlatform() != TargetPlatform.android)
           TextButton.icon(
-            onPressed: () => PlatformCapabilities.fileLauncher.openDirectory(File(path).parent.path),
+            onPressed: () => PlatformCapabilities.fileLauncher
+                .openDirectory(File(path).parent.path),
             icon: const Icon(Icons.folder_open_rounded, size: 18),
             label: const Text('打开所在目录'),
+          ),
+        // Q1 三轮（问题6）：Android 增设"分享"——接收目录位于应用内部
+        // 存储，分享面板是可靠的文件导出通道（微信"用其他应用打开"
+        // 同款语义）
+        if (exists && effectiveTargetPlatform() == TargetPlatform.android)
+          TextButton.icon(
+            onPressed: () => AndroidSystem.shareFile(path),
+            icon: const Icon(Icons.share_rounded, size: 18),
+            label: const Text('分享'),
           ),
         if (exists)
           FilledButton(
@@ -3924,12 +4117,12 @@ void showFilePreviewDialog(
             child: const Text('打开文件'),
           ),
         TextButton(
-          onPressed: () => Navigator.pop(ctx),
+          onPressed: () => Navigator.pop(context),
           child: const Text('关闭'),
         ),
       ],
-    ),
-  );
+    );
+  }
 }
 
 /// 文本类扩展名（≤1MB 时内嵌预览）

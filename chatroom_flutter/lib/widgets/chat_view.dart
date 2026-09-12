@@ -14,8 +14,10 @@ import 'package:flutter/services.dart';
 import '../config.dart';
 import '../services/app_paths.dart';
 import '../models/chat_models.dart';
+import '../platform/capabilities.dart';
 import '../services/theme_settings.dart';
 import 'adaptive_text_field.dart';
+import 'responsive_layout.dart';
 
 class ChatView extends StatefulWidget {
   final String chatKey;
@@ -58,6 +60,10 @@ class ChatView extends StatefulWidget {
 
   // R-P2（文件预览）：点击文件卡片 → 预览回调
   final ValueChanged<ChatMessage>? onFileTap;
+
+  // Q1 三轮（问题8 文件转发）：文件消息菜单"转发"回调
+  // （已下载文件经 sendFile 本地重发；提供即显示入口）
+  final ValueChanged<ChatMessage>? onForwardFile;
 
   // R-P3（收藏表情）：图片消息菜单"添加到表情包"回调（提供即显示入口）
   final ValueChanged<ChatMessage>? onSaveSticker;
@@ -116,6 +122,16 @@ class ChatView extends StatefulWidget {
   // 阶段 O9：分享卡片入口（提供即输入行显示"分享卡片"按钮）
   final VoidCallback? onShareCard;
 
+  // Q1 真机反馈（顶栏遮挡聊天区）：false = 隐藏自带标题栏
+  // （compact 聊天态标题移至 AppBar——居中用户名 + 搜索/导出/文件管理）
+  final bool headerVisible;
+
+  // Q1 真机反馈：搜索入口受控模式——onSearchVisibilityChanged 非空时
+  // 搜索输入行显隐由 [searchInputVisible] 驱动（compact 下入口在 AppBar）；
+  // 为空时保持内部状态自治（桌面既有行为不变）
+  final bool searchInputVisible;
+  final ValueChanged<bool>? onSearchVisibilityChanged;
+
   const ChatView({
     super.key,
     required this.chatKey,
@@ -159,10 +175,14 @@ class ChatView extends StatefulWidget {
     this.onShareCard,
     this.onVideoTap,
     this.onFileTap,
+    this.onForwardFile,
     this.onSaveSticker,
     this.onShowStickerPicker,
     this.onAdvancedSearch,
     this.emojiPanel,
+    this.headerVisible = true,
+    this.searchInputVisible = false,
+    this.onSearchVisibilityChanged,
   });
 
   static void _noopSearch(String _) {}
@@ -179,6 +199,9 @@ class _ChatViewState extends State<ChatView> {
   bool _searchInputVisible = false;
   bool _showScrollToBottom = false;
 
+  /// 搜索模式查询词同步标记（didUpdateWidget 预填输入行，避免 build 中改 controller）
+  String _lastSyncedQuery = '';
+
   /// 阶段 K5（P1-2 修复）：引用跳转的目标消息高亮（点击后闪烁约 2s）
   String? _highlightMessageId;
   Timer? _highlightTimer;
@@ -187,14 +210,29 @@ class _ChatViewState extends State<ChatView> {
   /// 系统消息会话（'服务器'，只读）不提供搜索入口
   bool get _canSearch => widget.chatKey != '服务器';
 
+  /// 搜索输入行显隐（受控模式：入口在 AppBar 的 compact；自治模式：桌面）
+  bool get _searchVisible => widget.onSearchVisibilityChanged != null
+      ? widget.searchInputVisible
+      : _searchInputVisible;
+
+  void _setSearchVisible(bool visible) {
+    if (widget.onSearchVisibilityChanged != null) {
+      widget.onSearchVisibilityChanged!(visible);
+    } else {
+      setState(() => _searchInputVisible = visible);
+    }
+  }
+
   /// 阶段 K5：是否启用消息菜单（任一 K5 回调非空；
-  /// 阶段 N1：提供 onDeletePermanently 同样启用菜单模式）
+  /// 阶段 N1：提供 onDeletePermanently 同样启用菜单模式；
+  /// Q1 三轮：提供 onForwardFile（文件转发）同样启用）
   bool get _kMenuEnabled =>
       widget.onReplyMessage != null ||
       widget.onForwardMessage != null ||
       widget.onAddReaction != null ||
       widget.onDeleteMessage != null ||
       widget.onDeletePermanently != null ||
+      widget.onForwardFile != null ||
       widget.onSaveSticker != null;
 
   /// 提交搜索（空关键字不触发回调）
@@ -202,7 +240,7 @@ class _ChatViewState extends State<ChatView> {
     final kw = keyword.trim();
     if (kw.isEmpty) return;
     widget.onSearch(kw);
-    setState(() => _searchInputVisible = false);
+    _setSearchVisible(false);
   }
 
   @override
@@ -211,6 +249,24 @@ class _ChatViewState extends State<ChatView> {
     _scrollCtrl.addListener(_onScroll);
     // 阶段 K2：监听输入文本变化 → onInputChanged（逐会话草稿数据源）
     widget.inputCtrl.addListener(_onInputTextChanged);
+    _syncSearchQuery();
+  }
+
+  @override
+  void didUpdateWidget(covariant ChatView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncSearchQuery();
+  }
+
+  /// 无头模式（compact）搜索行常驻于搜索结果态：查询词变化时同步预填
+  /// （构造即处于搜索态的场景在 initState 覆盖）
+  void _syncSearchQuery() {
+    if (widget.isSearchMode && widget.searchQuery != _lastSyncedQuery) {
+      _lastSyncedQuery = widget.searchQuery;
+      if (_searchCtrl.text != widget.searchQuery) {
+        _searchCtrl.text = widget.searchQuery;
+      }
+    }
   }
 
   @override
@@ -313,75 +369,17 @@ class _ChatViewState extends State<ChatView> {
 
   @override
   Widget build(BuildContext context) {
+    final header = _buildHeader(context);
+    // 无头模式（compact 聊天态）：搜索结果态下搜索行常驻（含退出搜索出口）
+    final showSearchRow =
+        _searchVisible || (widget.isSearchMode && !widget.headerVisible);
     return Column(
       children: [
-        // 标题栏
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surfaceContainerLow,
-            border: Border(
-              bottom: BorderSide(
-                  color: Theme.of(context).colorScheme.outlineVariant),
-            ),
-          ),
-          child: Row(
-            children: [
-              CircleAvatar(
-                radius: 18,
-                backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-                child: Icon(
-                  widget.chatKey.startsWith('group_')
-                      ? Icons.groups_rounded
-                      : widget.chatKey == '服务器'
-                          ? Icons.notifications_rounded
-                          : Icons.person_rounded,
-                  size: 20,
-                  color: Theme.of(context).colorScheme.onPrimaryContainer,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  widget.isSearchMode
-                      ? '搜索：${widget.searchQuery}'
-                      : (widget.chatKey.startsWith('group_') ||
-                              widget.chatKey == '服务器'
-                          ? widget.chatTitle
-                          : '与 ${widget.chatTitle} 的聊天'),
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.bold,
-                      ),
-                ),
-              ),
-              // 搜索模式：返回按钮；非搜索模式：搜索入口（仅私聊会话）
-              if (widget.isSearchMode)
-                IconButton(
-                  icon: const Icon(Icons.arrow_back_rounded),
-                  tooltip: '退出搜索',
-                  onPressed: widget.onSearchExit,
-                )
-              else if (_canSearch)
-                IconButton(
-                  icon: const Icon(Icons.search_rounded),
-                  tooltip: '搜索消息',
-                  onPressed: () => setState(() => _searchInputVisible = true),
-                ),
-              // 阶段 N2（P2-1 聊天记录导出）：按会话导出 TXT/JSON
-              if (widget.chatKey != '服务器' && widget.onExportChat != null)
-                IconButton(
-                  icon: const Icon(Icons.ios_share_rounded),
-                  tooltip: '导出聊天记录',
-                  onPressed: widget.onExportChat,
-                ),
-            ],
-          ),
-        ),
+        // 标题栏（compact 聊天态隐藏——标题/搜索/导出移至 AppBar，Q1 真机反馈）
+        if (widget.headerVisible) header,
 
         // 搜索输入栏（点击搜索按钮后展开，阶段 H5）
-        if (_searchInputVisible)
+        if (showSearchRow)
           Container(
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -418,8 +416,15 @@ class _ChatViewState extends State<ChatView> {
                 IconButton(
                   icon: const Icon(Icons.close_rounded),
                   tooltip: '关闭搜索',
-                  onPressed: () => setState(() => _searchInputVisible = false),
+                  onPressed: () => _setSearchVisible(false),
                 ),
+                // 无头模式：搜索结果态的退出出口（原头部退出按钮迁移至此）
+                if (widget.isSearchMode && !widget.headerVisible)
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back_rounded),
+                    tooltip: '退出搜索',
+                    onPressed: widget.onSearchExit,
+                  ),
               ],
             ),
           ),
@@ -492,6 +497,7 @@ class _ChatViewState extends State<ChatView> {
                             onImageTap: widget.onImageTap,
                             onVideoTap: widget.onVideoTap,
                             onFileTap: widget.onFileTap,
+                            onForwardFile: widget.onForwardFile,
                             onSaveSticker: widget.onSaveSticker,
                             // 阶段 O2：群消息"置顶"入口（群主接线由上层控制）
                             onPinMessage: widget.onPinMessage,
@@ -630,6 +636,74 @@ class _ChatViewState extends State<ChatView> {
     );
   }
 
+  /// 标题栏（宽屏/列表态渲染；compact 聊天态由 AppBar 承担，
+  /// 搜索入口/导出回调语义不变）
+  Widget _buildHeader(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerLow,
+        border: Border(
+          bottom:
+              BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+        ),
+      ),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 18,
+            backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+            child: Icon(
+              widget.chatKey.startsWith('group_')
+                  ? Icons.groups_rounded
+                  : widget.chatKey == '服务器'
+                      ? Icons.notifications_rounded
+                      : Icons.person_rounded,
+              size: 20,
+              color: Theme.of(context).colorScheme.onPrimaryContainer,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              widget.isSearchMode
+                  ? '搜索：${widget.searchQuery}'
+                  : (widget.chatKey.startsWith('group_') ||
+                          widget.chatKey == '服务器'
+                      ? widget.chatTitle
+                      : '与 ${widget.chatTitle} 的聊天'),
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+            ),
+          ),
+          // 搜索模式：返回按钮；非搜索模式：搜索入口（仅私聊会话）
+          if (widget.isSearchMode)
+            IconButton(
+              icon: const Icon(Icons.arrow_back_rounded),
+              tooltip: '退出搜索',
+              onPressed: widget.onSearchExit,
+            )
+          else if (_canSearch)
+            IconButton(
+              icon: const Icon(Icons.search_rounded),
+              tooltip: '搜索消息',
+              onPressed: () => _setSearchVisible(true),
+            ),
+          // 阶段 N2（P2-1 聊天记录导出）：按会话导出 TXT/JSON
+          if (widget.chatKey != '服务器' && widget.onExportChat != null)
+            IconButton(
+              icon: const Icon(Icons.ios_share_rounded),
+              tooltip: '导出聊天记录',
+              onPressed: widget.onExportChat,
+            ),
+        ],
+      ),
+    );
+  }
+
   /// R-P6：横幅限高 + 可滚动包装（防多横幅撑爆主布局）
   List<Widget> _buildNoticeBannersBounded(BuildContext context) {
     final banners = _buildNoticeBanners(context);
@@ -713,7 +787,7 @@ class _ChatViewState extends State<ChatView> {
   }
 }
 
-class _InputBar extends StatelessWidget {
+class _InputBar extends StatefulWidget {
   final TextEditingController inputCtrl;
   final VoidCallback onSend;
   final VoidCallback onSendFile;
@@ -741,7 +815,33 @@ class _InputBar extends StatelessWidget {
   });
 
   @override
+  State<_InputBar> createState() => _InputBarState();
+}
+
+/// 输入栏左侧功能入口（文件/表情包/快捷回复/定时）。
+/// Q1 真机反馈（输入框过小）：compact（手机窄屏）下收进单个「+」键，
+/// 点击在输入行上方展开功能面板（微信式）；宽屏保持四键并列（桌面不变）。
+class _InputBarState extends State<_InputBar> {
+  bool _actionsExpanded = false;
+
+  void _collapse() {
+    if (_actionsExpanded) setState(() => _actionsExpanded = false);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final compact = isCompactLayout(context);
+    final actions = <(IconData, String, VoidCallback)>[
+      (Icons.attach_file, '发送文件', widget.onSendFile),
+      if (widget.onShowStickerPicker != null)
+        (Icons.mood_rounded, '表情包', widget.onShowStickerPicker!),
+      if (widget.onQuickReply != null)
+        (Icons.bolt_rounded, '快捷回复', widget.onQuickReply!),
+      if (widget.onScheduleMessage != null)
+        (Icons.schedule_rounded, '定时发送', widget.onScheduleMessage!),
+      if (widget.onShareCard != null)
+        (Icons.style_rounded, '分享卡片', widget.onShareCard!),
+    ];
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
@@ -750,59 +850,109 @@ class _InputBar extends StatelessWidget {
           top: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
         ),
       ),
-      child: Row(
-        children: [
+      child: compact
+          ? Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_actionsExpanded)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    key: const ValueKey('input_actions_panel'),
+                    child: Row(
+                      children: [
+                        for (final (icon, label, onTap) in actions)
+                          Expanded(
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(10),
+                              onTap: () {
+                                _collapse();
+                                onTap();
+                              },
+                              child: Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 8),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(icon, size: 26),
+                                    const SizedBox(height: 4),
+                                    Text(label,
+                                        style: const TextStyle(fontSize: 12)),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                _buildInputRow(context),
+              ],
+            )
+          : _buildWideRow(context, actions),
+    );
+  }
+
+  /// compact：单个「+」键 + 输入框 + 发送键
+  Widget _buildInputRow(BuildContext context) {
+    return Row(
+      children: [
+        IconButton(
+          key: const ValueKey('input_actions_toggle'),
+          tooltip: _actionsExpanded ? '收起' : '更多功能',
+          icon: Icon(_actionsExpanded
+              ? Icons.close_rounded
+              : Icons.add_circle_outline_rounded),
+          onPressed: () => setState(() => _actionsExpanded = !_actionsExpanded),
+        ),
+        Expanded(
+          child: AdaptiveTextField(
+            controller: widget.inputCtrl,
+            hintText: '输入消息，Enter 发送...',
+            showChineseInput: true,
+            onSubmitted: (_) => widget.onSend(),
+            // 阶段 N3（P2-4）：剪贴板图片 → 上层预览（仅非只读会话）
+            onImagePasted: widget.canSend ? widget.onImagePasted : null,
+          ),
+        ),
+        const SizedBox(width: 8),
+        IconButton.filled(
+          icon: const Icon(Icons.send_rounded),
+          tooltip: '发送',
+          onPressed: widget.onSend,
+        ),
+      ],
+    );
+  }
+
+  /// 宽屏（桌面）：四键并列 + 输入框 + 发送键（既有布局，Q0 前语义不变）
+  Widget _buildWideRow(
+      BuildContext context, List<(IconData, String, VoidCallback)> actions) {
+    return Row(
+      children: [
+        for (final (icon, tooltip, onTap) in actions)
           IconButton(
-            icon: const Icon(Icons.attach_file),
-            tooltip: '发送文件',
-            onPressed: onSendFile,
+            icon: Icon(icon),
+            tooltip: tooltip,
+            onPressed: onTap,
           ),
-          // 阶段 P2：表情包入口
-          if (onShowStickerPicker != null)
-            IconButton(
-              icon: const Icon(Icons.mood_rounded),
-              tooltip: '表情包',
-              onPressed: onShowStickerPicker,
-            ),
-          // 阶段 O4：快捷回复（常用语一键发送）
-          if (onQuickReply != null)
-            IconButton(
-              icon: const Icon(Icons.bolt_rounded),
-              tooltip: '快捷回复',
-              onPressed: onQuickReply,
-            ),
-          // 阶段 O5：定时发送（预约发送）
-          if (onScheduleMessage != null)
-            IconButton(
-              icon: const Icon(Icons.schedule_rounded),
-              tooltip: '定时发送',
-              onPressed: onScheduleMessage,
-            ),
-          // 阶段 O9：分享卡片（名片/位置/日程）
-          if (onShareCard != null)
-            IconButton(
-              icon: const Icon(Icons.style_rounded),
-              tooltip: '分享卡片',
-              onPressed: onShareCard,
-            ),
-          Expanded(
-            child: AdaptiveTextField(
-              controller: inputCtrl,
-              hintText: '输入消息，Enter 发送...',
-              showChineseInput: true,
-              onSubmitted: (_) => onSend(),
-              // 阶段 N3（P2-4）：剪贴板图片 → 上层预览（仅非只读会话）
-              onImagePasted: canSend ? onImagePasted : null,
-            ),
+        Expanded(
+          child: AdaptiveTextField(
+            controller: widget.inputCtrl,
+            hintText: '输入消息，Enter 发送...',
+            showChineseInput: true,
+            onSubmitted: (_) => widget.onSend(),
+            // 阶段 N3（P2-4）：剪贴板图片 → 上层预览（仅非只读会话）
+            onImagePasted: widget.canSend ? widget.onImagePasted : null,
           ),
-          const SizedBox(width: 8),
-          IconButton.filled(
-            icon: const Icon(Icons.send_rounded),
-            tooltip: '发送',
-            onPressed: onSend,
-          ),
-        ],
-      ),
+        ),
+        const SizedBox(width: 8),
+        IconButton.filled(
+          icon: const Icon(Icons.send_rounded),
+          tooltip: '发送',
+          onPressed: widget.onSend,
+        ),
+      ],
     );
   }
 }
@@ -904,6 +1054,7 @@ class _MessageBubble extends StatelessWidget {
   final ValueChanged<ChatMessage>? onImageTap; // 阶段 N3b：点击内联图片全屏
   final ValueChanged<ChatMessage>? onVideoTap; // 阶段 P1：点击视频气泡全屏
   final ValueChanged<ChatMessage>? onFileTap; // R-P2：点击文件卡片预览
+  final ValueChanged<ChatMessage>? onForwardFile; // Q1 三轮：文件消息菜单转发
   final ValueChanged<ChatMessage>? onSaveSticker; // R-P3：图片添加到表情包
 
   // 阶段 O2：置顶群消息回调（提供且为群聊消息时菜单出现"置顶"入口）
@@ -930,6 +1081,7 @@ class _MessageBubble extends StatelessWidget {
     this.onImageTap,
     this.onVideoTap,
     this.onFileTap,
+    this.onForwardFile,
     this.onSaveSticker,
     this.onPinMessage,
     this.pinnedMessageId,
@@ -957,6 +1109,7 @@ class _MessageBubble extends StatelessWidget {
         onPinMessage: onPinMessage,
         pinnedMessageId: pinnedMessageId,
         onSaveSticker: _isInlineImage ? onSaveSticker : null,
+        onForwardFile: onForwardFile,
       ),
     );
   }
@@ -1078,13 +1231,16 @@ class _MessageBubble extends StatelessWidget {
     );
   }
 
-  /// 构建内联缩略图（字节优先 Image.memory，否则 Image.file）
+  /// 构建内联缩略图（字节优先 Image.memory，否则 Image.file）。
+  /// Q1 真机反馈二轮（问题8）：解码降采样（cacheWidth=400px）——缩略
+  /// 展示无需全分辨率解码，防超大照片内存峰值触发 LMK 查杀
   Widget _buildInlineImage() {
     Widget image;
     if (message.fileData != null) {
       image = Image.memory(
         message.fileData!,
         fit: BoxFit.cover,
+        cacheWidth: 400,
         errorBuilder: (_, __, ___) =>
             const Icon(Icons.broken_image_outlined, size: 40),
       );
@@ -1092,6 +1248,7 @@ class _MessageBubble extends StatelessWidget {
       image = Image.file(
         File(_resolvedImagePath!),
         fit: BoxFit.cover,
+        cacheWidth: 400,
         errorBuilder: (_, __, ___) =>
             const Icon(Icons.broken_image_outlined, size: 40),
       );
@@ -1235,8 +1392,10 @@ class _MessageBubble extends StatelessWidget {
                         fontSize: 12,
                         fontStyle: FontStyle.italic,
                         color: Colors.grey[600],
-                        // R-P10 契约补齐：引用预览同样兜底 COLRv1 彩色字体
-                        fontFamilyFallback: const ['NotoColorEmoji'],
+                        // R-P10 契约补齐：引用预览 emoji 兜底（Q1 二轮
+                        // 修订：按平台裁剪——Android 显式 emoji 兜底会让
+                        // 混排数字命中键帽黑字形，系统链自带彩字）
+                        fontFamilyFallback: emojiTextFallback(),
                       ),
                     ),
                   ),
@@ -1295,10 +1454,17 @@ class _MessageBubble extends StatelessWidget {
                           color: isSelf
                               ? Theme.of(context).colorScheme.onPrimary
                               : Theme.of(context).colorScheme.onSurfaceVariant,
-                          // R-P10/R-P26：消息正文 emoji 兜底到 COLRv1
-                          // 彩色字体栈（内置 + 系统彩字，缺省时
-                          // fontconfig 可能命中黑白字形）
-                          fontFamilyFallback: AppConfig.emojiFontStack,
+                          // Q1 真机反馈二轮（数字发黑根因修订）：显式
+                          // fontFamily 压不住——引擎对带 Emoji 属性的码点
+                          // （数字/#/*）会命中 fallback 链中的 emoji 字体
+                          // 键帽基字形（黑色）。Android/iOS 不给混排文本
+                          // 挂 emoji 兜底（系统链自带彩字），仅 Linux 保留
+                          // R-P10/R-P26 显式栈（fontconfig 黑白字形问题）
+                          fontFamily: Theme.of(context)
+                              .textTheme
+                              .bodyMedium
+                              ?.fontFamily,
+                          fontFamilyFallback: emojiTextFallback(),
                         ),
                       ),
                     // 阶段 I1：发送中/发送失败状态标记（仅自己的文字消息；
@@ -1349,6 +1515,44 @@ class _MessageBubble extends StatelessWidget {
                               ),
                             ),
                           ],
+                        ),
+                      ),
+                    // Q1 七轮（问题1）：文件传输失败标记——直传转发
+                    // 中断等异常时明确提醒发送方；提供回调时点击重发
+                    // （经 sendFile 走完整上传通道）
+                    if (isSelf &&
+                        message.isFailed &&
+                        message.type == 'file' &&
+                        transferFraction == null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: GestureDetector(
+                          onTap: onRetrySend == null
+                              ? null
+                              : () => onRetrySend!(message.messageId),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.error_outline_rounded,
+                                size: 13,
+                                color: Colors.white.withValues(alpha: 0.9),
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                onRetrySend == null
+                                    ? '传输失败，建议重新发送'
+                                    : '传输失败，点击重新发送',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  decoration: onRetrySend == null
+                                      ? TextDecoration.none
+                                      : TextDecoration.underline,
+                                  color: Colors.white.withValues(alpha: 0.9),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     // 文件传输进度条（阶段 G：传输可视化，非模态局部刷新）
@@ -1421,10 +1625,13 @@ class _MessageBubble extends StatelessWidget {
                             ),
                             child: Text(
                               '${entry.key} ${entry.value.length}',
-                              style: const TextStyle(
+                              // Q1 二轮：chip 为"emoji + 计数"混排——主字体
+                              // 缺省（计数数字走默认字体，emoji 经平台化
+                              // 兜底；Android 显式 emoji 主字体会把计数
+                              // 染成键帽黑字形）
+                              style: TextStyle(
                                 fontSize: 12,
-                                fontFamily: 'NotoColorEmoji',
-                                fontFamilyFallback: AppConfig.emojiFontStack,
+                                fontFamilyFallback: emojiTextFallback(),
                               ),
                             ),
                           ),
@@ -1499,6 +1706,7 @@ class _MessageMenuSheet extends StatefulWidget {
   final ValueChanged<String>? onPinMessage; // 置顶群消息（阶段 O2，群主）
   final String? pinnedMessageId; // 当前已置顶消息 id（文案切换"取消置顶"）
   final ValueChanged<ChatMessage>? onSaveSticker; // R-P3：添加到表情包（图片消息）
+  final ValueChanged<ChatMessage>? onForwardFile; // Q1 三轮：文件消息转发
 
   const _MessageMenuSheet({
     required this.message,
@@ -1512,6 +1720,7 @@ class _MessageMenuSheet extends StatefulWidget {
     this.onPinMessage,
     this.pinnedMessageId,
     this.onSaveSticker,
+    this.onForwardFile,
   });
 
   @override
@@ -1537,8 +1746,10 @@ class _MessageMenuSheetState extends State<_MessageMenuSheet> {
   @override
   Widget build(BuildContext context) {
     final canEditOrRecall = widget.isSelf;
-    // 文件消息（P-33 修订 2026-08-18）：菜单仅提供"撤回"入口
-    // （文件不支持引用/转发/表情/仅我删除；阶段 N1 亦不新增复制/永久删除）
+    // 文件消息（P-33 修订 2026-08-18）：菜单以"撤回"为核心入口
+    // （文件不支持引用/表情/仅我删除；阶段 N1 亦不新增复制/永久删除）。
+    // Q1 三轮（问题8）：新增"转发"入口（上层提供 onForwardFile 时）——
+    // 本地文件重发通道，与服务端 forward 协议无关
     final isFile = widget.message.type == 'file';
     final entries = <Widget>[];
     // 阶段 N1（P2-2）：复制——文字消息可复制内容文本（复制与归属无关）
@@ -1567,6 +1778,15 @@ class _MessageMenuSheetState extends State<_MessageMenuSheet> {
         icon: Icons.favorite_border_rounded,
         title: '添加到表情包',
         onTap: () => _invoke(() => widget.onSaveSticker!(widget.message)),
+      ));
+    }
+    // Q1 三轮（问题8）：文件消息"转发"——已下载文件经本地重发通道
+    // 转给目标会话（服务端 forward 协议仍拒绝文件，不走该协议）
+    if (isFile && widget.onForwardFile != null) {
+      entries.add(_MenuTile(
+        icon: Icons.forward_rounded,
+        title: '转发',
+        onTap: () => _invoke(() => widget.onForwardFile!(widget.message)),
       ));
     }
     if (!isFile && widget.onReplyMessage != null) {

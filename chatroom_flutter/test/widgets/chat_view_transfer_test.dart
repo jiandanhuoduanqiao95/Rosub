@@ -32,7 +32,8 @@ ChatMessage fileMsg(String id, {String sender = 'alice'}) => ChatMessage(
       status: 'sent',
     );
 
-Widget buildView(List<ChatMessage> messages) {
+Widget buildView(List<ChatMessage> messages,
+    {ValueChanged<String>? onRetrySend}) {
   return MaterialApp(
     home: Scaffold(
       body: ChatView(
@@ -48,6 +49,7 @@ Widget buildView(List<ChatMessage> messages) {
         onLoadHistory: (_) async {},
         hasMoreHistory: (_) => false,
         transferFraction: (id) => state.transferFraction(id),
+        onRetrySend: onRetrySend,
       ),
     ),
   );
@@ -110,5 +112,47 @@ void main() {
     ]));
     await tester.pump();
     expect(find.byType(LinearProgressIndicator), findsNWidgets(2));
+  });
+
+  group('Q1 七轮 —— 文件传输失败行（发送方提醒）', () {
+    testWidgets('failed 文件气泡显示"传输失败，点击重新发送"，点击触发重发回调',
+        (tester) async {
+      final retried = <String>[];
+      await tester.pumpWidget(buildView([
+        ChatMessage(
+          sender: 'alice',
+          content: '[发送文件] big.bin',
+          messageId: 'f9',
+          type: 'file',
+          filename: 'big.bin',
+          status: 'failed',
+        ),
+      ], onRetrySend: retried.add));
+      await tester.pump();
+
+      expect(find.text('传输失败，点击重新发送'), findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsNothing,
+          reason: '失败后进度条移除');
+
+      await tester.tap(find.text('传输失败，点击重新发送'));
+      await tester.pump();
+      expect(retried, ['f9']);
+    });
+
+    testWidgets('未提供重发回调时显示"传输失败，建议重新发送"（仅提醒）',
+        (tester) async {
+      await tester.pumpWidget(buildView([
+        ChatMessage(
+          sender: 'alice',
+          content: '[发送文件] big.bin',
+          messageId: 'f9',
+          type: 'file',
+          filename: 'big.bin',
+          status: 'failed',
+        ),
+      ]));
+      await tester.pump();
+      expect(find.text('传输失败，建议重新发送'), findsOneWidget);
+    });
   });
 }

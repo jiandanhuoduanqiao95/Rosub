@@ -311,7 +311,7 @@ void main() {
       expect(find.byKey(const ValueKey('annotation_canvas')), findsOneWidget,
           reason: '自动进入标注编辑器');
       expect(find.text('发送'), findsOneWidget, reason: '编辑后发送/直接发送');
-      expect(find.text('取消'), findsOneWidget);
+      expect(find.byTooltip('取消'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
 
@@ -352,7 +352,7 @@ void main() {
       input.onImagePasted?.call(pngBytes);
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('取消'));
+      await tester.tap(find.byTooltip('取消'));
       await tester.pumpAndSettle();
 
       verifyNever(() => socket.sendFileBytes(any(), any(), any()));

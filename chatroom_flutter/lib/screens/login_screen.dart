@@ -2,6 +2,9 @@
 ///
 /// 关键：移除 SingleChildScrollView、readOnly 延迟切换、
 /// SizedBox 包裹等可能触发 Linux fcitx IME 死锁的元素。
+/// Q1 真机反馈二轮（问题7）：Android 端独立布局——品牌 logo/标题/
+/// 介绍一概删去，功能表单全屏化（分段切换 + 账号磁贴 + 自动填充）；
+/// Linux 桌面三档布局与测试基线不变（effectiveTargetPlatform 门控）。
 
 import 'dart:math' as math;
 
@@ -9,8 +12,11 @@ import 'package:flutter/material.dart';
 
 import '../config.dart';
 import '../l10n/app_strings.dart';
+import '../platform/android_system.dart';
+import '../platform/capabilities.dart';
 import '../services/theme_settings.dart';
 import '../widgets/adaptive_text_field.dart';
+import '../widgets/app_feedback.dart';
 import '../models/chat_models.dart';
 import '../services/session_store.dart';
 import '../services/socket_service.dart';
@@ -29,6 +35,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _adminSecretCtrl = TextEditingController();
   final _socketService = SocketService();
   final _usernameFocus = FocusNode();
+  final _passwordFocus = FocusNode();
 
   bool _isLogin = true;
   bool _adminMode = false;
@@ -36,6 +43,14 @@ class _LoginScreenState extends State<LoginScreen> {
   String? _error;
   // 阶段 O6（P2-10 多账号切换）：已保存的账号列表（钥匙串）
   List<StoredSession> _savedAccounts = [];
+
+  /// Q1 三轮（问题1）：账号磁贴编辑态——长按进入（磁贴右上角出现叉号），
+  /// 点叉删除、侧滑或点磁贴退出编辑态
+  bool _accountEditMode = false;
+
+  /// Q1 三轮（问题1）：勾选后本次登录不写入钥匙串（账号列表与当前
+  /// 凭据均不保存，重启后无法快捷登录）
+  bool _dontRecordLogin = false;
 
   /// 在下一帧请求用户名输入框焦点，确保 rebuild 已完成
   void _refocusUsername() {
@@ -82,9 +97,30 @@ class _LoginScreenState extends State<LoginScreen> {
     });
   }
 
+  /// Q1 三轮（问题1）：点击磁贴叉号 → 直接删除本机登录信息（不再弹确认；
+  /// 编辑态本身即两段操作），SnackBar 反馈。SessionStore.removeAccount
+  /// 同步清理钥匙串账号列表 + 当前凭据。
+  Future<void> _removeAccount(StoredSession account) async {
+    await SessionStore.removeAccount(account.username);
+    if (!mounted) return;
+    final accounts = await SessionStore.loadAccounts();
+    if (!mounted) return;
+    final wasFilled = _usernameCtrl.text.trim() == account.username;
+    setState(() {
+      _savedAccounts = accounts;
+      if (_savedAccounts.isEmpty) _accountEditMode = false;
+      if (wasFilled) {
+        _usernameCtrl.clear();
+        _passwordCtrl.clear();
+      }
+    });
+    showNoticeBar(context, '已删除「${account.username}」的登录信息');
+  }
+
   @override
   void dispose() {
     _usernameFocus.dispose();
+    _passwordFocus.dispose();
     _usernameCtrl.dispose();
     _passwordCtrl.dispose();
     _adminSecretCtrl.dispose();
@@ -156,10 +192,14 @@ class _LoginScreenState extends State<LoginScreen> {
       // 登录成功：持久化 session（H3，记住我）并加入账号列表
       // （阶段 O6：saveAccount 按 username upsert + 置为当前，登录页可切换）
       // 安全：管理员密钥不写入 session（不落盘），仅保留在内存中用于断线重连。
-      await SessionStore.saveAccount(StoredSession(
-        username: username,
-        password: password,
-      ));
+      // Q1 三轮（问题1）：勾选"不记录此次登录"→ 钥匙串零写入（账号列表
+      // 与当前凭据均不保存，重启后需手动输入）
+      if (!_dontRecordLogin) {
+        await SessionStore.saveAccount(StoredSession(
+          username: username,
+          password: password,
+        ));
+      }
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(
@@ -237,12 +277,41 @@ class _LoginScreenState extends State<LoginScreen> {
         bodyMedium: TextStyle(color: Color(0xFFCBD5E1)),
         bodySmall: TextStyle(color: Color(0xFF94A3B8)),
       ),
+      // Q1 三轮（问题0 美化）：标准输入框（Android 等非 Linux 端）统一
+      // 深色填充 + 圆角描边 + 聚焦品牌蓝光圈；Linux RawTextField 不消费
+      // InputDecorationTheme，桌面渲染零影响
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: const Color(0xFF0B1428).withValues(alpha: 0.85),
+        hintStyle: const TextStyle(color: Color(0xFF64748B), fontSize: 14),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 15),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide:
+              BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide:
+              BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: const BorderSide(
+              color: Color(0xFF3B82F6), width: 1.4),
+        ),
+      ),
     );
   }
 
-  /// 登录页主体：宽屏双栏（品牌展示 + 表单卡片），窄屏单列自适应
+  /// 登录页主体：Android 独立全屏布局（Q1 真机反馈二轮问题7）；
+  /// 其余平台维持三档响应式（桌面既有行为与测试基线不变）
   Widget _buildLoginBody(BuildContext context) {
     final width = MediaQuery.sizeOf(context).width;
+    if (effectiveTargetPlatform() == TargetPlatform.android) {
+      return _buildAndroidBody(context, width);
+    }
     final xl = width >= 1280; // 三段式：品牌 + 中间插画 + 表单
     final wide = width >= 960; // 双段式：品牌 + 表单
     final form = SizedBox(
@@ -361,6 +430,339 @@ class _LoginScreenState extends State<LoginScreen> {
           Positioned.fill(child: body),
         ],
       ),
+    );
+  }
+
+  /// Q1 真机反馈二轮（问题7）：Android 登录/注册布局——去品牌区，
+  /// 功能表单全屏（品牌深蓝渐变背景保留），返回键转后台不退出。
+  Widget _buildAndroidBody(BuildContext context, double width) {
+    final page = Scaffold(
+      body: Stack(
+        children: [
+          const Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    Color(0xFF070D1A),
+                    Color(0xFF0C1631),
+                    Color(0xFF0F1D3F)
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            top: -160,
+            right: -140,
+            child: _glow(const Color(0xFF2563EB), 460, 0.22),
+          ),
+          Positioned(
+            bottom: -180,
+            left: -140,
+            child: _glow(const Color(0xFF38BDF8), 460, 0.10),
+          ),
+          Positioned(
+            top: -80,
+            left: width * 0.18,
+            child: IgnorePointer(
+              child: Transform.rotate(
+                angle: -0.5,
+                child: Container(
+                  width: 220,
+                  height: 900,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        const Color(0xFF60A5FA).withValues(alpha: 0),
+                        const Color(0xFF60A5FA).withValues(alpha: 0.06),
+                        const Color(0xFF60A5FA).withValues(alpha: 0),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          SafeArea(
+            child: Center(
+              child: SingleChildScrollView(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 420),
+                  child: _fadeIn(child: _buildAndroidForm(context)),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        AndroidSystem.moveToBackground();
+      },
+      child: page,
+    );
+  }
+
+  /// Android 表单本体（全屏、无卡片容器）：欢迎标语 + 动画滑块式
+  /// 登录/注册切换 + 方形账号磁贴（点击回填/长按出叉删除/侧滑取消
+  /// 编辑态）+ 不记录勾选 + 自动填充 + 大按钮（Q1 四轮问题1 增标语）
+  Widget _buildAndroidForm(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 24),
+        // Q1 五轮（问题5）：欢迎标语改为用户定稿文案（单句，徽标保留）
+        Column(
+          children: [
+            Container(
+              width: 52,
+              height: 52,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(16),
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0xFF3B82F6), Color(0xFF2563EB)],
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFF3B82F6).withValues(alpha: 0.35),
+                    blurRadius: 24,
+                    offset: const Offset(0, 6),
+                  ),
+                ],
+              ),
+              child: const Icon(Icons.forum_rounded,
+                  size: 28, color: Colors.white),
+            ),
+            const SizedBox(height: 14),
+            const Text(
+              '在这里，墙没有耳朵',
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFFF1F5F9),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 24),
+        _LoginModeToggle(
+          key: const ValueKey('login_mode_segment'),
+          isLogin: _isLogin,
+          enabled: !_loading,
+          onChanged: (v) => setState(() {
+            _isLogin = v;
+            _error = null;
+            _adminSecretCtrl.clear();
+          }),
+        ),
+        const SizedBox(height: 24),
+
+        // 已记录账号（Q1 三轮问题1：方形磁贴；长按进入编辑态出叉号，
+        // 点叉直接删除，横向侧滑退出编辑态）
+        if (_savedAccounts.isNotEmpty) ...[
+          GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onHorizontalDragEnd: (_) {
+              if (_accountEditMode) {
+                setState(() => _accountEditMode = false);
+              }
+            },
+            child: Wrap(
+              key: const ValueKey('saved_accounts_row'),
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                for (final account in _savedAccounts)
+                  _SavedAccountChip(
+                    key: ValueKey('saved_account_${account.username}'),
+                    account: account,
+                    editMode: _accountEditMode,
+                    onTap: () {
+                      if (_accountEditMode) {
+                        setState(() => _accountEditMode = false);
+                        return;
+                      }
+                      _fillAccount(account);
+                    },
+                    onLongPress: () =>
+                        setState(() => _accountEditMode = true),
+                    onRemove: () => _removeAccount(account),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+        ],
+
+        AdaptiveTextField(
+          key: const ValueKey('username_field'),
+          controller: _usernameCtrl,
+          focusNode: _usernameFocus,
+          hintText: '用户名（3-32位字母,数字,下划线,短横线）',
+          textInputAction: TextInputAction.next,
+          autofillHints: const [AutofillHints.username],
+          onSubmitted: (_) => _passwordFocus.requestFocus(),
+        ),
+        const SizedBox(height: 14),
+        AdaptiveTextField(
+          key: const ValueKey('password_field'),
+          controller: _passwordCtrl,
+          focusNode: _passwordFocus,
+          hintText: '密码（至少6个字符）',
+          obscureText: true,
+          showVisibilityToggle: true,
+          keyboardType: TextInputType.visiblePassword,
+          textInputAction: TextInputAction.done,
+          autofillHints: _isLogin
+              ? const [AutofillHints.password]
+              : const [AutofillHints.newPassword],
+          onSubmitted: (_) => _submit(),
+        ),
+
+        // Q1 三轮（问题1）：不记录此次登录——勾选后本次登录凭据零落盘
+        Material(
+          color: Colors.transparent,
+          child: InkWell(
+            key: const ValueKey('dont_remember_row'),
+            borderRadius: BorderRadius.circular(10),
+            onTap: _loading
+                ? null
+                : () =>
+                    setState(() => _dontRecordLogin = !_dontRecordLogin),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: Checkbox(
+                      key: const ValueKey('dont_remember_checkbox'),
+                      value: _dontRecordLogin,
+                      visualDensity: VisualDensity.compact,
+                      onChanged: _loading
+                          ? null
+                          : (v) => setState(
+                              () => _dontRecordLogin = v ?? false),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  const Text(
+                    '不记录此次登录',
+                    style:
+                        TextStyle(fontSize: 13, color: Color(0xFFCBD5E1)),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+
+        Material(
+          color: Colors.transparent,
+          child: SwitchListTile(
+            value: _adminMode,
+            contentPadding: EdgeInsets.zero,
+            title: Text(t('adminMode'),
+                style: const TextStyle(fontSize: 14, color: Color(0xFFE2E8F0))),
+            subtitle: Text(
+              _isLogin ? '管理员登录需要二次密钥' : '使用密钥注册管理员账号',
+              style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8)),
+            ),
+            onChanged: _loading
+                ? null
+                : (value) => setState(() {
+                      _adminMode = value;
+                      _error = null;
+                      if (!value) _adminSecretCtrl.clear();
+                    }),
+          ),
+        ),
+        AnimatedSwitcher(
+          duration: const Duration(milliseconds: 180),
+          child: _adminMode
+              ? Padding(
+                  key: const ValueKey('admin_secret_field_wrap'),
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: AdaptiveTextField(
+                    key: const ValueKey('admin_secret_field'),
+                    controller: _adminSecretCtrl,
+                    hintText: '管理员密钥',
+                    obscureText: true,
+                    showVisibilityToggle: true,
+                    keyboardType: TextInputType.visiblePassword,
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (_) => _submit(),
+                  ),
+                )
+              : const SizedBox.shrink(),
+        ),
+
+        if (_error != null) ...[
+          const SizedBox(height: 10),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF7F1D1D).withValues(alpha: 0.55),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                  color: const Color(0xFFFCA5A5).withValues(alpha: 0.35)),
+            ),
+            child: Text(_error!,
+                style: const TextStyle(color: Color(0xFFFCA5A5), fontSize: 13)),
+          ),
+        ],
+
+        const SizedBox(height: 18),
+        SizedBox(
+          height: 52,
+          child: FilledButton(
+            key: const ValueKey('login_submit'),
+            style: FilledButton.styleFrom(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+            ),
+            onPressed: _loading ? null : _submit,
+            child: _loading
+                ? const SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : Text(
+                    _isLogin ? '登录' : '注册并登录',
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        Center(
+          child: Text(
+            '构建 ${AppConfig.buildStamp}',
+            style: TextStyle(
+              fontSize: 10,
+              color: Colors.white.withValues(alpha: 0.35),
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+      ],
     );
   }
 
@@ -884,6 +1286,174 @@ class _FloatingChatArtState extends State<_FloatingChatArt>
           if (m.self)
             const Icon(Icons.check_circle_rounded,
                 size: 14, color: Color(0xFF34D399)),
+        ],
+      ),
+    );
+  }
+}
+
+/// Q1 三轮（问题0 美化）：登录/注册滑块式切换——深色槽体 + 品牌蓝渐变
+/// 滑块（AnimatedAlign 平滑滑动 + 柔光投影），选中项白色加粗，
+/// 未选中项板岩灰；替代观感生硬的 SegmentedButton。
+class _LoginModeToggle extends StatelessWidget {
+  final bool isLogin;
+  final bool enabled;
+  final ValueChanged<bool> onChanged;
+
+  const _LoginModeToggle({
+    super.key,
+    required this.isLogin,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 48,
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: LayoutBuilder(builder: (context, cons) {
+        return Stack(
+          children: [
+            AnimatedAlign(
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOutCubic,
+              alignment: isLogin ? Alignment.centerLeft : Alignment.centerRight,
+              child: Container(
+                width: cons.maxWidth / 2,
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [Color(0xFF3B82F6), Color(0xFF2563EB)],
+                  ),
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xFF3B82F6).withValues(alpha: 0.4),
+                      blurRadius: 14,
+                      offset: const Offset(0, 3),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Row(
+              children: [
+                Expanded(child: _segment(true, '登录')),
+                Expanded(child: _segment(false, '注册')),
+              ],
+            ),
+          ],
+        );
+      }),
+    );
+  }
+
+  Widget _segment(bool value, String label) {
+    final selected = isLogin == value;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: (!enabled || selected) ? null : () => onChanged(value),
+      child: Center(
+        child: AnimatedDefaultTextStyle(
+          duration: const Duration(milliseconds: 180),
+          style: TextStyle(
+            fontSize: 15,
+            fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+            color: selected ? Colors.white : const Color(0xFF94A3B8),
+          ),
+          child: Text(label),
+        ),
+      ),
+    );
+  }
+}
+
+/// Q1 三轮（问题1）：已记录账号方形磁贴——圆角方框 + 人物图标 + 用户名
+/// （与桌面 ActionChip 方形观感对齐）；编辑态右上角浮现红底叉号，
+/// 点击叉号直接删除；进入编辑态 = 长按任意磁贴。
+class _SavedAccountChip extends StatelessWidget {
+  final StoredSession account;
+  final bool editMode;
+  final VoidCallback onTap;
+  final VoidCallback onLongPress;
+  final VoidCallback onRemove;
+
+  const _SavedAccountChip({
+    super.key,
+    required this.account,
+    required this.editMode,
+    required this.onTap,
+    required this.onLongPress,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      onLongPress: onLongPress,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: editMode
+                    ? const Color(0xFF60A5FA).withValues(alpha: 0.55)
+                    : Colors.white.withValues(alpha: 0.14),
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.person_outline_rounded,
+                    size: 18, color: Color(0xFF93C5FD)),
+                const SizedBox(width: 8),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 120),
+                  child: Text(
+                    account.username,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 14, color: Color(0xFFE2E8F0)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (editMode)
+            Positioned(
+              top: -7,
+              right: -7,
+              child: GestureDetector(
+                key: ValueKey('saved_account_remove_${account.username}'),
+                onTap: onRemove,
+                behavior: HitTestBehavior.opaque,
+                child: Container(
+                  width: 22,
+                  height: 22,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEF4444),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                        color: const Color(0xFF070D1A), width: 2),
+                  ),
+                  child: const Icon(Icons.close_rounded,
+                      size: 13, color: Colors.white),
+                ),
+              ),
+            ),
         ],
       ),
     );

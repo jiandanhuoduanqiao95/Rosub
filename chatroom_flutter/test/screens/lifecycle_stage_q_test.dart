@@ -138,6 +138,23 @@ void main() {
       SessionLifecycleGuard.instance.unbind();
     });
 
+    test('Q1 五轮：handlePaused 透传（onPause 回调；未 bind 不崩）', () {
+      var pauseCount = 0;
+      SessionLifecycleGuard.instance.unbind();
+      expect(() => SessionLifecycleGuard.instance.handlePaused(),
+          returnsNormally);
+      SessionLifecycleGuard.instance.bind(
+        isSocketAlive: () => false,
+        reconnect: () {},
+        onPause: () => pauseCount++,
+      );
+      SessionLifecycleGuard.instance.handlePaused();
+      expect(pauseCount, 1, reason: 'paused 透传给 SocketService.markAppPaused');
+      SessionLifecycleGuard.instance.unbind();
+      SessionLifecycleGuard.instance.handlePaused();
+      expect(pauseCount, 1, reason: 'unbind 后无操作');
+    });
+
     test('重复 bind 覆盖旧回调（新 reconnect 生效、旧的不触发）', () {
       var oldCount = 0;
       var newCount = 0;
@@ -242,6 +259,47 @@ void main() {
       expect(countOf(src, 'SessionLifecycleGuard'), greaterThanOrEqualTo(2),
           reason: 'ChatScreen 持有 SocketService，进出界面绑定/解绑 guard');
       expect(src.contains('isSocketAlive'), isTrue);
+    });
+  });
+
+  group('Q1 五轮 —— 僵尸连接自愈加固（源码扫描锁定，问题1 重大回归）', () {
+    test('ChatScreen 接线 isSocketAlive 恒 false（僵尸 socket 不得短路探测）',
+        () {
+      final src = srcOf('screens/chat_screen.dart');
+      expect(src.contains('isSocketAlive: () => false'), isTrue,
+          reason: 'socket 对象存在不代表连接存活——resume 恒走'
+              'ensureConnectedOnResume（内部僵死探测）');
+      expect(
+          src.contains(
+              'isSocketAlive: () => widget.socketService.socket != null'),
+          isFalse,
+          reason: '旧判定把服务端已踢线的僵尸连接当存活，前台永不重连');
+      expect(src.contains('onPause: () => widget.socketService.markAppPaused()'),
+          isTrue, reason: 'paused 透传记录真后台时刻');
+    });
+
+    test('main.dart paused 分支透传 guard（源码扫描）', () {
+      final src = srcOf('main.dart');
+      expect(src.contains('SessionLifecycleGuard.instance.handlePaused()'),
+          isTrue);
+    });
+
+    test('心跳 ping 带超时（flush 挂起不死锁发送队列）+ 入站新鲜度哨兵',
+        () {
+      final src = srcOf('services/socket_service.dart');
+      expect(
+          src.contains(".timeout(const Duration(seconds: 5));"),
+          isTrue,
+          reason: '阶段 J 已知 dart:io flush 挂起竞态——ping 挂起会卡死'
+              '_sendTail（全部发送停摆且永不判死）');
+      expect(src.contains('_lastIncomingAt'), isTrue);
+      expect(src.contains('120s 未收到任何服务端消息'), isTrue,
+          reason: 'pong 链路失效兜底：120s 无入站强制重连');
+      expect(
+          src.contains('pausedDuringReceive'),
+          isTrue,
+          reason: '_receivingFile 卡真 + 真后台暂停 → 判死重连'
+              '（离线补发恢复），不得跳过探测形成死锁');
     });
   });
 }

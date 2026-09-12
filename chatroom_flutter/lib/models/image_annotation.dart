@@ -32,6 +32,12 @@ class AnnotationController extends ChangeNotifier {
   /// 已完成笔画（不可变视图）
   List<AnnotationStroke> get strokes => List.unmodifiable(_strokes);
 
+  /// 进行中笔画点列（不可变视图；空 = 未在绘制）
+  ///
+  /// Q1 真机反馈二轮（涂鸦不跟手根因）：画布必须绘制进行中笔画——
+  /// 仅在 endStroke 落入 strokes 后才绘制，表现为"松手才显现整笔"。
+  List<Offset> get draftPoints => List.unmodifiable(_draftPoints);
+
   Color get currentColor => _color;
   set currentColor(Color value) {
     _color = value;
@@ -55,14 +61,22 @@ class AnnotationController extends ChangeNotifier {
   bool get hasChanges => _strokes.isNotEmpty || _cropRect != null;
 
   /// 开始一笔（手势 onPanStart）
+  ///
+  /// Q1 真机反馈（跟手）：起笔即通知画布重绘——单点按压的落笔痕迹
+  /// 立即可见，不等松手。
   void startStroke(Offset point) {
     _draftPoints = [point];
+    notifyListeners();
   }
 
   /// 延伸当前一笔（手势 onPanUpdate）
+  ///
+  /// Q1 真机反馈（跟手）：拖动过程逐点通知重绘，笔迹随手指实时延伸
+  /// （原实现仅在 endStroke 通知，松手才显现整笔）。
   void extendStroke(Offset point) {
     if (_draftPoints.isEmpty) return;
     _draftPoints = [..._draftPoints, point];
+    notifyListeners();
   }
 
   /// 结束当前一笔（手势 onPanEnd）；单点同样成笔
