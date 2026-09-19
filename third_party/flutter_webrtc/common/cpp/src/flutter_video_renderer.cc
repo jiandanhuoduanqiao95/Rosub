@@ -1,5 +1,20 @@
 #include "flutter_video_renderer.h"
 
+#include <cstdarg>
+#include <cstdio>
+
+// Q2 diagnostics (temporary): remote video black-screen triage on Windows.
+// fprintf(stderr) follows the launcher's 2>&1 redirect into app_dbg.log.
+namespace {
+void q2diag(const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  vfprintf(stderr, fmt, args);
+  va_end(args);
+  fflush(stderr);
+}
+}  // namespace
+
 namespace flutter_webrtc_plugin {
 
 FlutterVideoRenderer::~FlutterVideoRenderer() {}
@@ -36,6 +51,29 @@ const FlutterDesktopPixelBuffer* FlutterVideoRenderer::CopyPixelBuffer(
                           static_cast<int>(pixel_buffer_->width),
                           static_cast<int>(pixel_buffer_->height));
 
+    // Q2 diag: converted first pixel + RAW decoded luma samples (triage:
+    // distinguishes "decoded frame is black" from "conversion is broken")
+    copy_count_++;
+    if (copy_count_ == 1 || copy_count_ % 120 == 0) {
+      const uint8_t* py = frame_->DataY();
+      const uint8_t* pu = frame_->DataU();
+      const uint8_t* pv = frame_->DataV();
+      int sy = frame_->StrideY();
+      int sh = frame_->height();
+      int sw = frame_->width();
+      int y0 = (py && sw > 0 && sh > 0) ? py[0] : -1;
+      int ymid = (py && sw > 4 && sh > 4) ? py[(sh / 2) * sy + sw / 2] : -1;
+      int u0 = pu ? pu[0] : -1;
+      int v0 = pv ? pv[0] : -1;
+      q2diag(
+          "[q2diag] CPB #%d tex=%lld %zux%zu px0=%u,%u,%u,%u "
+          "rawY=%d,ymid=%d,u=%d,v=%d stride=%d\n",
+          copy_count_, (long long)texture_id_, pixel_buffer_->width,
+          pixel_buffer_->height, rgb_buffer_ ? rgb_buffer_[0] : 0,
+          rgb_buffer_ ? rgb_buffer_[1] : 0, rgb_buffer_ ? rgb_buffer_[2] : 0,
+          rgb_buffer_ ? rgb_buffer_[3] : 0, y0, ymid, u0, v0, sy);
+    }
+
     pixel_buffer_->buffer = rgb_buffer_.get();
     mutex_.unlock();
     return pixel_buffer_.get();
@@ -45,6 +83,13 @@ const FlutterDesktopPixelBuffer* FlutterVideoRenderer::CopyPixelBuffer(
 }
 
 void FlutterVideoRenderer::OnFrame(scoped_refptr<RTCVideoFrame> frame) {
+  // Q2 diag: count incoming frames per renderer (1st + every 30th logged)
+  frame_count_++;
+  if (frame_count_ == 1 || frame_count_ % 30 == 0) {
+    q2diag("[q2diag] OnFrame #%d tex=%lld %dx%d rot=%d\n", frame_count_,
+           (long long)texture_id_, frame->width(), frame->height(),
+           (int)frame->rotation());
+  }
   if (!first_frame_rendered) {
     EncodableMap params;
     params[EncodableValue("event")] = "didFirstFrameRendered";
@@ -82,12 +127,16 @@ void FlutterVideoRenderer::OnFrame(scoped_refptr<RTCVideoFrame> frame) {
 }
 
 void FlutterVideoRenderer::SetVideoTrack(scoped_refptr<RTCVideoTrack> track) {
-  if (track_ != track) {
+  q2diag("[q2diag] SetVideoTrack tex=%lld new=%s old=%s\n",
+         (long long)texture_id_, track ? "track" : "<null>",
+         track_ ? "track" : "<null>");
+  if (track != track_) {
     if (track_)
       track_->RemoveRenderer(this);
     track_ = track;
     last_frame_size_ = {0, 0};
     first_frame_rendered = false;
+    frame_count_ = 0;
     if (track_)
       track_->AddRenderer(this);
   }
@@ -138,6 +187,9 @@ void FlutterVideoRendererManager::VideoRendererSetSrcObject(
   scoped_refptr<RTCMediaStream> stream =
       base_->MediaStreamForId(stream_id, owner_tag);
 
+  q2diag("[q2diag] SetSrcObject tex=%lld stream=%s track=%s found=%d\n",
+         (long long)texture_id, stream_id.c_str(), track_id.c_str(),
+         stream.get() ? 1 : 0);
   auto it = renderers_.find(texture_id);
   if (it != renderers_.end()) {
     FlutterVideoRenderer* renderer = it->second.get();

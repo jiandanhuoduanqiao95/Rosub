@@ -1,11 +1,15 @@
-/// 平台能力抽象（阶段 Q0-3 —— 各端差异收敛到统一接口）
+/// 平台能力抽象（阶段 Q0-3 —— 各端差异收敛到统一接口；Q2 Windows 接入）
 ///
 /// 通知闪烁 / 打开文件目录 / 文件拖拽 / 提示音 四类能力按平台分发：
 ///   - Linux：完整实现（FFI urgency / paplay-aplay / xdg-open /
 ///     GTK drag channel），行为与 Q0 之前完全一致（等价迁移）；
-///   - Windows / macOS：桌面语义占位（isSupported 分支已正确，
-///     具体实现按 §13.9 分期表在 Q2/Q3 接入 runner / desktop_drop
-///     类方案 / afplay 等）；
+///   - Windows：完整实现（Q2 接入）——通知闪烁 = win32 FlashWindowEx
+///     任务栏闪烁；提示音 = winmm PlaySoundW 复用生成式和弦 WAV；
+///     打开文件 = DesktopFileLauncher（cmd /c start，Q0 已实现）；
+///     拖拽 = runner 原生钩子（DragAcceptFiles/WM_DROPFILES →
+///     chatroom/dnd 通道）与 Linux 同协议复用 FileDrop.instance；
+///   - macOS：桌面语义占位（isSupported 分支已正确，Q3 接入
+///     Dock bounce / afplay / desktop_drop 类方案）；
 ///   - Android / iOS：应用内语义（系统级弹窗通知维持"不做"决策，
 ///     §13.6 排除清单；拖拽不适用 → isSupported=false）。
 ///
@@ -17,10 +21,12 @@
 ///
 /// 本文件与 taskbar_notifier.dart 存在受控循环引用：Linux 默认链
 /// 复用其 setUrgencyImpl / playSoundImpl 既有注入点（阶段 K 测试
-/// 兼容，行为不漂移）。
+/// 兼容，行为不漂移）；Windows 提示音复用其生成式 chime WAV。
 
+import 'dart:ffi';
 import 'dart:io';
 
+import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
 
 import '../config.dart';
@@ -77,6 +83,37 @@ List<String> emojiTextFallback() {
     case TargetPlatform.macOS:
     case TargetPlatform.fuchsia:
       return const [];
+  }
+}
+
+/// 独立成格纯 emoji 的主字体（R-P10 契约的平台分发）：COLRv1 内置字体
+/// 仅 Linux 渲染可靠；Windows 文字引擎认领 COLRv1 字形但栅格化输出空白
+/// （Q2 真机实测：网格空白带格轮廓、无 tofu 无异常），改用系统彩色
+/// emoji 字体；macOS 同理（Q3 验证）。emojiTextFallback 为空栈的平台，
+/// 缺字形时系统链自动兜底同款系统彩字。
+String emojiPickerFontFamily() {
+  switch (effectiveTargetPlatform()) {
+    case TargetPlatform.windows:
+      return 'Segoe UI Emoji';
+    case TargetPlatform.macOS:
+      return 'Apple Color Emoji';
+    default:
+      return 'NotoColorEmoji';
+  }
+}
+
+/// 界面主字体（Q2 真机"中文字体渲染怪异"修复）：Flutter Windows 缺省
+/// 主字体 Segoe UI 不含 CJK 字形，DirectWrite 兜底链会落到宋体等非预期
+/// 字形（观感突兀）；显式指定微软雅黑 UI（zh-CN Windows 原生应用的
+/// 标准 UI 字体，拉丁字形亦内置，全字体统一）。其余平台返回 null 维持
+/// 引擎缺省（Linux fontconfig 链 / Android Roboto+系统 CJK 均为既有
+/// 基线，勿顺手统一）。
+String? uiFontFamily() {
+  switch (effectiveTargetPlatform()) {
+    case TargetPlatform.windows:
+      return 'Microsoft YaHei UI';
+    default:
+      return null;
   }
 }
 
@@ -158,7 +195,19 @@ class PlatformCapabilities {
         _fileDrop = FileDrop.instance;
         break;
       case TargetPlatform.windows:
+        // 阶段 Q2 接入：
+        //  · 通知/提示音 = win32 真实现（FlashWindowEx / PlaySoundW，见下）
+        //  · 拖拽 = runner 原生钩子（flutter_window.cpp DragAcceptFiles /
+        //    WM_DROPFILES → DragQueryFileW）经 'chatroom/dnd' 通道转发
+        //    路径，Dart 侧与 Linux 同协议复用 FileDrop.instance 监听
+        //  · 打开文件 = DesktopFileLauncher（cmd /c start，Q0 已实现）
+        _notification = WindowsNotificationCapability();
+        _sound = WindowsSoundCapability();
+        _fileLauncher = DesktopFileLauncher(platform);
+        _fileDrop = FileDrop.instance;
+        break;
       case TargetPlatform.macOS:
+        // Q3 接入 Dock bounce / afplay / desktop_drop 类方案
         _notification = DesktopNotificationStub();
         _sound = DesktopSoundStub();
         _fileLauncher = DesktopFileLauncher(platform);
@@ -236,13 +285,143 @@ class LinuxFileLauncherCapability implements FileLauncherCapability {
 // 工厂在 Linux 返回 FileDrop.instance——既有逻辑零改动。
 
 // ============================================================
-// Windows / macOS —— 桌面语义占位（Q2/Q3 接入具体实现）
+// Windows —— 完整实现（阶段 Q2 接入，替代 Q0 占位）
+// ============================================================
+
+/// Win32 FLASHWINFO（FlashWindowEx 参数结构；hwnd 按 C 对齐规则在 x64
+/// 上 8 字节对齐，sizeOf 即 cbSize 应传值）
+final class _Flashwinfo extends Struct {
+  @Uint32()
+  external int cbSize;
+  @IntPtr()
+  external int hwnd;
+  @Uint32()
+  external int dwFlags;
+  @Uint32()
+  external int uCount;
+  @Uint32()
+  external int dwTimeout;
+}
+
+typedef _FlashWindowExNative = Int32 Function(Pointer<_Flashwinfo>);
+typedef _FlashWindowExDart = int Function(Pointer<_Flashwinfo>);
+typedef _FindWindowNative = IntPtr Function(Pointer<Utf16>, Pointer<Utf16>);
+typedef _FindWindowDart = int Function(Pointer<Utf16>, Pointer<Utf16>);
+typedef _PlaySoundNative = Int32 Function(Pointer<Utf16>, IntPtr, Uint32);
+typedef _PlaySoundDart = int Function(Pointer<Utf16>, int, int);
+
+/// Windows 任务栏闪烁（win32 FlashWindowEx）。
+///
+/// 未聚焦收新消息时 FLASHW_ALL|FLASHW_TIMERNOFG 持续闪烁直至窗口回到
+/// 前台（与 Linux urgency-hint 同语义）；窗口聚焦侧由 main.dart 的
+/// FocusTracker → TaskbarNotifier.clearUrgency → 本实现 FLASHW_STOP
+/// 双保险停止。窗口句柄经标准 runner 注册类名解析（win32_window.cpp
+/// kWindowClassName，flutter create 默认不变）；user32.dll 缺失（非
+/// Windows 宿主）或句柄不可得时静默降级（Q0-3 FFI 降级惯例）。
+class WindowsNotificationCapability implements NotificationCapability {
+  static const int _flashwStop = 0x0;
+  static const int _flashwAll = 0x3;
+  static const int _flashwTimerNofg = 0xC;
+
+  static DynamicLibrary? _user32;
+
+  DynamicLibrary? get _lib => _user32 ??= _open();
+
+  static DynamicLibrary? _open() {
+    try {
+      return DynamicLibrary.open('user32.dll');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  int _resolveWindowHandle() {
+    final lib = _lib;
+    if (lib == null) return 0;
+    try {
+      final findWindow =
+          lib.lookupFunction<_FindWindowNative, _FindWindowDart>('FindWindowW');
+      final className = 'FLUTTER_RUNNER_WIN32_WINDOW'.toNativeUtf16();
+      final hwnd = findWindow(className, nullptr);
+      calloc.free(className);
+      return hwnd;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  void _flash(int flags) {
+    final lib = _lib;
+    if (lib == null) return;
+    try {
+      final hwnd = _resolveWindowHandle();
+      if (hwnd == 0) return;
+      final flashWindowEx =
+          lib.lookupFunction<_FlashWindowExNative, _FlashWindowExDart>(
+              'FlashWindowEx');
+      final info = calloc<_Flashwinfo>();
+      info.ref
+        ..cbSize = sizeOf<_Flashwinfo>()
+        ..hwnd = hwnd
+        ..dwFlags = flags
+        ..uCount = 0
+        ..dwTimeout = 0;
+      flashWindowEx(info);
+      calloc.free(info);
+    } catch (_) {
+      // 闪烁失败不影响消息处理管线
+    }
+  }
+
+  @override
+  void flash() => _flash(_flashwAll | _flashwTimerNofg);
+
+  @override
+  void clearUrgency() => _flash(_flashwStop);
+}
+
+/// Windows 提示音（winmm PlaySoundW）。
+///
+/// 复用生成式科技感和弦 WAV（TaskbarNotifier.ensureChimeWav——与 Linux
+/// paplay 同一音色契约，勿替换为二进制资产）；SND_FILENAME|SND_ASYNC
+/// fire-and-forget，重复提醒自然打断上一响；SND_NODEFAULT 防止系统
+/// 默认提示音误响。winmm.dll 缺失或 WAV 生成失败时静默降级。
+class WindowsSoundCapability implements SoundCapability {
+  static const int _sndAsync = 0x0001;
+  static const int _sndNodefault = 0x0002;
+  static const int _sndFilename = 0x00020000;
+
+  @override
+  Future<void> playNotifySound() async {
+    final wav = TaskbarNotifier.ensureChimeWav();
+    if (wav == null) return;
+    DynamicLibrary? lib;
+    try {
+      lib = DynamicLibrary.open('winmm.dll');
+    } catch (_) {
+      return;
+    }
+    try {
+      final playSound =
+          lib.lookupFunction<_PlaySoundNative, _PlaySoundDart>('PlaySoundW');
+      final path = wav.toNativeUtf16();
+      playSound(path, 0, _sndFilename | _sndAsync | _sndNodefault);
+      calloc.free(path);
+    } catch (_) {
+      // 播放失败不影响消息处理管线
+    }
+  }
+}
+
+// ============================================================
+// macOS —— 桌面语义占位（Q3 接入 Dock bounce / afplay /
+// desktop_drop 类方案）
 // ============================================================
 
 class DesktopNotificationStub implements NotificationCapability {
   @override
   void flash() {
-    // Q2 Windows 任务栏闪烁 / Q3 macOS Dock bounce 接入 runner 后替换
+    // Q3 macOS Dock bounce 接入后替换
   }
 
   @override
@@ -252,7 +431,7 @@ class DesktopNotificationStub implements NotificationCapability {
 class DesktopSoundStub implements SoundCapability {
   @override
   Future<void> playNotifySound() async {
-    // Q2/Q3：afplay（macOS）/ PowerShell 播放（Windows）接入
+    // Q3：afplay 接入
   }
 }
 
@@ -284,7 +463,7 @@ class DesktopFileDropStub implements FileDropCapability {
 
   @override
   void ensureListening() {
-    // Q2/Q3：desktop_drop 类方案接入（MethodChannel 语义与 Linux 一致）
+    // Q3：desktop_drop 类方案接入（MethodChannel 语义与 Linux/Windows 一致）
   }
 
   @override

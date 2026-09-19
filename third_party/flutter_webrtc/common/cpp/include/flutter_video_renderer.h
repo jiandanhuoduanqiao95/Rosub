@@ -48,6 +48,9 @@ class FlutterVideoRenderer
   };
   FrameSize last_frame_size_ = {0, 0};
   bool first_frame_rendered = false;
+  // Q2 diag (temporary): incoming frame counter for black-screen triage
+  int frame_count_ = 0;
+  mutable int copy_count_ = 0;
   TextureRegistrar* registrar_ = nullptr;
   std::unique_ptr<EventChannelProxy> event_channel_;
   int64_t texture_id_ = -1;

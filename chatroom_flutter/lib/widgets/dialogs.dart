@@ -2328,7 +2328,8 @@ class _FileListDialogState extends State<_FileListDialog> {
                           .replaceFirst('.000', '')
                           .substring(0, 16);
                       final path = _localPathOfRecord(f);
-                      final downloaded = path != null && File(path).existsSync();
+                      final downloaded =
+                          path != null && File(path).existsSync();
                       return ListTile(
                         dense: true,
                         leading: Icon(
@@ -2360,8 +2361,7 @@ class _FileListDialogState extends State<_FileListDialog> {
               Padding(
                 padding: const EdgeInsets.only(right: 12),
                 child: Icon(Icons.info_outline,
-                    size: 18,
-                    color: Theme.of(context).colorScheme.error),
+                    size: 18, color: Theme.of(context).colorScheme.error),
               ),
             TextButton(
               onPressed: () => Navigator.pop(context),
@@ -3311,14 +3311,15 @@ class _StickerPickerPanelState extends State<StickerPickerPanel> {
                   Theme.of(ctx).colorScheme.primary.withValues(alpha: 0.08),
               onTap: () => widget.onEmojiPicked(emojis[i]),
               child: Center(
-                // R-P10：指定 COLRv1 彩色字体——缺省时落到系统兜底字体
-                // （DejaVu/Noto Symbols 等），部分表情渲染为黑白字形
+                // R-P10：emoji 主字体按平台分发（emojiPickerFontFamily）——
+                // Linux 内置 COLRv1；Windows 该字体栅格化空白（Q2 真机），
+                // 用系统 Segoe UI Emoji
                 child: Text(emojis[i],
-                    style: const TextStyle(
+                    style: TextStyle(
                         fontSize: 24,
                         // R-P26：第二兜底系统 Noto Color Emoji（CBDT 彩色），
                         // 内置字体加载失败时仍走彩色而非 fontconfig 黑白字形
-                        fontFamily: 'NotoColorEmoji',
+                        fontFamily: emojiPickerFontFamily(),
                         fontFamilyFallback: AppConfig.emojiFontStack)),
               ),
             ),
@@ -4093,8 +4094,7 @@ class _FilePreviewDialogState extends State<_FilePreviewDialog> {
         // Q1 四轮（问题5）：Android 移除"打开所在目录"——接收目录位于
         // 应用内部存储，文件管理器不可见，该功能在移动端无意义（导出
         // 走"分享"）；桌面保持 xdg-open/系统打开目录语义
-        if (exists &&
-            effectiveTargetPlatform() != TargetPlatform.android)
+        if (exists && effectiveTargetPlatform() != TargetPlatform.android)
           TextButton.icon(
             onPressed: () => PlatformCapabilities.fileLauncher
                 .openDirectory(File(path).parent.path),

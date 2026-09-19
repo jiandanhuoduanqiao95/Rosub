@@ -1379,6 +1379,17 @@ void FlutterPeerConnectionObserver::OnTrack(
   if (track.get()) {
     remote_tracks_[track->id().std_string()] = track;
   }
+  // PATCH(chatroom, Q2-J defect#2): unified-plan onTrack must also register
+  // the remote streams into remote_streams_ — that map was only populated
+  // by the legacy OnAddStream callback, which does not fire reliably on the
+  // m150 desktop prebuilt, so renderer srcObject lookups
+  // (MediaStreamForId -> remote_streams_) missed ("SetSrcObject found=0"
+  // with a valid stream id) and the remote video rendered black. The Dart
+  // MediaStream id/ownerTag come from mediaStreamToMap(receiver->streams())
+  // below, so registering the same objects here makes the lookup always hit.
+  for (scoped_refptr<RTCMediaStream> item : receiver->streams().std_vector()) {
+    remote_streams_[item->id().std_string()] = item;
+  }
   EncodableMap params;
   EncodableList streams_info;
   auto streams = receiver->streams();

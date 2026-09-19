@@ -1897,8 +1897,9 @@ class _MessageMenuSheetState extends State<_MessageMenuSheet> {
                                   for (final emoji in emojis)
                                     ActionChip(
                                       label: Text(emoji,
-                                          style: const TextStyle(
-                                              fontFamily: 'NotoColorEmoji',
+                                          style: TextStyle(
+                                              fontFamily:
+                                                  emojiPickerFontFamily(),
                                               fontFamilyFallback:
                                                   AppConfig.emojiFontStack)),
                                       onPressed: () => _invoke(() =>

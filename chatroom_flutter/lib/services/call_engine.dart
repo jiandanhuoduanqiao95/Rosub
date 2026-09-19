@@ -106,7 +106,12 @@ class WebRtcCallEngine implements CallEngine {
           : name.toLowerCase();
       _listener?.onConnectionState(normalized);
     };
-    if (Platform.isLinux && video) {
+    // Q2 排障开关（CHATROOM_Q2_NO_LOOPBACK=1）：跳过 Linux 本端预览回环，
+    // A/B 判别"同一本地轨被加进第二个 PC 是否干扰主 PC 发送"——
+    // 用户实测 Linux→对端视频黑 + 对端听不到 Windows 音频，怀疑发送侧
+    // 编码管道问题（getStats 判别）。生产缺省不受影响（不设该变量）。
+    final noLoopback = Platform.environment['CHATROOM_Q2_NO_LOOPBACK'] == '1';
+    if (Platform.isLinux && video && !noLoopback) {
       await _startLoopbackPreview();
     } else {
       _localRenderer?.srcObject = _local;
@@ -170,10 +175,36 @@ class WebRtcCallEngine implements CallEngine {
     'optional': <Map<String, dynamic>>[],
   };
 
+  /// Q2 修复（桌面↔桌面远端视频黑帧）：m150 桌面预编译 libwebrtc 协商到
+  /// H264 时解码产**纯黑帧**（像素探针实锤：OnFrame 正常、CopyPixelBuffer
+  /// px0 恒为 0,0,0；本端采集预览正常）——Android 预编译不含 H264 故
+  /// R1 Android↔Linux 走 VP8 正常，桌面双端才复现。从本地 SDP 中剔除
+  /// H264 载荷类型，强制 VP8/VP9（两端 libwebrtc 自带软解，零外部依赖）。
+  /// 从（协商后的）SDP 提取首个视频载荷的编码名（诊断用）
+  static String primaryVideoCodec(String? sdp) {
+    if (sdp == null || sdp.isEmpty) return '?';
+    String? firstPt;
+    for (final line in sdp.split(RegExp(r'\r?\n'))) {
+      final t = line.trim();
+      if (t.startsWith('m=video ')) {
+        final parts = t.split(' ');
+        if (parts.length > 3) firstPt = parts[3];
+        break;
+      }
+    }
+    if (firstPt == null) return '?';
+    for (final line in sdp.split(RegExp(r'\r?\n'))) {
+      final m = RegExp(r'^a=rtpmap:(\d+) (\S+)/').firstMatch(line.trim());
+      if (m != null && m.group(1) == firstPt) return m.group(2)!;
+    }
+    return 'pt$firstPt';
+  }
+
   @override
   Future<Map<String, Object?>> createOffer() async {
     final desc = await _pc!.createOffer(_sdpConstraints);
     await _pc!.setLocalDescription(desc);
+    debugPrint('[call-trace] offer codec=${primaryVideoCodec(desc.sdp)}');
     return desc.toMap();
   }
 
@@ -189,6 +220,7 @@ class WebRtcCallEngine implements CallEngine {
   Future<Map<String, Object?>> createAnswer() async {
     final desc = await _pc!.createAnswer(_sdpConstraints);
     await _pc!.setLocalDescription(desc);
+    debugPrint('[call-trace] answer codec=${primaryVideoCodec(desc.sdp)}');
     return desc.toMap();
   }
 
@@ -228,14 +260,16 @@ class WebRtcCallEngine implements CallEngine {
   @override
   Future<void> setMicMuted(bool muted) async {
     // track.enabled=false 即停止发送（发静音包），是标准的麦克风静音
-    for (final track in _local?.getAudioTracks() ?? const <MediaStreamTrack>[]) {
+    for (final track
+        in _local?.getAudioTracks() ?? const <MediaStreamTrack>[]) {
       track.enabled = !muted;
     }
   }
 
   @override
   Future<void> setCameraEnabled(bool enabled) async {
-    for (final track in _local?.getVideoTracks() ?? const <MediaStreamTrack>[]) {
+    for (final track
+        in _local?.getVideoTracks() ?? const <MediaStreamTrack>[]) {
       track.enabled = enabled;
     }
   }
@@ -247,6 +281,43 @@ class WebRtcCallEngine implements CallEngine {
     // AudioSwitch 无关），iOS 待 Q4 接入
     if (!Platform.isAndroid) return;
     Helper.setSpeakerphoneOn(on);
+  }
+
+  /// Q2 排障：周期性上报 RTP 收发统计（判别"发送端编码产黑/哑"与
+  /// "接收端解码黑/哑"）。outbound-rtp 看 bytesSent/framesEncoded，
+  /// inbound-rtp 看 bytesReceived/framesDecoded。
+  Future<void> dumpStats(String tag) async {
+    try {
+      final stats = await _pc?.getStats();
+      if (stats == null) return;
+      for (final s in stats) {
+        final v = s.values;
+        final kind = v['kind'] ?? v['mediaType'] ?? '?';
+        if (s.type == 'outbound-rtp') {
+          debugPrint('[call-stats] $tag OUT $kind '
+              'bytes=${v['bytesSent']} pkts=${v['packetsSent']} '
+              'framesEnc=${v['framesEncoded'] ?? v['framesSent']}');
+        } else if (s.type == 'inbound-rtp') {
+          debugPrint('[call-stats] $tag IN $kind '
+              'bytes=${v['bytesReceived']} pkts=${v['packetsReceived']} '
+              'framesDec=${v['framesDecoded']}');
+        }
+        // Q2 排障：音频电平客观测量（判别"发送端采集弱"与"接收端播小"）
+        if (kind == 'audio') {
+          final level = v['audioLevel'] ?? v['totalAudioEnergy'];
+          if (level != null) {
+            debugPrint('[call-stats] $tag AUD ${s.type} level=$level '
+                'energy=${v['totalAudioEnergy']} '
+                'totalEnergy=${v['totalSamplesDuration']}');
+          } else if (s.type == 'media-source' || s.type == 'track') {
+            debugPrint(
+                '[call-stats] $tag AUD ${s.type} fields=${v.keys.toList()}');
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[call-stats] $tag FAIL $e');
+    }
   }
 
   @override

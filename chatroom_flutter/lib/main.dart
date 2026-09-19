@@ -23,6 +23,7 @@ import 'services/sticker_store.dart';
 import 'services/taskbar_notifier.dart';
 import 'services/theme_settings.dart';
 import 'platform/android_system.dart';
+import 'platform/capabilities.dart';
 
 import 'config.dart';
 
@@ -37,6 +38,13 @@ void main() async {
   if (const bool.fromEnvironment('dart.vm.product') == false &&
       Platform.environment['CHATROOM_WEBRTC_SPIKE'] == 'localvideo') {
     runApp(const WebrtcLocalVideoApp());
+    return;
+  }
+  // Q2-J 缺陷 #2（Windows 远端视频黑屏）诊断：无 UI 受话端（q2call 模式，
+  // 见 webrtc_spike.dart 注释）
+  if (const bool.fromEnvironment('dart.vm.product') == false &&
+      Platform.environment['CHATROOM_WEBRTC_SPIKE'] == 'q2call') {
+    runApp(const Q2CallDiagApp());
     return;
   }
   // R-P27（用户复测"表情黑白"轮换出现）：构建标识打印到启动日志——
@@ -182,6 +190,10 @@ class _ChatroomAppState extends State<ChatroomApp> with WidgetsBindingObserver {
     return ThemeData(
       colorScheme: scheme,
       useMaterial3: true,
+      // Q2 修复：Windows 缺省主字体 Segoe UI 无 CJK 字形，DirectWrite
+      // 兜底落到非预期字形（观感怪异）——显式微软雅黑 UI；其余平台
+      // null 维持引擎缺省（Linux/Android 既有基线）
+      fontFamily: uiFontFamily(),
       scaffoldBackgroundColor: scheme.surface,
       appBarTheme: AppBarTheme(
         centerTitle: false,

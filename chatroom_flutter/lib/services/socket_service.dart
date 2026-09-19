@@ -1533,7 +1533,56 @@ class SocketService implements CallSignaling {
       // ---- 私聊消息 ----
       case 'chat':
         final text = utf8.decode(body);
-        if (isHistory) break; // 初始数据阶段已处理
+        if (isHistory) {
+          // Q2 修复（Spike 停滞根因）：登录初始数据窗口关闭后到达的
+          // 离线补发（history=true）此前被静默丢弃——服务端消化积压慢于
+          // 客户端窗口判定时消息永久丢失（run7 停滞 985 铁证）。改按
+          // 补发语义落地（镜像 _receiveInitialData 的 isHistory 分支）：
+          // chatKey 路由含 sender==自己→to、status 取 header 缺省
+          // delivered（不计未读）、不提醒不发回执；addMessage 的
+          // _messageMap 去重天然防双投（窗口内已落地的不再重复）。
+          final sender = from ?? '系统';
+          final isSystemSender =
+              sender == '系统' || sender == '服务器' || sender.startsWith('[');
+          if (isSystemSender) {
+            if (sender == '[系统公告]') {
+              state.addMessage(
+                '服务器',
+                ChatMessage(
+                  sender: sender,
+                  content: text,
+                  type: 'system',
+                  messageId: messageId,
+                  timestamp: _parseTimestamp(header['timestamp'] as String?),
+                  status: header['status'] as String? ?? 'delivered',
+                ),
+              );
+            } else {
+              state.showNotice(text);
+            }
+          } else {
+            final to = header['to'] as String?;
+            final chatKey =
+                (sender == state.username) ? (to ?? sender) : sender;
+            state.addMessage(
+              chatKey,
+              ChatMessage(
+                sender: sender,
+                content: text,
+                type: 'chat',
+                messageId: messageId,
+                timestamp: _parseTimestamp(header['timestamp'] as String?),
+                isHistory: false,
+                status: header['status'] as String? ?? 'delivered',
+                replyTo: header['reply_to'] as String?,
+                replyPreview: header['reply_preview'] as String?,
+                reactions:
+                    _parseReactionsHeader(header['reactions'] as String?),
+              ),
+            );
+          }
+          break;
+        }
         final sender = from ?? '系统';
         // 阶段 K5：引用/转发元数据
         final replyTo = header['reply_to'] as String?;

@@ -59,7 +59,7 @@ class AppConfig {
   /// 递增，显示在登录页页脚并打印到启动日志——多客户端排查"谁在跑
   /// 旧构建"（旧构建同时呈现黑白表情 + media_kit non-platform thread
   /// ERROR）时一眼可辨。每次修订轮次更新此值。
-  static const String buildStamp = 'r1s11';
+  static const String buildStamp = 'q2r2';
 
   /// 彩色 emoji 字体栈（R-P26 硬化）：首选内置 COLRv1 字体，第二兜底
   /// 系统 Noto Color Emoji（CBDT 彩色位图，Ubuntu 默认安装、覆盖全部
@@ -67,6 +67,9 @@ class AppConfig {
   /// fontconfig 的黑白符号字体（DejaVu/Noto Sans Symbols）。独立成格
   /// 的 emoji 用 [emojiFontFamily] 打头（R-P10 契约）；混排文本用
   /// [emojiFontFallback] 兜底（主字体链在前，emoji 缺字形时兜底）。
+  /// COLRv1 打头仅限 Linux 渲染语义：Windows 桌面引擎认领 COLRv1 字形
+  /// 却栅格化输出空白（Q2 真机实测），网格主字体走
+  /// emojiPickerFontFamily()（capabilities.dart 平台分发）。
   static const List<String> emojiFontStack = [
     'NotoColorEmoji',
     'Noto Color Emoji',
