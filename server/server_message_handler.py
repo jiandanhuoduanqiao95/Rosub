@@ -754,10 +754,12 @@ class MessageHandler:
                     if message.lower() == "quit":
                         break
 
-                elif msg_type.startswith("call_"):
-                    # 阶段 R1：通话信令中继（invite/accept/reject/cancel/hangup/
-                    # offer/answer/ice）——状态与转发逻辑在 CallHandler，
-                    # 异常隔离沿用本 try/except（连接不断开）
+                elif (msg_type.startswith("call_")
+                      or msg_type.startswith("group_call_")):
+                    # 阶段 R1/R2：通话信令中继（一对一 invite/accept/.../
+                    # ice + 群通话 group_call_invite/join/leave/media）——
+                    # 状态与转发逻辑在 CallHandler，异常隔离沿用本
+                    # try/except（连接不断开）
                     self.server.call_handler.handle(
                         username, ssock, msg_type, header, data)
 

@@ -22,12 +22,61 @@ class _FakeSignaling implements CallSignaling {
       {String? callType, String? body}) async {
     sends.add(type);
   }
+
+  @override
+  Future<void> sendGroupCall(String type, int groupId, String callId,
+      {String? callType, String? mic, String? cam}) async {
+    sends.add(type);
+  }
+}
+
+class _FakePeerSession implements CallPeerSession {
+  _FakePeerSession(this.peerId);
+
+  @override
+  final String peerId;
+
+  @override
+  Future<Map<String, Object?>> createAnswer() async =>
+      {'sdp': 'pa', 'type': 'answer'};
+
+  @override
+  Future<Map<String, Object?>> createOffer() async =>
+      {'sdp': 'po', 'type': 'offer'};
+
+  @override
+  Future<void> addRemoteCandidate(Map<String, Object?> candidate) async {}
+
+  @override
+  void attachRenderer(RTCVideoRenderer? renderer) {}
+
+  @override
+  Future<void> close() async {}
+
+  @override
+  MediaStream? get remoteStream => null;
+
+  @override
+  Future<void> setRemoteAnswer(Map<String, Object?> description) async {}
+
+  @override
+  Future<void> setRemoteOffer(Map<String, Object?> description) async {}
 }
 
 class _FakeEngine implements CallEngine {
   @override
   Future<Map<String, Object?>> createAnswer() async =>
       {'sdp': 'a', 'type': 'answer'};
+
+  @override
+  Future<CallPeerSession> createPeerSession(String peerId) async =>
+      _FakePeerSession(peerId);
+
+  @override
+  CallPeerSession? peerSession(String peerId) => null;
+
+  @override
+  Future<void> ensureMedia({required bool video}) async {}
 
   @override
   Future<Map<String, Object?>> createOffer() async =>
@@ -61,6 +110,9 @@ class _FakeEngine implements CallEngine {
   bool get hasVideo => false;
 
   @override
+  bool get hasLocalMedia => true;
+
+  @override
   MediaStream? get localStream => null;
 
   @override
@@ -74,19 +126,16 @@ class _FakeEngine implements CallEngine {
 }
 
 void main() {
-  testWidgets('通话中控制排：静音/挂断/最小化（语音通话无摄像头键；桌面无免提键）',
-      (tester) async {
+  testWidgets('通话中控制排：静音/挂断/最小化（语音通话无摄像头键；桌面无免提键）', (tester) async {
     final signaling = _FakeSignaling();
     final svc = CallService(signaling: signaling, engine: _FakeEngine());
     // testWidgets 跑在 FakeAsync zone：Future.delayed 永不完成，
     // 用 tester.pump 推进零时长定时器驱动状态机
     await svc.startCall('bob', CallType.audio);
-    svc.handleSignal('call_accept',
-        {'from': 'bob', 'call_id': svc.callId}, Uint8List(0));
-    await tester.pump();
     svc.handleSignal(
-        'call_answer',
-        {'from': 'bob', 'call_id': svc.callId},
+        'call_accept', {'from': 'bob', 'call_id': svc.callId}, Uint8List(0));
+    await tester.pump();
+    svc.handleSignal('call_answer', {'from': 'bob', 'call_id': svc.callId},
         Uint8List.fromList(utf8.encode('{"sdp":"a","type":"answer"}')));
     await tester.pump();
     expect(svc.phase, CallPhase.active);
@@ -116,9 +165,7 @@ void main() {
     final svc = CallService(signaling: signaling, engine: _FakeEngine());
 
     await tester.pumpWidget(const MaterialApp(home: Text('home')));
-    tester
-        .state<NavigatorState>(find.byType(Navigator))
-        .push(MaterialPageRoute(
+    tester.state<NavigatorState>(find.byType(Navigator)).push(MaterialPageRoute(
           builder: (_) => CallScreen(callService: svc),
         ));
     await tester.pumpAndSettle();
@@ -149,9 +196,7 @@ void main() {
     final svc = CallService(signaling: signaling, engine: _FakeEngine());
 
     await tester.pumpWidget(const MaterialApp(home: Text('home')));
-    tester
-        .state<NavigatorState>(find.byType(Navigator))
-        .push(MaterialPageRoute(
+    tester.state<NavigatorState>(find.byType(Navigator)).push(MaterialPageRoute(
           builder: (_) => CallScreen(callService: svc),
         ));
     await tester.pumpAndSettle();
@@ -173,6 +218,5 @@ void main() {
 }
 
 extension on _FakeSignaling {
-  int sentCount(String type) =>
-      sends.where((s) => s == type).length;
+  int sentCount(String type) => sends.where((s) => s == type).length;
 }

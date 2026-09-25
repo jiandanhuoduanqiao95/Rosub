@@ -48,8 +48,7 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen>
-    with WidgetsBindingObserver {
+class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final _state = AppState.instance;
   final _inputCtrl = TextEditingController();
 
@@ -1153,8 +1152,7 @@ class _ChatScreenState extends State<ChatScreen>
     final inCompactChat = compact && _inCompactChat;
     // Q1 四轮（问题3）：Android 会话列表态 AppBar 不再显示
     // "聊天室 - 用户名"字样（聊天态会话名保留）；桌面基线不变
-    final hideListTitle =
-        effectiveTargetPlatform() == TargetPlatform.android;
+    final hideListTitle = effectiveTargetPlatform() == TargetPlatform.android;
     final page = ListenableBuilder(
       listenable: _state,
       builder: (context, _) {
@@ -1181,8 +1179,7 @@ class _ChatScreenState extends State<ChatScreen>
             // （ChatView 内部自带"与 xx 的聊天"标题栏）。
             centerTitle: inCompactChat,
             title: _state.currentChat != null &&
-                    (inCompactChat ||
-                        (hideListTitle && !compact))
+                    (inCompactChat || (hideListTitle && !compact))
                 ? Text(
                     _state.displayNameForChat(_state.currentChat!),
                     overflow: TextOverflow.ellipsis,
@@ -1197,53 +1194,53 @@ class _ChatScreenState extends State<ChatScreen>
           body: Stack(
             children: [
               Column(
-            children: [
-              // === 重连中横幅 ===
-              if (_state.connectionStatus == ConnectionStatus.reconnecting)
-                Material(
-                  color: Theme.of(context).colorScheme.errorContainer,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 10),
-                    child: Row(
-                      children: [
-                        const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
+                children: [
+                  // === 重连中横幅 ===
+                  if (_state.connectionStatus == ConnectionStatus.reconnecting)
+                    Material(
+                      color: Theme.of(context).colorScheme.errorContainer,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 10),
+                        child: Row(
+                          children: [
+                            const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                '连接断开，正在重连…'
+                                '（第 ${_state.reconnectAttempts} 次）',
+                                style: TextStyle(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onErrorContainer),
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: _logout,
+                              child: const Text('退出'),
+                            ),
+                          ],
                         ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            '连接断开，正在重连…'
-                            '（第 ${_state.reconnectAttempts} 次）',
-                            style: TextStyle(
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .onErrorContainer),
-                          ),
-                        ),
-                        TextButton(
-                          onPressed: _logout,
-                          child: const Text('退出'),
-                        ),
-                      ],
+                      ),
                     ),
+                  // Q1 七轮（问题1）：全局传输指示条——任何界面（列表态/
+                  // 聊天态/宽屏）恒可见，点击跳转到传输所属会话
+                  if (_state.activeTransfers.isNotEmpty)
+                    _TransferBanner(
+                      transfers: _state.activeTransfers,
+                      filenameOf: (id) => _state.messageById(id)?.filename,
+                      onTapTransfer: _jumpToTransferChat,
+                    ),
+                  Expanded(
+                    child: compact ? _buildCompactBody() : _buildWideBody(),
                   ),
-                ),
-              // Q1 七轮（问题1）：全局传输指示条——任何界面（列表态/
-              // 聊天态/宽屏）恒可见，点击跳转到传输所属会话
-              if (_state.activeTransfers.isNotEmpty)
-                _TransferBanner(
-                  transfers: _state.activeTransfers,
-                  filenameOf: (id) => _state.messageById(id)?.filename,
-                  onTapTransfer: _jumpToTransferChat,
-                ),
-              Expanded(
-                child: compact ? _buildCompactBody() : _buildWideBody(),
+                ],
               ),
-            ],
-          ),
               // R1 真机十轮：最小化通话的悬浮返回条（微信式，通话中恒显示，
               // 点击恢复通话界面；ended 期间显示结束原因，idle 自动消失）
               if (_callSnapshotMinimized &&
@@ -1296,9 +1293,9 @@ class _ChatScreenState extends State<ChatScreen>
       _callRouteOpen = true;
       Navigator.of(context, rootNavigator: true)
           .push(MaterialPageRoute(
-        fullscreenDialog: true,
-        builder: (_) => CallScreen(callService: svc),
-      ))
+            fullscreenDialog: true,
+            builder: (_) => CallScreen(callService: svc),
+          ))
           .then((_) => _callRouteOpen = false);
     }
     setState(() {});
@@ -1360,7 +1357,13 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   /// 阶段 R1：通话类型选择（微信式底部弹层；compact 单入口）
+  /// R2 修订：群会话弹群通话层（加入进行中 / 发起语音·视频群通话）
   void _showCallTypePicker() {
+    final chat = _state.currentChat;
+    if (chat != null && chat.startsWith('group_')) {
+      _showGroupCallSheet();
+      return;
+    }
     showModalBottomSheet<void>(
       context: context,
       builder: (sheetContext) => SafeArea(
@@ -1389,12 +1392,91 @@ class _ChatScreenState extends State<ChatScreen>
     );
   }
 
-  /// 阶段 R1：发起通话（私聊专属入口）
+  /// 阶段 R2：群通话弹层——房间存续期可中途加入（knownGroupCalls 注册表）
+  void _showGroupCallSheet() {
+    final chat = _state.currentChat!;
+    final gid = int.tryParse(chat.substring('group_'.length));
+    if (gid == null) return;
+    var groupName = '群聊';
+    for (final g in _state.groups) {
+      if (g.id == gid) {
+        groupName = g.name;
+        break;
+      }
+    }
+    final svc = widget.socketService.callService;
+    final ongoing = svc.knownGroupCalls[gid];
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (ongoing != null)
+              ListTile(
+                leading: const Icon(Icons.groups_rounded),
+                title: Text('加入进行中的群通话（${ongoing.participants.length}人）'),
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  _joinGroupCall(gid);
+                },
+              ),
+            ListTile(
+              leading: const Icon(Icons.call_rounded),
+              title: const Text('发起语音群通话'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                startOutgoingGroupCall(
+                    context, svc, gid, groupName, CallType.audio);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.videocam_rounded),
+              title: const Text('发起视频群通话'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                startOutgoingGroupCall(
+                    context, svc, gid, groupName, CallType.video);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 阶段 R2：中途加入进行中的群通话（按房间类型请求权限）
+  Future<void> _joinGroupCall(int gid) async {
+    final info = widget.socketService.callService.knownGroupCalls[gid];
+    if (info == null) return;
+    final granted = await AndroidSystem.requestCallPermissions(
+        video: info.callType == CallType.video);
+    if (!granted) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('需要麦克风/摄像头权限才能通话')),
+        );
+      }
+      return;
+    }
+    final ok = await widget.socketService.callService.joinGroupRoom(gid);
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('当前正在通话中')),
+      );
+    }
+  }
+
+  /// 阶段 R1：发起通话（R2 起：私聊直呼，群聊弹群通话层）
   Future<void> _startCall(CallType type) async {
-    final peer = _state.currentChat;
-    if (peer == null || !_isPrivateChat(peer)) return;
-    await startOutgoingCall(context, widget.socketService.callService, peer,
-        type);
+    final chat = _state.currentChat;
+    if (chat == null || chat == '服务器') return;
+    if (!_isPrivateChat(chat)) {
+      _showGroupCallSheet();
+      return;
+    }
+    await startOutgoingCall(
+        context, widget.socketService.callService, chat, type);
   }
 
   /// 阶段 R1：私聊会话判定（系统会话/群聊不支持通话）
@@ -1421,9 +1503,9 @@ class _ChatScreenState extends State<ChatScreen>
             ),
           ),
         ),
-      // 阶段 R1：通话入口（单按钮收敛——compact AppBar 图标预算紧张，
-      // 语音/视频经底部弹层选择；群聊/系统会话不提供）
-      if (!isSystem && !current.startsWith('group_'))
+      // 阶段 R1/R2：通话入口（单按钮收敛——compact AppBar 图标预算紧张，
+      // 私聊经底部弹层选择语音/视频，群聊弹群通话层；系统会话不提供）
+      if (!isSystem)
         IconButton(
           tooltip: '通话',
           icon: const Icon(Icons.call_rounded),
@@ -1687,13 +1769,13 @@ class _ChatScreenState extends State<ChatScreen>
             onSearchVisibilityChanged: compactChat
                 ? (v) => setState(() => _chatSearchVisible = v)
                 : null,
-            // 阶段 R1：宽屏头部通话入口（仅私聊会话提供）
-            onVoiceCall: _isPrivateChat(_state.currentChat!)
-                ? () => _startCall(CallType.audio)
-                : null,
-            onVideoCall: _isPrivateChat(_state.currentChat!)
-                ? () => _startCall(CallType.video)
-                : null,
+            // 阶段 R1/R2：宽屏头部通话入口（系统会话不提供；群聊弹群通话层）
+            onVoiceCall: _state.currentChat == '服务器'
+                ? null
+                : () => _startCall(CallType.audio),
+            onVideoCall: _state.currentChat == '服务器'
+                ? null
+                : () => _startCall(CallType.video),
             onRetrySend: _retrySendMessage,
             // 阶段 K2：输入变化 → 本地草稿状态 + 防抖自动保存
             onInputChanged: _onInputChanged,
@@ -2028,8 +2110,8 @@ class _VideoViewerPageState extends State<_VideoViewerPage> {
     );
   }
 
-/// Q1 七轮（问题1）：全局传输指示条——任何界面（列表态/聊天态/宽屏）
-/// 恒可见；逐传输显示方向/文件名/百分比 + 细进度线，点击跳转到传输
+  /// Q1 七轮（问题1）：全局传输指示条——任何界面（列表态/聊天态/宽屏）
+  /// 恒可见；逐传输显示方向/文件名/百分比 + 细进度线，点击跳转到传输
 }
 
 class _TransferBanner extends StatelessWidget {
@@ -2111,8 +2193,8 @@ class _TransferBanner extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               child: Text(
                 '共 ${transfers.length} 个传输任务',
-                style: TextStyle(
-                    fontSize: 11, color: scheme.onSecondaryContainer),
+                style:
+                    TextStyle(fontSize: 11, color: scheme.onSecondaryContainer),
               ),
             ),
         ],

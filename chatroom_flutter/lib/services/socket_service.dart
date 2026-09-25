@@ -41,9 +41,11 @@ class SocketService implements CallSignaling {
 
   /// 阶段 R1：通话服务（状态机 + WebRTC 会话）——信令经本类收发。
   /// 惰性初始化：未收到/未发起通话的测试与普通会话不触碰 WebRTC。
-  late final CallService callService =
-      CallService(signaling: this, engine: callEngineOverride)
-        ..addListener(_forwardCallPhase);
+  late final CallService callService = CallService(
+      signaling: this,
+      engine: callEngineOverride,
+      selfUsername: () => state.username)
+    ..addListener(_forwardCallPhase);
 
   /// 阶段 R1：通话状态变化回调（ChatScreen 挂载通话界面路由用）。
   /// 回调字段而非 getter：MockSocketService（mocktail）未打桩的
@@ -352,6 +354,17 @@ class SocketService implements CallSignaling {
     final headers = <String, dynamic>{'to': to, 'call_id': callId};
     if (callType != null) headers['call_type'] = callType;
     return _sendMessage(type, body ?? '', extraHeaders: headers);
+  }
+
+  /// 阶段 R2：发送群通话信令（invite/join/leave/media，经既有发送队列）
+  @override
+  Future<void> sendGroupCall(String type, int groupId, String callId,
+      {String? callType, String? mic, String? cam}) {
+    final headers = <String, dynamic>{'group_id': groupId, 'call_id': callId};
+    if (callType != null) headers['call_type'] = callType;
+    if (mic != null) headers['mic'] = mic;
+    if (cam != null) headers['cam'] = cam;
+    return _sendMessage(type, '', extraHeaders: headers);
   }
 
   // ============================================================
@@ -1301,7 +1314,11 @@ class SocketService implements CallSignaling {
         case 'call_offer':
         case 'call_answer':
         case 'call_ice':
-          // 阶段 R1：登录/重连初始数据窗口内到达的通话信令不得丢弃
+        case 'group_call_invite':
+        case 'group_call_joined':
+        case 'group_call_left':
+        case 'group_call_media':
+          // 阶段 R1/R2：登录/重连初始数据窗口内到达的通话信令不得丢弃
           callService.handleSignal(type!, header, body as Uint8List);
           break;
 
@@ -2319,7 +2336,11 @@ class SocketService implements CallSignaling {
       case 'call_offer':
       case 'call_answer':
       case 'call_ice':
-        // 阶段 R1：通话信令转交通话服务（状态机 + WebRTC）
+      case 'group_call_invite':
+      case 'group_call_joined':
+      case 'group_call_left':
+      case 'group_call_media':
+        // 阶段 R1/R2：通话信令转交通话服务（状态机 + WebRTC）
         callService.handleSignal(type!, header, body);
         break;
 

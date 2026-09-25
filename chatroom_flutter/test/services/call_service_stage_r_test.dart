@@ -50,6 +50,7 @@ class _Harness {
     });
     when(() => engine.open(video: any(named: 'video')))
         .thenAnswer((_) async {});
+    when(() => engine.hasLocalMedia).thenReturn(true);
     when(() => engine.close()).thenAnswer((_) async {});
     when(() => engine.setMicMuted(any())).thenAnswer((_) async {});
     when(() => engine.setCameraEnabled(any())).thenAnswer((_) async {});

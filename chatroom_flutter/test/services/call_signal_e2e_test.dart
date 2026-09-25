@@ -71,6 +71,9 @@ class FakeE2eEngine implements CallEngine {
   bool get hasVideo => false;
 
   @override
+  bool get hasLocalMedia => true;
+
+  @override
   MediaStream? get localStream => null;
 
   @override
@@ -98,6 +101,50 @@ class FakeE2eEngine implements CallEngine {
     RTCVideoRenderer? remote,
     RTCVideoRenderer? local,
   }) async {}
+
+  @override
+  Future<void> close() async {}
+
+  @override
+  Future<CallPeerSession> createPeerSession(String peerId) async =>
+      _FakeE2ePeerSession(peerId);
+
+  @override
+  CallPeerSession? peerSession(String peerId) => null;
+
+  @override
+  Future<void> ensureMedia({required bool video}) async {}
+}
+
+/// 假单边会话：群通话 E2E 只验信令链路
+class _FakeE2ePeerSession implements CallPeerSession {
+  _FakeE2ePeerSession(this.peerId);
+
+  @override
+  final String peerId;
+
+  @override
+  MediaStream? get remoteStream => null;
+
+  @override
+  Future<Map<String, Object?>> createOffer() async =>
+      {'sdp': 'e2e-offer', 'type': 'offer'};
+
+  @override
+  Future<void> setRemoteOffer(Map<String, Object?> description) async {}
+
+  @override
+  Future<Map<String, Object?>> createAnswer() async =>
+      {'sdp': 'e2e-answer', 'type': 'answer'};
+
+  @override
+  Future<void> setRemoteAnswer(Map<String, Object?> description) async {}
+
+  @override
+  Future<void> addRemoteCandidate(Map<String, Object?> candidate) async {}
+
+  @override
+  void attachRenderer(RTCVideoRenderer? renderer) {}
 
   @override
   Future<void> close() async {}
@@ -152,9 +199,7 @@ void main() {
       environment: {'CHATROOM_ROOT': root.path},
       workingDirectory: root.path,
     );
-    serverProcess!.stderr
-        .transform(const SystemEncoding().decoder)
-        .listen((s) {
+    serverProcess!.stderr.transform(const SystemEncoding().decoder).listen((s) {
       if (s.contains('通话') || s.contains('call_')) {
         // ignore: avoid_print
         print('SRV: ${s.trim()}');
@@ -188,22 +233,22 @@ void main() {
     expect(await alice.callService.startCall('bob', CallType.audio), isTrue);
     expect(alice.callService.phase, CallPhase.calling);
     expect(await _waitUntil(() => bob.callService.phase == CallPhase.ringing),
-        isTrue, reason: 'bob 应进入响铃态');
+        isTrue,
+        reason: 'bob 应进入响铃态');
     expect(bob.callService.peer, 'alice');
     expect(bob.callService.type, CallType.audio);
 
     // bob 接听 → alice 收 accept → 双方 offer/answer 交换
     await bob.callService.acceptIncoming();
-    expect(
-        await _waitUntil(() => alice.callService.phase == CallPhase.active),
+    expect(await _waitUntil(() => alice.callService.phase == CallPhase.active),
         isTrue,
         reason: 'alice 应在收到 answer 后进入通话中');
     expect(bob.callService.phase, CallPhase.connecting);
 
     // 挂断 → 双方 ended
     alice.callService.hangup();
-    expect(
-        await _waitUntil(() => bob.callService.phase == CallPhase.ended), isTrue,
+    expect(await _waitUntil(() => bob.callService.phase == CallPhase.ended),
+        isTrue,
         reason: 'bob 应收到挂断');
     expect(bob.callService.endReason, '通话已结束');
 
@@ -225,12 +270,12 @@ void main() {
     expect(await bob.login('bob', 'password456'), isNull);
 
     expect(await alice.callService.startCall('bob', CallType.video), isTrue);
-    expect(await _waitUntil(() => bob.callService.type == CallType.video),
-        isTrue, reason: 'bob 应看到视频类型');
+    expect(
+        await _waitUntil(() => bob.callService.type == CallType.video), isTrue,
+        reason: 'bob 应看到视频类型');
     expect(bob.callService.phase, CallPhase.ringing);
     bob.callService.rejectIncoming();
-    expect(
-        await _waitUntil(() => alice.callService.phase == CallPhase.ended),
+    expect(await _waitUntil(() => alice.callService.phase == CallPhase.ended),
         isTrue);
     expect(alice.callService.endReason, '对方已拒绝');
 
@@ -259,8 +304,7 @@ void main() {
         isTrue);
 
     expect(await carol.callService.startCall('bob', CallType.audio), isTrue);
-    expect(
-        await _waitUntil(() => carol.callService.phase == CallPhase.ended),
+    expect(await _waitUntil(() => carol.callService.phase == CallPhase.ended),
         isTrue,
         reason: 'carol 应收到 call_failed');
     expect(carol.callService.endReason, '对方忙线中');
@@ -282,8 +326,7 @@ void main() {
     expect(await alice.login('alice', 'password123'), isNull);
 
     expect(await alice.callService.startCall('carol', CallType.audio), isTrue);
-    expect(
-        await _waitUntil(() => alice.callService.phase == CallPhase.ended),
+    expect(await _waitUntil(() => alice.callService.phase == CallPhase.ended),
         isTrue);
     expect(alice.callService.endReason, '对方不在线');
     alice.disconnect();
