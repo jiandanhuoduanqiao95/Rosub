@@ -82,6 +82,15 @@ class CountingSound implements SoundCapability {
   int playCount = 0;
   @override
   Future<void> playNotifySound() async => playCount++;
+
+  @override
+  Future<void> playCallRingtone() async {}
+
+  @override
+  Future<void> playHangupSound() async {}
+
+  @override
+  Future<void> stopCallRingtone() async {}
 }
 
 /// lib/platform/ 目录全部 dart 源码拼接（Windows 实现无论落在

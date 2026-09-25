@@ -22,6 +22,16 @@ class _MockPeerSession extends Mock implements CallPeerSession {}
 
 class _FakeListener extends Fake implements CallEngineListener {}
 
+class _FakeCallSound implements CallSound {
+  final List<String> calls = [];
+  @override
+  Future<void> playRingtone() async => calls.add('ringtone');
+  @override
+  Future<void> stopRingtone() async => calls.add('stop');
+  @override
+  Future<void> playHangup() async => calls.add('hangup');
+}
+
 class _RecordedSend {
   final String type;
   final String? to;
@@ -40,6 +50,7 @@ class _Harness {
   final engine = _MockEngine();
   final sends = <_RecordedSend>[];
   final sessions = <String, List<_MockPeerSession>>{};
+  final sound = _FakeCallSound();
   CallEngineListener? listener;
 
   _MockPeerSession sessionFor(String peer, {int index = 0}) =>
@@ -108,6 +119,7 @@ class _Harness {
       signaling: signaling,
       engine: engine,
       selfUsername: () => 'alice',
+      sound: sound,
     );
   }
 
@@ -667,6 +679,41 @@ void main() {
       expect(await svc.joinGroupRoom(9), isFalse);
       await svc.startGroupCall(7, '研发群', CallType.audio);
       expect(await svc.joinGroupRoom(9), isFalse);
+    });
+  });
+
+  group('gc8 通话音效', () {
+    test('群来电播铃 / 接听停铃 / 挂断停铃+挂断音', () async {
+      final h = _Harness();
+      final svc = h.build();
+      svc.handleSignal(
+          'group_call_invite',
+          _header('bob', 'room-1',
+              groupId: 7, callType: 'video', groupName: '研发群'),
+          Uint8List(0));
+      expect(svc.phase, CallPhase.ringing);
+      expect(h.sound.calls, ['ringtone'], reason: '来电即响铃');
+
+      await svc.acceptIncoming();
+      expect(h.sound.calls.last, 'stop', reason: '接听停铃');
+      expect(h.sound.calls.contains('hangup'), isFalse, reason: '接听不播挂断音');
+
+      svc.hangup();
+      await Future<void>.delayed(Duration.zero);
+      expect(h.sound.calls.last, 'hangup', reason: '曾接通后挂断播挂断音');
+    });
+
+    test('ringing 拒接只停铃不播挂断音', () async {
+      final h = _Harness();
+      final svc = h.build();
+      svc.handleSignal(
+          'group_call_invite',
+          _header('bob', 'room-1',
+              groupId: 7, callType: 'audio', groupName: '研发群'),
+          Uint8List(0));
+      expect(h.sound.calls, ['ringtone']);
+      svc.rejectIncoming();
+      expect(h.sound.calls, ['ringtone', 'stop'], reason: '未接通拒接只停铃');
     });
   });
 }

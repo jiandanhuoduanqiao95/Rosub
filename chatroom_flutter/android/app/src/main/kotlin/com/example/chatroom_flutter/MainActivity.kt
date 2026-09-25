@@ -56,6 +56,14 @@ class MainActivity : FlutterActivity() {
                     "shareFile" -> shareFile(call.argument<String>("path"), result)
                     "playNotifySound" -> playNotifySound(
                         call.argument<String>("path"), result)
+                    "playCallRingtone" -> playCallRingtone(
+                        call.argument<String>("path"), result)
+                    "playHangupSound" -> playHangupSound(
+                        call.argument<String>("path"), result)
+                    "stopCallSound" -> {
+                        stopCallSound()
+                        result.success(true)
+                    }
                     "isIgnoringBatteryOptimizations" -> {
                         val pm = getSystemService(POWER_SERVICE) as PowerManager
                         result.success(pm.isIgnoringBatteryOptimizations(packageName))
@@ -486,6 +494,67 @@ class MainActivity : FlutterActivity() {
         } catch (_: Exception) {
             result.success(false)
         }
+    }
+
+    // gc8：通话铃声循环播放（铃声用量流，循环由原生 MediaPlayer
+    // setLooping 承担；stopCallSound 统一停止）。挂断音单次播放。
+    private var callPlayer: MediaPlayer? = null
+
+    private fun playCallRingtone(path: String?, result: MethodChannel.Result) {
+        if (path == null) {
+            result.success(false)
+            return
+        }
+        try {
+            stopCallSound()
+            val player = MediaPlayer()
+            player.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+            )
+            player.setDataSource(path)
+            player.isLooping = true
+            player.prepare()
+            callPlayer = player
+            player.start()
+            result.success(true)
+        } catch (_: Exception) {
+            result.success(false)
+        }
+    }
+
+    private fun playHangupSound(path: String?, result: MethodChannel.Result) {
+        if (path == null) {
+            result.success(false)
+            return
+        }
+        try {
+            val player = MediaPlayer()
+            player.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_INSTANT)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+            )
+            player.setDataSource(path)
+            player.prepare()
+            player.setOnCompletionListener { it.release() }
+            player.start()
+            result.success(true)
+        } catch (_: Exception) {
+            result.success(false)
+        }
+    }
+
+    private fun stopCallSound() {
+        try {
+            callPlayer?.stop()
+            callPlayer?.release()
+        } catch (_: Exception) {
+        }
+        callPlayer = null
     }
 
     /** 通知同款震动节奏（短-短）；无震动器/系统限制时静默 */

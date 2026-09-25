@@ -261,6 +261,47 @@ void main() {
     svc.cancelOutgoing();
   });
 
+  testWidgets('gc6：群通话接通后系统返回/侧滑 = 离开界面（最小化，不挂断）', (tester) async {
+    final engine = _FakeEngine();
+    final signaling = _FakeSignaling();
+    _phoneScreen(tester);
+    final svc = CallService(
+        signaling: signaling, engine: engine, selfUsername: () => 'alice');
+    await tester.pumpWidget(const MaterialApp(home: Text('home')));
+    tester.state<NavigatorState>(find.byType(Navigator)).push(MaterialPageRoute(
+          builder: (_) => CallScreen(callService: svc),
+        ));
+    await tester.pumpAndSettle();
+
+    await svc.startGroupCall(7, '研发群', CallType.audio);
+    final roomId = svc.callId!;
+    svc.handleSignal(
+        'group_call_joined',
+        {
+          'from': 'bob',
+          'call_id': roomId,
+          'group_id': 7,
+          'participants': 'alice,bob',
+          'call_type': 'audio',
+        },
+        Uint8List(0));
+    await tester.pump();
+    engine.listener!.onPeerConnectionState('bob', 'connected');
+    await tester.pump();
+    expect(svc.phase, CallPhase.active);
+
+    final nav = tester.state<NavigatorState>(find.byType(Navigator));
+    await nav.maybePop();
+    await tester.pumpAndSettle();
+    expect(svc.minimized, isTrue, reason: '侧滑 = 离开通话界面（最小化）');
+    expect(svc.phase, CallPhase.active, reason: '通话不中断');
+    expect(signaling.sentCount('group_call_leave'), 0, reason: '不发送离开信令（挂断才发）');
+    expect(find.byType(CallScreen), findsNothing);
+    // 收尾
+    svc.hangup();
+    await tester.pump(const Duration(seconds: 3));
+  });
+
   testWidgets('群通话挂断经 group_call_leave + ended 自动返回', (tester) async {
     final engine = _FakeEngine();
     final signaling = _FakeSignaling();

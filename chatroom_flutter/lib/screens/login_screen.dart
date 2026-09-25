@@ -251,6 +251,10 @@ class _LoginScreenState extends State<LoginScreen> {
     return ThemeData(
       colorScheme: scheme,
       useMaterial3: true,
+      // gc6 修复：页内全新 ThemeData 会整体替换 main.dart 的全局主题，
+      // 丢失 uiFontFamily（Windows→微软雅黑 UI）——中文兜底落宋体观感
+      // 异常（用户实测登录/注册页中文字体不正常）；显式补回
+      fontFamily: uiFontFamily(),
       scaffoldBackgroundColor: const Color(0xFF070D1A),
       appBarTheme: const AppBarTheme(backgroundColor: Colors.transparent),
       filledButtonTheme: FilledButtonThemeData(

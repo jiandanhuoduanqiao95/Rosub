@@ -123,9 +123,21 @@ abstract class NotificationCapability {
   void clearUrgency();
 }
 
-/// 新消息提示音
+/// 新消息提示音 + 通话音效（gc8：来电铃声/挂断音——同一产品语言，
+/// 音色由 TaskbarNotifier 生成式合成）
 abstract class SoundCapability {
   Future<void> playNotifySound();
+
+  /// 来电铃声单遍旋律（~1.5s；循环策略：Android 原生 looping /
+  /// 桌面调用方 Timer 重播）
+  Future<void> playCallRingtone();
+
+  /// 挂断音（~0.7s 单次下行音）
+  Future<void> playHangupSound();
+
+  /// 停止来电铃声（Android 原生 MediaPlayer stop；桌面单次播放自然
+  /// 结束，no-op）
+  Future<void> stopCallRingtone();
 }
 
 /// 用系统默认程序打开文件 / 所在目录
@@ -262,6 +274,27 @@ class LinuxNotificationCapability implements NotificationCapability {
 class LinuxSoundCapability implements SoundCapability {
   @override
   Future<void> playNotifySound() async => TaskbarNotifier.playSoundImpl();
+
+  @override
+  Future<void> playCallRingtone() async =>
+      _playCallWav(TaskbarNotifier.ensureCallRingtoneWav(), 'call ringtone');
+
+  @override
+  Future<void> playHangupSound() async =>
+      _playCallWav(TaskbarNotifier.ensureHangupWav(), 'hangup');
+
+  @override
+  Future<void> stopCallRingtone() async {}
+
+  Future<void> _playCallWav(String? path, String tag) async {
+    if (path == null) return;
+    try {
+      final paplay = await Process.run('paplay', [path]);
+      if (paplay.exitCode != 0) {
+        await Process.run('aplay', ['-q', path]);
+      }
+    } catch (_) {}
+  }
 }
 
 class LinuxFileLauncherCapability implements FileLauncherCapability {
@@ -392,8 +425,29 @@ class WindowsSoundCapability implements SoundCapability {
   static const int _sndFilename = 0x00020000;
 
   @override
-  Future<void> playNotifySound() async {
-    final wav = TaskbarNotifier.ensureChimeWav();
+  Future<void> playNotifySound() async =>
+      _playWav(TaskbarNotifier.ensureChimeWav());
+
+  @override
+  Future<void> playCallRingtone() async =>
+      _playWav(TaskbarNotifier.ensureCallRingtoneWav());
+
+  @override
+  Future<void> playHangupSound() async =>
+      _playWav(TaskbarNotifier.ensureHangupWav());
+
+  @override
+  Future<void> stopCallRingtone() async {
+    // PlaySoundW 单次播放自然结束；置 null 停掉可能进行的异步播放
+    try {
+      final lib = DynamicLibrary.open('winmm.dll');
+      final playSound =
+          lib.lookupFunction<_PlaySoundNative, _PlaySoundDart>('PlaySoundW');
+      playSound(nullptr, 0, _sndNodefault);
+    } catch (_) {}
+  }
+
+  Future<void> _playWav(String? wav) async {
     if (wav == null) return;
     DynamicLibrary? lib;
     try {
@@ -433,6 +487,15 @@ class DesktopSoundStub implements SoundCapability {
   Future<void> playNotifySound() async {
     // Q3：afplay 接入
   }
+
+  @override
+  Future<void> playCallRingtone() async {}
+
+  @override
+  Future<void> playHangupSound() async {}
+
+  @override
+  Future<void> stopCallRingtone() async {}
 }
 
 class DesktopFileLauncher implements FileLauncherCapability {
@@ -490,6 +553,15 @@ class MobileSoundCapability implements SoundCapability {
   Future<void> playNotifySound() async {
     // Q1：平台播放器接入（生成式 WAV 复用，media/audioplayer 通道）
   }
+
+  @override
+  Future<void> playCallRingtone() async {}
+
+  @override
+  Future<void> playHangupSound() async {}
+
+  @override
+  Future<void> stopCallRingtone() async {}
 }
 
 class MobileFileLauncher implements FileLauncherCapability {

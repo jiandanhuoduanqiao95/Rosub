@@ -23,12 +23,23 @@ const MethodChannel _channel = MethodChannel('chatroom/platform');
 /// 提示音计数桩（经 PlatformCapabilities.soundOverride 注入——playSound
 /// 走能力层而非 playSoundImpl，playSoundImpl 仅 Linux 默认链）
 class CountingSound implements SoundCapability {
+  final List<String> soundCalls = [];
   int calls = 0;
 
   @override
   Future<void> playNotifySound() async {
     calls++;
+    soundCalls.add('notify');
   }
+
+  @override
+  Future<void> playCallRingtone() async {}
+
+  @override
+  Future<void> playHangupSound() async {}
+
+  @override
+  Future<void> stopCallRingtone() async {}
 }
 
 void main() {

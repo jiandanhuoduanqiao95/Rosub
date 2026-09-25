@@ -39,13 +39,16 @@ class AndroidNotificationCapability implements NotificationCapability {
 }
 
 class AndroidSoundCapability implements SoundCapability {
+  bool get _isTestEnv =>
+      WidgetsBinding.instance.runtimeType.toString() ==
+      'AutomatedTestWidgetsFlutterBinding';
+
   @override
   Future<void> playNotifySound() async {
     try {
       // 测试环境无原生媒体引擎（R-P21 按绑定类型判定的既有惯例），
       // 恒静默返回，保证单元/Widget 测试确定性
-      if (WidgetsBinding.instance.runtimeType.toString() ==
-          'AutomatedTestWidgetsFlutterBinding') {
+      if (_isTestEnv) {
         return;
       }
       final wav = TaskbarNotifier.ensureChimeWav();
@@ -56,6 +59,41 @@ class AndroidSoundCapability implements SoundCapability {
         'playNotifySound',
         {'path': wav},
       );
+    } catch (_) {}
+  }
+
+  @override
+  Future<void> playCallRingtone() async {
+    try {
+      if (_isTestEnv) return;
+      final wav = TaskbarNotifier.ensureCallRingtoneWav();
+      if (wav == null) return;
+      // gc8：来电铃声经原生通道循环播放（铃声用量流）；通道失败静默
+      await platformChannel.invokeMethod<bool>(
+        'playCallRingtone',
+        {'path': wav},
+      );
+    } catch (_) {}
+  }
+
+  @override
+  Future<void> playHangupSound() async {
+    try {
+      if (_isTestEnv) return;
+      final wav = TaskbarNotifier.ensureHangupWav();
+      if (wav == null) return;
+      await platformChannel.invokeMethod<bool>(
+        'playHangupSound',
+        {'path': wav},
+      );
+    } catch (_) {}
+  }
+
+  @override
+  Future<void> stopCallRingtone() async {
+    try {
+      if (_isTestEnv) return;
+      await platformChannel.invokeMethod<bool>('stopCallSound');
     } catch (_) {}
   }
 }

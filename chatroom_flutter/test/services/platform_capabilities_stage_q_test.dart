@@ -81,6 +81,15 @@ class FakeSound implements SoundCapability {
   int playCount = 0;
   @override
   Future<void> playNotifySound() async => playCount++;
+
+  @override
+  Future<void> playCallRingtone() async {}
+
+  @override
+  Future<void> playHangupSound() async {}
+
+  @override
+  Future<void> stopCallRingtone() async {}
 }
 
 class FakeLauncher implements FileLauncherCapability {

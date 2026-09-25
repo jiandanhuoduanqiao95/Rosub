@@ -13,12 +13,15 @@
 ///   群房间（中途加入入口）。
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show WidgetsBinding;
 import 'package:flutter_webrtc/flutter_webrtc.dart'
     show MediaStream, RTCVideoRenderer;
 
+import '../platform/capabilities.dart';
 import 'call_engine.dart';
 
 enum CallType { audio, video }
@@ -26,6 +29,69 @@ enum CallType { audio, video }
 enum CallPhase { idle, calling, ringing, connecting, active, ended }
 
 /// 群通话信令接口（SocketService 实现；与 sendCall 一样走既有发送队列）
+/// 通话音效钩子（gc8：来电铃声循环 / 挂断音；构造注入使状态机单测
+/// 可确定性断言，默认实现走平台能力抽象并在测试绑定下静默）
+abstract class CallSound {
+  Future<void> playRingtone();
+  Future<void> stopRingtone();
+  Future<void> playHangup();
+}
+
+/// 默认实现：PlatformCapabilities.sound 分发（Android 原生 looping /
+/// 桌面 Timer 重播循环；测试绑定静默——R-P21 惯例）
+class PlatformCallSound implements CallSound {
+  Timer? _loopTimer;
+
+  bool get _isTestEnv {
+    // flutter test 进程恒带 FLUTTER_TEST（覆盖纯 test() 无 binding 场景）
+    if (Platform.environment.containsKey('FLUTTER_TEST')) return true;
+    try {
+      return WidgetsBinding.instance.runtimeType.toString() ==
+          'AutomatedTestWidgetsFlutterBinding';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
+  Future<void> playRingtone() async {
+    if (_isTestEnv) return;
+    unawaited(_playOnce());
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      // 桌面单次播放（paplay/PlaySoundW）——Timer 重播循环；Android
+      // 由原生 MediaPlayer looping 持续
+      _loopTimer?.cancel();
+      _loopTimer = Timer.periodic(const Duration(milliseconds: 2200), (_) {
+        unawaited(_playOnce());
+      });
+    }
+  }
+
+  Future<void> _playOnce() async {
+    try {
+      await PlatformCapabilities.sound.playCallRingtone();
+    } catch (_) {}
+  }
+
+  @override
+  Future<void> stopRingtone() async {
+    _loopTimer?.cancel();
+    _loopTimer = null;
+    if (_isTestEnv) return;
+    try {
+      await PlatformCapabilities.sound.stopCallRingtone();
+    } catch (_) {}
+  }
+
+  @override
+  Future<void> playHangup() async {
+    if (_isTestEnv) return;
+    try {
+      await PlatformCapabilities.sound.playHangupSound();
+    } catch (_) {}
+  }
+}
+
 abstract class CallSignaling {
   Future<void> sendCall(String type, String to, String callId,
       {String? callType, String? body});
@@ -64,9 +130,11 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     required CallSignaling signaling,
     CallEngine? engine,
     String? Function()? selfUsername,
+    CallSound? sound,
   })  : _signaling = signaling,
         _engine = engine ?? WebRtcCallEngine(),
-        _selfUsername = selfUsername ?? (() => null) {
+        _selfUsername = selfUsername ?? (() => null),
+        _callSound = sound ?? PlatformCallSound() {
     _engine.setListener(this);
   }
 
@@ -76,6 +144,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   final CallSignaling _signaling;
   final CallEngine _engine;
   final String? Function() _selfUsername;
+  final CallSound _callSound;
 
   CallPhase _phase = CallPhase.idle;
   String? _peer;
@@ -144,6 +213,20 @@ class CallService extends ChangeNotifier implements CallEngineListener {
 
   Timer? _ringTimer;
   Timer? _endedTimer;
+  bool _reachedConnecting = false;
+
+  /// gc8：来电铃声开始（ Android 原生 looping / 桌面 PlatformCallSound
+  /// 内部 Timer 重播）
+  void _startRingtone() {
+    unawaited(_callSound.playRingtone());
+  }
+
+  /// gc8：停铃声（接听/结束共用；挂断音由 teardown 按 _reachedConnecting
+  /// 单独触发，避免接听瞬间误播）
+  void _stopRingtone() {
+    unawaited(_callSound.stopRingtone());
+  }
+
   bool _remoteDescSet = false;
   final List<Map<String, Object?>> _pendingCandidates = [];
 
@@ -318,6 +401,8 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     final id = _callId!;
     final peer = _peer!;
     _ringTimer?.cancel();
+    _reachedConnecting = true;
+    _stopRingtone();
     _setPhase(CallPhase.connecting);
     _trace('acceptIncoming id=$id');
     // 引擎就绪门：Android 运行时权限弹窗下 open 可能耗时数秒，
@@ -352,6 +437,8 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     final id = _callId!;
     final gid = _groupId!;
     _ringTimer?.cancel();
+    _reachedConnecting = true;
+    _stopRingtone();
     _setPhase(CallPhase.connecting);
     _trace('group join room=$id');
     _calleeMediaReady = () async {
@@ -476,6 +563,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
         _resetToggles(_type!);
         _trace('incoming call_invite from=$from id=$id type=$_type');
         _setPhase(CallPhase.ringing);
+        _startRingtone();
         break;
       case 'call_accept':
         if (_isGroup) break;
@@ -576,6 +664,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   Future<void> _startCallerMedia() async {
     final id = _callId!;
     final peer = _peer!;
+    _reachedConnecting = true;
     _setPhase(CallPhase.connecting);
     _trace('caller media start (accepted by peer)');
     try {
@@ -708,6 +797,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
         callType: _type);
     _trace('group invite from=$from room=$id group=$gid type=$_type');
     _setPhase(CallPhase.ringing);
+    _startRingtone();
   }
 
   void _handleGroupJoined(Map<String, dynamic> header) {
@@ -761,6 +851,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   }
 
   Future<void> _prepareGroupMedia() async {
+    _reachedConnecting = true;
     try {
       _trace(
           'caller engine.ensureMedia(video=${_type == CallType.video}) start');
@@ -1072,7 +1163,10 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     _trace('teardown: $reason (phase=$_phase)');
     _ringTimer?.cancel();
     _ringTimer = null;
-    _endedTimer?.cancel();
+    _stopRingtone();
+    // 曾接通的通话结束播挂断音（ringing 未接通阶段只停铃）
+    if (_reachedConnecting) unawaited(_callSound.playHangup());
+    _reachedConnecting = false;
     // R2 gc2：清除跨场残留的媒体就绪门（旧 future 已完成，会让下一场
     // 通话的 await 立即通过——空 offer 竞态的来源之一）
     _calleeMediaReady = null;

@@ -241,11 +241,15 @@ class _CallScreenState extends State<CallScreen> {
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
+        // 接通后系统返回/侧边栏滑动 = 离开通话界面（最小化，不挂断）——
+        // 与左上角最小化钮同义：ChatScreen 悬浮条接管，1:1 与群一致；
+        // minimize() 经 notifyListeners 触发本页 _onPhaseChanged 的
+        // minimized→pop 分支（pop 职责仍收归本页）
         // 结束/idle 态直接 pop（maybePop 会被本页 canPop:false 拦截造成递归）
         final action = switch (phase) {
           CallPhase.ringing => _svc.rejectIncoming,
           CallPhase.calling => _svc.cancelOutgoing,
-          CallPhase.connecting || CallPhase.active => _svc.hangup,
+          CallPhase.connecting || CallPhase.active => _svc.minimize,
           CallPhase.ended || CallPhase.idle => () {
               if (!_autoPopped) {
                 _autoPopped = true;

@@ -106,6 +106,132 @@ class TaskbarNotifier {
     }
   }
 
+  /// 通话铃声 WAV 落盘（gc8：单遍旋律 ~1.6s，Android 原生 looping /
+  /// 桌面 Dart Timer 重播）。与新消息提示音同一音色与音集（A 大调
+  /// 三和弦），形成统一产品语言。生成/落盘失败返回 null。
+  static String? ensureCallRingtoneWav() {
+    if (_callRingtoneWavPath != null) return _callRingtoneWavPath;
+    try {
+      final file =
+          File('${Directory.systemTemp.path}/chatroom_call_ringtone.wav');
+      if (!file.existsSync()) {
+        file.writeAsBytesSync(_generateCallRingtoneWav());
+      }
+      _callRingtoneWavPath = file.path;
+      return _callRingtoneWavPath;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 挂断音 WAV 落盘（gc8：下行 A6→E6→A5 ~0.7s，"结束"语义——铃声
+  /// 旋律的倒序）。
+  static String? ensureHangupWav() {
+    if (_hangupWavPath != null) return _hangupWavPath;
+    try {
+      final file =
+          File('${Directory.systemTemp.path}/chatroom_call_hangup.wav');
+      if (!file.existsSync()) {
+        file.writeAsBytesSync(_generateHangupWav());
+      }
+      _hangupWavPath = file.path;
+      return _hangupWavPath;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static String? _callRingtoneWavPath;
+  static String? _hangupWavPath;
+
+  /// 往 16-bit 单声道 PCM 缓冲叠加一个带泛音的音符（4ms 快速起音 +
+  /// 指数衰减包络；正弦基波 + 0.35 二次谐波 + 0.12 三次谐波——chime
+  /// 音色合成器，铃声/挂断音共用以保持产品语言一致）
+  static void _addNote(List<double> buffer, int sampleRate, double freq,
+      int startMs, int durMs, double amp) {
+    final start = sampleRate * startMs ~/ 1000;
+    final len = sampleRate * durMs ~/ 1000;
+    final int end = math.min(start + len, buffer.length);
+    for (int i = start; i < end; i++) {
+      final int rel = i - start;
+      final double t = i / sampleRate;
+      final double attack = (rel / (sampleRate * 0.004)).clamp(0.0, 1.0);
+      final double decay =
+          math.exp(-(rel / (sampleRate * (durMs / 1000.0))) * 4.2);
+      final double env = attack * decay;
+      double s = math.sin(2 * math.pi * freq * t);
+      s += 0.35 * math.sin(2 * math.pi * freq * 2 * t);
+      s += 0.12 * math.sin(2 * math.pi * freq * 3 * t);
+      buffer[i] += s * amp * env;
+    }
+  }
+
+  /// PCM 缓冲 → 16-bit 单声道 WAV 字节（RIFF 容器）
+  static List<int> _renderWav(List<double> buffer, int sampleRate) {
+    final int n = buffer.length;
+    final BytesBuilder data = BytesBuilder();
+    void writeU32(int v) {
+      data.addByte(v & 0xFF);
+      data.addByte((v >> 8) & 0xFF);
+      data.addByte((v >> 16) & 0xFF);
+      data.addByte((v >> 24) & 0xFF);
+    }
+
+    void writeU16(int v) {
+      data.addByte(v & 0xFF);
+      data.addByte((v >> 8) & 0xFF);
+    }
+
+    data.add('RIFF'.codeUnits);
+    writeU32(36 + n * 2);
+    data.add('WAVE'.codeUnits);
+    data.add('fmt '.codeUnits);
+    writeU32(16);
+    writeU16(1);
+    writeU16(1);
+    writeU32(sampleRate);
+    writeU32(sampleRate * 2);
+    writeU16(2);
+    writeU16(16);
+    data.add('data'.codeUnits);
+    writeU32(n * 2);
+    for (int i = 0; i < n; i++) {
+      final double sample = buffer[i].clamp(-1.0, 1.0);
+      final int value = (sample * 32767).round().clamp(-32768, 32767);
+      writeU16(value & 0xFFFF);
+    }
+    return data.toBytes();
+  }
+
+  /// 通话铃声（gc8，单遍旋律 ~1.5s）：A5→E6→A6 琶音（chime 旋律紧凑
+  /// 版）+ E6→A5 回落小尾音，尾部 0.35s 静音缓冲供循环呼吸——同音色
+  /// 同音集，与新消息提示音形成统一产品语言。
+  static List<int> _generateCallRingtoneWav() {
+    const int sampleRate = 44100;
+    const int durationMs = 1500;
+    final List<double> buffer =
+        List.filled(sampleRate * durationMs ~/ 1000, 0.0);
+    _addNote(buffer, sampleRate, 880.0, 0, 140, 0.30);
+    _addNote(buffer, sampleRate, 1318.5, 100, 180, 0.26);
+    _addNote(buffer, sampleRate, 1760.0, 220, 160, 0.12);
+    _addNote(buffer, sampleRate, 1318.5, 480, 140, 0.18);
+    _addNote(buffer, sampleRate, 880.0, 620, 260, 0.22);
+    return _renderWav(buffer, sampleRate);
+  }
+
+  /// 挂断音（gc8，~0.7s）：A6→E6→A5 下行三音（铃声/提示音旋律的倒序，
+  /// "结束"语义），整体衰减更快更轻。
+  static List<int> _generateHangupWav() {
+    const int sampleRate = 44100;
+    const int durationMs = 700;
+    final List<double> buffer =
+        List.filled(sampleRate * durationMs ~/ 1000, 0.0);
+    _addNote(buffer, sampleRate, 1760.0, 0, 140, 0.16);
+    _addNote(buffer, sampleRate, 1318.5, 120, 160, 0.18);
+    _addNote(buffer, sampleRate, 880.0, 260, 320, 0.24);
+    return _renderWav(buffer, sampleRate);
+  }
+
   /// 生成 16-bit 单声道科技感和弦提示音 WAV（约 520ms）。
   ///
   /// 音色设计：A5(880Hz) 起音 → E6(1318.5Hz) 五度上行接续 → A6(1760Hz)

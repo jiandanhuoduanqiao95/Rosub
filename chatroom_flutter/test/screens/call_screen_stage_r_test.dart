@@ -243,6 +243,39 @@ void main() {
     svc.cancelOutgoing();
   });
 
+  testWidgets('gc6：接通后系统返回/侧滑 = 离开通话界面（最小化，不挂断）', (tester) async {
+    final signaling = _FakeSignaling();
+    final svc = CallService(signaling: signaling, engine: _FakeEngine());
+    await tester.pumpWidget(const MaterialApp(home: Text('home')));
+    tester.state<NavigatorState>(find.byType(Navigator)).push(MaterialPageRoute(
+          builder: (_) => CallScreen(callService: svc),
+        ));
+    await tester.pumpAndSettle();
+
+    expect(await svc.startCall('bob', CallType.audio), isTrue);
+    await tester.pump();
+    svc.handleSignal(
+        'call_accept', {'from': 'bob', 'call_id': svc.callId}, Uint8List(0));
+    await tester.pump();
+    svc.handleSignal('call_answer', {'from': 'bob', 'call_id': svc.callId},
+        Uint8List.fromList(utf8.encode('{"sdp":"a","type":"answer"}')));
+    await tester.pump();
+    expect(svc.phase, CallPhase.active);
+
+    // 系统返回手势（PopScope 拦截路径）→ 最小化，不挂断
+    final nav = tester.state<NavigatorState>(find.byType(Navigator));
+    await nav.maybePop();
+    await tester.pumpAndSettle();
+    expect(svc.minimized, isTrue, reason: '侧滑 = 离开通话界面（最小化）');
+    expect(svc.phase, CallPhase.active, reason: '通话不中断');
+    expect(signaling.sentCount('call_hangup'), 0, reason: '不发送挂断信令');
+    expect(find.byType(CallScreen), findsNothing, reason: '通话页应被关闭');
+    expect(find.text('home'), findsOneWidget);
+    // 收尾：挂断并推进 ended→idle 定时器（防 Timer pending）
+    svc.hangup();
+    await tester.pump(const Duration(seconds: 3));
+  });
+
   testWidgets('取消通话后 2s 自动返回上一页（maybePop 递归回归锁）', (tester) async {
     final signaling = _FakeSignaling();
     final svc = CallService(signaling: signaling, engine: _FakeEngine());
