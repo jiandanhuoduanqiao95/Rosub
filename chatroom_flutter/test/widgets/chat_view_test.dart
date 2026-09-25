@@ -11,10 +11,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:chatroom_flutter/models/chat_models.dart';
 import 'package:chatroom_flutter/widgets/chat_view.dart';
 
-Widget wrap(Widget child) => MaterialApp(home: Scaffold(body: SizedBox(width: 600, child: child)));
+Widget wrap(Widget child) =>
+    MaterialApp(home: Scaffold(body: SizedBox(width: 600, child: child)));
 
 ChatMessage msg(String sender, String content, String id,
-    {String status = 'sent', String? type, String? filename}) =>
+        {String status = 'sent', String? type, String? filename}) =>
     ChatMessage(
       sender: sender,
       content: content,

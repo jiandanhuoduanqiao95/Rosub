@@ -66,8 +66,7 @@ void main() {
 
     test('已读历史公告（delivered）不计未读（回归）', () {
       state.setLoggedIn('alice', false);
-      state.addMessage('服务器',
-          _announcement('a1', '历史公告', status: 'delivered'));
+      state.addMessage('服务器', _announcement('a1', '历史公告', status: 'delivered'));
       expect(state.unreadOf('服务器'), 0);
       expect(state.totalUnread, 0);
     });
@@ -75,8 +74,8 @@ void main() {
     test('公告徽标与好友会话未读独立', () {
       state.setLoggedIn('alice', false);
       state.addMessage('服务器', _announcement('a1', '公告'));
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'hi', messageId: 'm1'));
+      state.addMessage(
+          'bob', ChatMessage(sender: 'bob', content: 'hi', messageId: 'm1'));
       expect(state.unreadOf('服务器'), 1);
       expect(state.unreadOf('bob'), 1);
       state.selectChat('服务器');

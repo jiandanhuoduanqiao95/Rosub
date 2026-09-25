@@ -529,8 +529,7 @@ void main() {
       await tester.pumpAndSettle();
       // mocktail 的 verify 会重置调用历史——一次性断言"打开 1 次 + 刷新 1 次"
       verify(() => service.fetchServerStatus()).called(2);
-      expect(find.text('3'), findsWidgets,
-          reason: '刷新后新数据（在线用户 3）应显示');
+      expect(find.text('3'), findsWidgets, reason: '刷新后新数据（在线用户 3）应显示');
     });
   });
 

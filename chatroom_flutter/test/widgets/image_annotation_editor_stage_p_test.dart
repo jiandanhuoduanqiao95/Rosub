@@ -294,8 +294,7 @@ void main() {
   });
 
   group('Q1 三轮 —— 工具栏同屏不滑动（问题2）', () {
-    testWidgets('599x800（compact 手机窄屏）：两行工具全部同屏，无横向滚动、无溢出',
-        (tester) async {
+    testWidgets('599x800（compact 手机窄屏）：两行工具全部同屏，无横向滚动、无溢出', (tester) async {
       final bytes = (await tester.runAsync(() => makePng(120, 90)))!;
       await tester.binding.setSurfaceSize(const Size(599, 800));
       addTearDown(() => tester.binding.setSurfaceSize(null));

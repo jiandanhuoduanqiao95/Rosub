@@ -21,11 +21,13 @@ import 'package:chatroom_flutter/models/chat_models.dart';
 import 'package:chatroom_flutter/widgets/chat_view.dart';
 import 'package:chatroom_flutter/widgets/raw_text_field.dart';
 
-Widget wrap(Widget child) =>
-    MaterialApp(home: Scaffold(body: SizedBox(width: 600, height: 800, child: child)));
+Widget wrap(Widget child) => MaterialApp(
+    home: Scaffold(body: SizedBox(width: 600, height: 800, child: child)));
 
 ChatMessage msg(String sender, String content, String id,
-        {String status = 'sent', String? type, String? filename,
+        {String status = 'sent',
+        String? type,
+        String? filename,
         DateTime? timestamp}) =>
     ChatMessage(
       sender: sender,
@@ -135,7 +137,8 @@ void main() {
         chatKey: 'bob',
         chatTitle: 'bob',
         messages: [
-          msg('alice', '[发送文件] big.bin', 'f1', type: 'file', filename: 'big.bin'),
+          msg('alice', '[发送文件] big.bin', 'f1',
+              type: 'file', filename: 'big.bin'),
         ],
         username: 'alice',
         inputCtrl: TextEditingController(),
@@ -156,7 +159,8 @@ void main() {
         chatKey: 'bob',
         chatTitle: 'bob',
         messages: [
-          msg('alice', '[发送文件] big.bin', 'f1', type: 'file', filename: 'big.bin'),
+          msg('alice', '[发送文件] big.bin', 'f1',
+              type: 'file', filename: 'big.bin'),
         ],
         username: 'alice',
         inputCtrl: TextEditingController(),
@@ -242,7 +246,8 @@ void main() {
     testWidgets('隔天消息显示 MM-DD HH:MM', (tester) async {
       final now = DateTime.now();
       final yesterday = now.subtract(const Duration(days: 1));
-      final t = DateTime(yesterday.year, yesterday.month, yesterday.day, 23, 59);
+      final t =
+          DateTime(yesterday.year, yesterday.month, yesterday.day, 23, 59);
       await tester.pumpWidget(wrap(ChatView(
         chatKey: 'bob',
         chatTitle: 'bob',
@@ -264,8 +269,8 @@ void main() {
 
   group('渲染压力', () {
     testWidgets('200 条消息正常渲染无异常', (tester) async {
-      final messages = List.generate(200, (i) =>
-          msg(i.isEven ? 'alice' : 'bob', '消息 $i 的内容', 'm$i'));
+      final messages = List.generate(
+          200, (i) => msg(i.isEven ? 'alice' : 'bob', '消息 $i 的内容', 'm$i'));
       await tester.pumpWidget(wrap(ChatView(
         chatKey: 'bob',
         chatTitle: 'bob',
@@ -331,8 +336,10 @@ void main() {
   group('上滑加载历史', () {
     testWidgets('滚动接近顶部触发 onLoadHistory（带 before 游标）', (tester) async {
       final loaded = <String?>[];
-      final messages = List.generate(60, (i) =>
-          msg('bob', 'm$i', 'id$i', timestamp: DateTime(2026, 1, 1, 12, i)));
+      final messages = List.generate(
+          60,
+          (i) => msg('bob', 'm$i', 'id$i',
+              timestamp: DateTime(2026, 1, 1, 12, i)));
       await tester.pumpWidget(wrap(ChatView(
         chatKey: 'bob',
         chatTitle: 'bob',

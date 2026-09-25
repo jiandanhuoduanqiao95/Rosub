@@ -176,8 +176,7 @@ void main() {
     return null;
   }
 
-  test('R-P21 —— 已接收文件重登：气泡保留、本地文件不被重写、无传输进度',
-      () async {
+  test('R-P21 —— 已接收文件重登：气泡保留、本地文件不被重写、无传输进度', () async {
     if (skipped) {
       markTestSkipped('缺少本地 Python 服务端环境，跳过 E2E 测试');
       return;
@@ -212,8 +211,7 @@ void main() {
     expect(after, isNotNull, reason: '重登后气泡应保留（去重或元数据重建）');
     expect(localFile.lastModifiedSync(), mtimeBefore,
         reason: '重登后本地文件不得被重写（不重复下载）');
-    expect(state.transferFraction('rpmeta-1'), isNull,
-        reason: '重登补推不得产生传输进度');
+    expect(state.transferFraction('rpmeta-1'), isNull, reason: '重登补推不得产生传输进度');
 
     // 清空本地状态后重登（模拟重装/缓存丢失）：file_meta 仅重建气泡
     // 元数据（fileData 为空、不落盘），本地文件同样不被重写
@@ -223,8 +221,7 @@ void main() {
     expect(await bob3.login('bob', 'password456'), isNull);
     final rebuilt = await waitFor(() => metaBubble() != null);
     expect(rebuilt, isTrue, reason: 'file_meta 应重建气泡（缓存丢失场景）');
-    expect(metaBubble()!.fileData, isNull,
-        reason: '元数据重建的气泡不携带文件字节');
+    expect(metaBubble()!.fileData, isNull, reason: '元数据重建的气泡不携带文件字节');
     expect(localFile.lastModifiedSync(), mtimeBefore,
         reason: '缓存丢失场景同样不得重写本地文件');
     bob3.disconnect();

@@ -92,17 +92,14 @@ void main() {
   }
 
   group('Q1 四轮 —— openDirectory 不做（问题5 用户决策）+ 提示音通知音量', () {
-    test('capabilities_android 保留恒 false 占位（Android 无目录语义，锁定勿回退）',
-        () {
+    test('capabilities_android 保留恒 false 占位（Android 无目录语义，锁定勿回退）', () {
       final src = srcOf('platform/capabilities_android.dart');
-      expect(src.contains("openDirectory(String path) async => false"),
-          isTrue,
+      expect(src.contains("openDirectory(String path) async => false"), isTrue,
           reason: 'Q1 四轮问题5：接收目录位于应用内部存储，目录功能无意义'
               '（导出走"分享"）——勿重新接通目录通道');
     });
 
-    test('Q1 六轮问题3：通知渠道应用提示音 + 客户端内震动（原生源码扫描）',
-        () {
+    test('Q1 六轮问题3：通知渠道应用提示音 + 客户端内震动（原生源码扫描）', () {
       final kt = File(
               'android/app/src/main/kotlin/com/example/chatroom_flutter/MainActivity.kt')
           .readAsStringSync();
@@ -111,8 +108,7 @@ void main() {
       expect(kt.contains('raw/notify_chime'), isTrue,
           reason: '渠道提示音 = 打包内置资源（Q1 八轮：file:// 外部目录 '
               'Uri 在 OneUI 上 SystemUI 读不到，只有震动无声）');
-      expect(
-          File('android/app/src/main/res/raw/notify_chime.wav').existsSync(),
+      expect(File('android/app/src/main/res/raw/notify_chime.wav').existsSync(),
           isTrue,
           reason: '与应用内 TaskbarNotifier 生成式 chime 同算法固化');
       expect(kt.contains('VibrationEffect.createWaveform'), isTrue,

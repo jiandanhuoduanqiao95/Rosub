@@ -33,7 +33,8 @@ void main() {
         body: Builder(builder: (context) {
           return ElevatedButton(
             onPressed: () {
-              showGroupMenuDialog(context, state.groups.first, (g) {}, (gid) {});
+              showGroupMenuDialog(
+                  context, state.groups.first, (g) {}, (gid) {});
             },
             child: const Text('open'),
           );
@@ -58,7 +59,8 @@ void main() {
         body: Builder(builder: (context) {
           return ElevatedButton(
             onPressed: () {
-              showGroupMenuDialog(context, state.groups.first, (g) {}, (gid) {});
+              showGroupMenuDialog(
+                  context, state.groups.first, (g) {}, (gid) {});
             },
             child: const Text('open'),
           );
@@ -88,7 +90,8 @@ void main() {
         body: Builder(builder: (context) {
           return ElevatedButton(
             onPressed: () {
-              showGroupMenuDialog(context, state.groups.first, (g) {}, (gid) {});
+              showGroupMenuDialog(
+                  context, state.groups.first, (g) {}, (gid) {});
             },
             child: const Text('open'),
           );
@@ -114,7 +117,8 @@ void main() {
         body: Builder(builder: (context) {
           return ElevatedButton(
             onPressed: () {
-              showGroupMenuDialog(context, state.groups.first, (g) {}, (gid) {});
+              showGroupMenuDialog(
+                  context, state.groups.first, (g) {}, (gid) {});
             },
             child: const Text('open'),
           );

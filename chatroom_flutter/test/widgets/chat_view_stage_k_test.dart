@@ -183,8 +183,7 @@ void main() {
       await tester.pump(const Duration(seconds: 3)); // 冲刷高亮 Timer
     });
 
-    testWidgets('引用目标未加载时翻页加载历史直至找到并跳转（P-30 长会话修复）',
-        (tester) async {
+    testWidgets('引用目标未加载时翻页加载历史直至找到并跳转（P-30 长会话修复）', (tester) async {
       final messages = <ChatMessage>[
         for (var i = 0; i < 5; i++) msg('bob', '消息$i', 'm$i'),
       ];

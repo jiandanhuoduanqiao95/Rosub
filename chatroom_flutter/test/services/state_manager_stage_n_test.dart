@@ -55,7 +55,8 @@ void main() {
     test('setSessions 覆盖更新并通知监听者', () {
       var notified = 0;
       state.addListener(() => notified++);
-      state.setSessions([session('linux', isCurrent: true), session('android')]);
+      state
+          .setSessions([session('linux', isCurrent: true), session('android')]);
       expect(notified, greaterThan(0), reason: 'setSessions 应通知');
       expect(state.sessions.length, 2);
       expect(state.sessions.first.deviceId, 'linux');
@@ -79,7 +80,8 @@ void main() {
 
     test('列表不可修改（只读视图）', () {
       state.setSessions([session('linux', isCurrent: true)]);
-      expect(() => state.sessions.add(session('android')), throwsUnsupportedError);
+      expect(
+          () => state.sessions.add(session('android')), throwsUnsupportedError);
     });
   });
 
@@ -115,7 +117,8 @@ void main() {
   });
 
   group('N3 —— 图片粘贴预览（pendingImagePreview）', () {
-    final png = Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+    final png =
+        Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
 
     test('缺省为 null', () {
       expect(state.pendingImagePreview, isNull);
@@ -153,8 +156,8 @@ void main() {
 
   group('N1 —— 永久删除的内存侧复用 removeMessageLocally（回归锁定）', () {
     test('removeMessageLocally 移除消息与 messageMap 索引', () {
-      state.addMessage('bob', ChatMessage(
-          sender: 'alice', content: '待删除', messageId: 'm1'));
+      state.addMessage(
+          'bob', ChatMessage(sender: 'alice', content: '待删除', messageId: 'm1'));
       expect(state.messageById('m1'), isNotNull);
       state.removeMessageLocally('bob', 'm1');
       expect(state.getMessages('bob'), isEmpty);
@@ -163,8 +166,8 @@ void main() {
     });
 
     test('removeMessageLocally 幂等（重复删除不抛）', () {
-      state.addMessage('bob', ChatMessage(
-          sender: 'alice', content: 'x', messageId: 'm1'));
+      state.addMessage(
+          'bob', ChatMessage(sender: 'alice', content: 'x', messageId: 'm1'));
       state.removeMessageLocally('bob', 'm1');
       expect(() => state.removeMessageLocally('bob', 'm1'), returnsNormally);
     });

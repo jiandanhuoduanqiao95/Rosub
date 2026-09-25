@@ -207,10 +207,12 @@ void main() {
     test('inDndWindow 直接调用（注入时钟，绝对结束时刻）', () {
       TaskbarNotifier.dndEndTime = DateTime(2026, 8, 18, 18, 0);
       expect(TaskbarNotifier.inDndWindow(DateTime(2026, 8, 18, 9, 0)), isTrue);
-      expect(TaskbarNotifier.inDndWindow(DateTime(2026, 8, 18, 17, 59)), isTrue);
+      expect(
+          TaskbarNotifier.inDndWindow(DateTime(2026, 8, 18, 17, 59)), isTrue);
       expect(TaskbarNotifier.inDndWindow(DateTime(2026, 8, 18, 18, 0)), isFalse,
           reason: '结束时刻不含');
-      expect(TaskbarNotifier.inDndWindow(DateTime(2026, 8, 18, 23, 59)), isFalse);
+      expect(
+          TaskbarNotifier.inDndWindow(DateTime(2026, 8, 18, 23, 59)), isFalse);
       // 跨日：第二天仍在结束时刻内
       expect(TaskbarNotifier.inDndWindow(DateTime(2026, 8, 19, 0, 30)), isFalse,
           reason: '结束时刻固定到 8-18 18:00，次日已不在免打扰区间');
@@ -228,8 +230,7 @@ void main() {
       TaskbarNotifier.dndEnabled = true;
       TaskbarNotifier.dndEndTime = DateTime(2026, 8, 18, 23, 0);
       TaskbarNotifier.nowProvider = () => DateTime(2026, 8, 18, 23, 5);
-      expect(TaskbarNotifier.checkDndExpiry(), isTrue,
-          reason: '已过结束时刻应判定到期');
+      expect(TaskbarNotifier.checkDndExpiry(), isTrue, reason: '已过结束时刻应判定到期');
       expect(TaskbarNotifier.dndEnabled, isFalse, reason: '到期后自动关闭开关');
       expect(TaskbarNotifier.checkDndExpiry(), isFalse, reason: '再次调用无副作用');
     });
@@ -250,15 +251,13 @@ void main() {
     test('ensureDndEndInFuture：当前早于 23:00 → 今天 23:00', () {
       TaskbarNotifier.nowProvider = () => DateTime(2026, 8, 18, 10, 0);
       TaskbarNotifier.ensureDndEndInFuture();
-      expect(TaskbarNotifier.dndEndTime,
-          DateTime(2026, 8, 18, 23, 0));
+      expect(TaskbarNotifier.dndEndTime, DateTime(2026, 8, 18, 23, 0));
     });
 
     test('ensureDndEndInFuture：已过 23:00 → 次日 23:00', () {
       TaskbarNotifier.nowProvider = () => DateTime(2026, 8, 18, 23, 30);
       TaskbarNotifier.ensureDndEndInFuture();
-      expect(TaskbarNotifier.dndEndTime,
-          DateTime(2026, 8, 19, 23, 0));
+      expect(TaskbarNotifier.dndEndTime, DateTime(2026, 8, 19, 23, 0));
     });
 
     test('默认配置：soundEnabled=true / dndEnabled=false / 结束时刻在未来', () {

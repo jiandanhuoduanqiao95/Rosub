@@ -35,8 +35,8 @@ void main() {
     test('删除好友后该好友从 friends 列表消失且消息清空', () {
       state.setLoggedIn('alice', false);
       state.addFriend('bob');
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'hi', messageId: 'm1'));
+      state.addMessage(
+          'bob', ChatMessage(sender: 'bob', content: 'hi', messageId: 'm1'));
       state.addMessage('bob',
           ChatMessage(sender: 'alice', content: 'reply', messageId: 'm2'));
       expect(state.getMessages('bob').length, 2);
@@ -50,8 +50,8 @@ void main() {
     test('删除当前会话为该好友时 currentChat 被重置', () {
       state.setLoggedIn('alice', false);
       state.addFriend('bob');
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'c', messageId: 'm1'));
+      state.addMessage(
+          'bob', ChatMessage(sender: 'bob', content: 'c', messageId: 'm1'));
       state.selectChat('bob');
       expect(state.currentChat, 'bob');
 
@@ -66,10 +66,14 @@ void main() {
       // unread 是会话级独立 Map），故此测试当前为红，待 F3 一并修复。
       state.setLoggedIn('alice', false);
       state.addFriend('bob');
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'new', messageId: 'm1', status: 'sent'));
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'new2', messageId: 'm2', status: 'sent'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob', content: 'new', messageId: 'm1', status: 'sent'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob', content: 'new2', messageId: 'm2', status: 'sent'));
       expect(state.unreadOf('bob'), 2);
 
       state.removeFriend('bob');
@@ -82,10 +86,10 @@ void main() {
       state.setLoggedIn('alice', false);
       state.addFriend('bob');
       state.addFriend('carol');
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'b', messageId: 'm1'));
-      state.addMessage('carol',
-          ChatMessage(sender: 'carol', content: 'c', messageId: 'm2'));
+      state.addMessage(
+          'bob', ChatMessage(sender: 'bob', content: 'b', messageId: 'm1'));
+      state.addMessage(
+          'carol', ChatMessage(sender: 'carol', content: 'c', messageId: 'm2'));
 
       state.removeFriend('bob');
 
@@ -145,8 +149,10 @@ void main() {
     test('离开群组后群组会话未读计数清零', () {
       state.setLoggedIn('alice', false);
       state.addGroup(Group(id: 1, name: 'g'));
-      state.addMessage('group_1',
-          ChatMessage(sender: 'bob', content: 'new', messageId: 'm1', status: 'sent'));
+      state.addMessage(
+          'group_1',
+          ChatMessage(
+              sender: 'bob', content: 'new', messageId: 'm1', status: 'sent'));
       expect(state.unreadOf('group_1'), 1);
 
       state.leaveGroup(1);

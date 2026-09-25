@@ -66,8 +66,8 @@ void main() {
     TaskbarNotifier.dndEnabled = false;
     TaskbarNotifier.dndEndTime =
         DateTime(baseDay.year, baseDay.month, baseDay.day, 23, 0);
-    TaskbarNotifier.nowProvider = () =>
-        DateTime(baseDay.year, baseDay.month, baseDay.day, 10, 0);
+    TaskbarNotifier.nowProvider =
+        () => DateTime(baseDay.year, baseDay.month, baseDay.day, 10, 0);
   });
 
   tearDown(() {
@@ -102,19 +102,19 @@ void main() {
       expect(TaskbarNotifier.soundEnabled, isFalse);
     });
 
-    testWidgets('开启免打扰写入 dndEnabled=true 并默认结束时刻今天 23:00',
-        (tester) async {
+    testWidgets('开启免打扰写入 dndEnabled=true 并默认结束时刻今天 23:00', (tester) async {
       await pumpOpen(tester, (ctx) => showSettingsDialog(ctx));
       await tester.tap(find.byType(Switch).last);
       await tester.pumpAndSettle();
       expect(TaskbarNotifier.dndEnabled, isTrue);
-      expect(
-          TaskbarNotifier.dndEndTime,
+      expect(TaskbarNotifier.dndEndTime,
           DateTime(baseDay.year, baseDay.month, baseDay.day, 23, 0),
           reason: '开启时自动设置默认结束时刻（今天 23:00）');
       expect(find.text('结束日期'), findsOneWidget);
       expect(find.text('结束时刻'), findsOneWidget);
-      expect(find.textContaining('至 ${baseDay.toIso8601String().substring(0, 10)} 23:00'),
+      expect(
+          find.textContaining(
+              '至 ${baseDay.toIso8601String().substring(0, 10)} 23:00'),
           findsOneWidget,
           reason: '开关副标题展示到期时刻');
     });

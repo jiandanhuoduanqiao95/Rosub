@@ -33,6 +33,10 @@ class _CallScreenState extends State<CallScreen> {
   Timer? _ticker;
   bool _renderersReady = false;
 
+  /// 存在多个视频输入设备（enumerateDevices 自动检测）——控制排据此
+  /// 显隐"切换镜头"键（单摄像头/桌面单摄不显示）
+  bool _multiCamera = false;
+
   /// 本地小窗左上角位置（null=默认右上）；随拖动更新
   Offset? _pipOffset;
 
@@ -46,9 +50,26 @@ class _CallScreenState extends State<CallScreen> {
     super.initState();
     _svc.addListener(_onPhaseChanged);
     _prepareRenderers();
+    _probeCameras();
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted && _svc.phase == CallPhase.active) setState(() {});
     });
+  }
+
+  /// 多摄像头自动检测（enumerateDevices videoinput 数 >1 时显示切换键）
+  Future<void> _probeCameras() async {
+    if (_svc.type != CallType.video) return;
+    try {
+      final count = await _svc.videoInputCount();
+      if (mounted && count > 1 && !_multiCamera) {
+        setState(() => _multiCamera = true);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _onSwitchCamera() async {
+    await _svc.switchCamera();
+    if (mounted) setState(() {});
   }
 
   Future<void> _prepareRenderers() async {
@@ -208,14 +229,13 @@ class _CallScreenState extends State<CallScreen> {
   Widget build(BuildContext context) {
     final phase = _svc.phase;
     final isGroup = _svc.isGroupCall;
-    final showVideo = !isGroup && _renderersReady && phase == CallPhase.active;
-    // 群通话接通/通话中：全屏自适应宫格 + 悬浮信息条 + 底部控制排
-    // （R2 gc2 重设计：原固定 2/3 列 GridView 在手机竖屏裁切末位瓦片、
-    // 桌面宽窗把瓦片压扁成宽黑条——改按视口与人数动态求行列）
-    final showGroupStage =
-        isGroup && (phase == CallPhase.connecting || phase == CallPhase.active);
-    final showControls =
+    // gc5：1:1 与群通话统一舞台（微信式）——connecting/active 用同一套
+    // 布局：远端瓦片（视频=自适应宫格铺满裁剪[Cover，修 1:1 Contain
+    // 两侧黑边]；语音=头像宫格）+ 悬浮信息条 + 底部渐变控制排 + 视频
+    // 时自己悬浮小窗。ringing/calling/ended/idle 保持原全屏占位布局。
+    final showStage =
         phase == CallPhase.connecting || phase == CallPhase.active;
+    final showControls = showStage;
     final topInset = MediaQuery.paddingOf(context).top;
     return PopScope(
       canPop: false,
@@ -239,35 +259,33 @@ class _CallScreenState extends State<CallScreen> {
         backgroundColor: const Color(0xFF16181C),
         body: Stack(
           children: [
-            if (showVideo && _remoteRenderer != null)
-              Positioned.fill(
-                child: RTCVideoView(_remoteRenderer!,
-                    objectFit:
-                        RTCVideoViewObjectFit.RTCVideoViewObjectFitContain),
-              ),
             // 必须 Positioned.fill：Stack 非定位子项收 loose 约束且默认
             // 左上对齐，SafeArea/Column 会收缩到最宽一行文字的宽度
             // （真机二轮：整页内容贴左不对齐的根因）
-            if (showGroupStage) ...[
+            if (showStage) ...[
               Positioned.fill(
-                child: SafeArea(child: _buildGroupStage()),
+                child: SafeArea(
+                  child: (_svc.type == CallType.video && !_renderersReady)
+                      ? _buildStagePending()
+                      : _buildStage(),
+                ),
               ),
               Positioned(
                 top: topInset + 8,
                 left: 12,
                 right: 12,
-                child: _buildGroupHeaderBar(),
+                child: _buildStageHeaderBar(),
               ),
               Positioned(
                 left: 0,
                 right: 0,
                 bottom: 0,
-                child: _buildGroupControlsBar(phase),
+                child: _buildStageControlsBar(phase),
               ),
-              // gc3 微信式：视频群通话自己为可拖动悬浮小窗（宫格只放远端）
-              if (_svc.type == CallType.video) _buildGroupSelfPip(context),
+              // gc3 微信式：视频通话自己为可拖动悬浮小窗（1:1 与群一致）
+              if (_svc.type == CallType.video) _buildStageSelfPip(context),
             ],
-            if (!showGroupStage)
+            if (!showStage)
               Positioned.fill(
                 child: SafeArea(
                   child: Column(
@@ -312,24 +330,50 @@ class _CallScreenState extends State<CallScreen> {
                   ),
                 ),
               ),
-            // 本地小窗（仅一对一视频）：可拖动 + Cover 满幅裁剪（真机十轮：
-            // 原 Contain 在竖框内上下留黑边；微信式小窗应满幅）
-            if (showVideo && _localRenderer != null) _buildLocalPip(context),
           ],
         ),
       ),
     );
   }
 
-  /// 群通话媒体区：按视口与人数动态求行列的自适应宫格，瓦片短边最大化
-  /// 铺满可用空间、末行居中——R2 gc2/gc3 重设计（原固定 crossAxisCount +
-  /// childAspectRatio 在手机竖屏把末位瓦片挤出视口、桌面宽窗按比例反推
-  /// 行高远超视口把瓦片压扁）。gc3 微信式：视频类型宫格只放远端成员，
-  /// 自己为可拖动悬浮小窗（_buildGroupSelfPip）；语音类型保持全员头像格。
-  Widget _buildGroupStage() {
+  /// 舞台成员数据源（gc5 统一 1:1 与群）：视频=仅远端（自己走悬浮小窗），
+  /// 语音=含自己的头像宫格；1:1 从 peer 构造、群从参与者构造。
+  List<String> get _stageMembers {
+    if (_svc.isGroupCall) {
+      return _svc.type == CallType.video ? _svc.remotePeers : _svc.participants;
+    }
+    final peer = _svc.peer;
+    if (peer == null) return const [];
+    if (_svc.type == CallType.video) return [peer];
+    final self = _svc.selfUsername;
+    return [if (self != null && self != peer) self, peer];
+  }
+
+  /// 视频渲染器未就绪占位（getUserMedia/initialize 异步窗口期）
+  Widget _buildStagePending() {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.videocam_rounded, color: Colors.white24, size: 56),
+          const SizedBox(height: 12),
+          Text('正在开启摄像头…',
+              style: TextStyle(
+                  color: Colors.white.withValues(alpha: .5), fontSize: 14)),
+        ],
+      ),
+    );
+  }
+
+  /// 通话舞台：按视口与人数动态求行列的自适应宫格，瓦片短边最大化
+  /// 铺满可用空间（视频 Cover 满幅裁剪——修 1:1 Contain 两侧黑边）、
+  /// 末行居中——R2 gc2/gc3/gc5（原固定 crossAxisCount + childAspectRatio
+  /// 在手机竖屏把末位瓦片挤出视口、桌面宽窗按比例反推行高远超视口把
+  /// 瓦片压扁）。
+  Widget _buildStage() {
     return LayoutBuilder(builder: (context, constraints) {
       final isVideo = _svc.type == CallType.video;
-      final all = isVideo ? _svc.remotePeers : _svc.participants;
+      final all = _stageMembers;
       if (all.isEmpty) {
         return Center(
           child: Column(
@@ -395,9 +439,23 @@ class _CallScreenState extends State<CallScreen> {
     required double gap,
     required bool videoGrid,
   }) {
-    Widget tile(String name) => name == _svc.selfUsername
-        ? _buildSelfTile(videoGrid)
-        : _buildRemoteTile(name, videoGrid);
+    Widget tile(String name) {
+      if (name == _svc.selfUsername) return _buildSelfTile(videoGrid);
+      var renderer = _groupRenderers[name];
+      var hasVideo = false;
+      if (_svc.isGroupCall) {
+        hasVideo = !_svc.peerCamOff(name) &&
+            renderer != null &&
+            _svc.remoteStreamOf(name) != null;
+      } else {
+        // 1:1：远端流经 attachRenderers 直挂 _remoteRenderer
+        renderer = _remoteRenderer;
+        hasVideo = _renderersReady && renderer != null;
+      }
+      return _buildRemoteTile(name,
+          renderer: hasVideo ? renderer : null, hasVideo: hasVideo);
+    }
+
     // 末行不满时固定瓦片宽度居中（微信式），满行 Expanded 均分
     if (isLast && members.length < fullCols) {
       return Row(
@@ -420,8 +478,9 @@ class _CallScreenState extends State<CallScreen> {
     );
   }
 
-  /// 悬浮信息条（覆在宫格上层）：最小化钮 + 群名 + 类型/状态一行小字
-  Widget _buildGroupHeaderBar() {
+  /// 悬浮信息条（覆在舞台上层，1:1 与群一致）：最小化钮 + 名称 +
+  /// 类型/状态一行小字（群带"群"前缀）
+  Widget _buildStageHeaderBar() {
     return Container(
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: .45),
@@ -453,7 +512,7 @@ class _CallScreenState extends State<CallScreen> {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  '群$_typeLabel · $_statusText',
+                  '${_svc.isGroupCall ? '群' : ''}$_typeLabel · $_statusText',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
@@ -467,8 +526,8 @@ class _CallScreenState extends State<CallScreen> {
     );
   }
 
-  /// 底部控制排：黑色渐变半透明底，覆在宫格上层（微信式）
-  Widget _buildGroupControlsBar(CallPhase phase) {
+  /// 底部控制排：黑色渐变半透明底，覆在舞台上层（1:1 与群一致）
+  Widget _buildStageControlsBar(CallPhase phase) {
     final bottomInset = MediaQuery.paddingOf(context).bottom;
     return Container(
       decoration: BoxDecoration(
@@ -504,21 +563,16 @@ class _CallScreenState extends State<CallScreen> {
     );
   }
 
-  Widget _buildRemoteTile(String name, bool videoGrid) {
-    final renderer = _groupRenderers[name];
-    final hasStream = videoGrid &&
-        _svc.type == CallType.video &&
-        !_svc.peerCamOff(name) &&
-        renderer != null &&
-        _svc.remoteStreamOf(name) != null;
+  Widget _buildRemoteTile(String name,
+      {RTCVideoRenderer? renderer, required bool hasVideo}) {
     return _tileFrame(
-      video: hasStream
+      video: hasVideo && renderer != null
           ? RTCVideoView(renderer,
               objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover)
           : null,
       placeholderIcon: Icons.person_rounded,
       label: name,
-      micMuted: _svc.peerMicMuted(name),
+      micMuted: _svc.isGroupCall && _svc.peerMicMuted(name),
     );
   }
 
@@ -583,11 +637,9 @@ class _CallScreenState extends State<CallScreen> {
     );
   }
 
-  Offset _defaultPipOffset(Size screen) => Offset(screen.width - 110 - 16, 96);
-
-  /// 群视频通话自己的悬浮小窗（微信式）：可拖动、镜像、关摄像头占位；
-  /// 与 1:1 小窗共用拖动偏移（一次只有一种布局在场）
-  Widget _buildGroupSelfPip(BuildContext context) {
+  /// 视频通话自己的悬浮小窗（微信式，1:1 与群一致）：可拖动、前置镜像
+  /// 后置不镜像、关摄像头占位
+  Widget _buildStageSelfPip(BuildContext context) {
     final screen = MediaQuery.sizeOf(context);
     final topInset = MediaQuery.paddingOf(context).top;
     final fallback = Offset(screen.width - 120 - 14, topInset + 64);
@@ -627,7 +679,7 @@ class _CallScreenState extends State<CallScreen> {
                 )
               : hasPreview
                   ? RTCVideoView(_localRenderer!,
-                      mirror: true,
+                      mirror: _svc.isFrontCamera,
                       objectFit:
                           RTCVideoViewObjectFit.RTCVideoViewObjectFitCover)
                   : const Center(
@@ -643,47 +695,10 @@ class _CallScreenState extends State<CallScreen> {
     );
   }
 
-  Offset _clampPip(Offset o, Size screen, {double w = 110, double h = 160}) {
+  Offset _clampPip(Offset o, Size screen, {double w = 120, double h = 170}) {
     return Offset(
       o.dx.clamp(8.0, screen.width - w - 8),
       o.dy.clamp(8.0, screen.height - h - 120),
-    );
-  }
-
-  Widget _buildLocalPip(BuildContext context) {
-    final screen = MediaQuery.sizeOf(context);
-    final pos = _clampPip(_pipOffset ?? _defaultPipOffset(screen), screen);
-    return Positioned(
-      left: pos.dx,
-      top: pos.dy,
-      child: GestureDetector(
-        onPanUpdate: (details) => setState(() {
-          _pipOffset = _clampPip(
-              (_pipOffset ?? _defaultPipOffset(screen)) + details.delta,
-              screen);
-        }),
-        child: Container(
-          width: 110,
-          height: 160,
-          decoration: BoxDecoration(
-            color: Colors.black26,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: Colors.white.withValues(alpha: .2)),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: _svc.cameraOff
-              ? const ColoredBox(
-                  color: Colors.black54,
-                  child: Center(
-                    child: Icon(Icons.videocam_off_rounded,
-                        color: Colors.white54, size: 30),
-                  ),
-                )
-              : RTCVideoView(_localRenderer!,
-                  mirror: true,
-                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
-        ),
-      ),
     );
   }
 
@@ -713,7 +728,8 @@ class _CallScreenState extends State<CallScreen> {
         );
       case CallPhase.connecting:
       case CallPhase.active:
-        // 微信式控制排：静音麦克风 / 免提（移动端）/ 关摄像头（视频）/ 挂断
+        // 微信式控制排：静音麦克风 / 切换镜头（多摄自动检测）/ 免提
+        // （移动端）/ 关摄像头（视频）/ 挂断
         final platform = effectiveTargetPlatform();
         final showSpeaker = platform == TargetPlatform.android ||
             platform == TargetPlatform.iOS;
@@ -725,6 +741,16 @@ class _CallScreenState extends State<CallScreen> {
               active: _svc.micMuted,
               onTap: _svc.toggleMic,
             ),
+            // 切换镜头：仅移动端多摄显示（桌面插件不支持 deviceId 切换）
+            if (_svc.type == CallType.video &&
+                _multiCamera &&
+                (platform == TargetPlatform.android ||
+                    platform == TargetPlatform.iOS))
+              _toggleButton(
+                icon: Icons.cameraswitch_rounded,
+                active: false,
+                onTap: _onSwitchCamera,
+              ),
             if (showSpeaker)
               _toggleButton(
                 icon: _svc.speakerOn

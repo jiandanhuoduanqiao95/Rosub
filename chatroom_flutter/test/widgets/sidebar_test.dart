@@ -31,7 +31,8 @@ void main() {
       final targets = [
         const ChatTarget(key: 'bob', displayName: 'bob'),
         const ChatTarget(key: 'carol', displayName: 'carol'),
-        const ChatTarget(key: 'group_1', displayName: '开发组 (ID:1)', isGroup: true),
+        const ChatTarget(
+            key: 'group_1', displayName: '开发组 (ID:1)', isGroup: true),
       ];
       await tester.pumpWidget(wrap(Sidebar(
         chatTargets: targets,

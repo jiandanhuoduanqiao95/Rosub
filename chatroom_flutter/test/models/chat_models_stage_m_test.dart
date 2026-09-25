@@ -36,7 +36,8 @@ void main() {
         'history_limit': 20,
       });
       expect(group.avatar, 'data:image/png;base64,AAA');
-      expect(group.historyVisible, isFalse, reason: 'history_visible=0 → false');
+      expect(group.historyVisible, isFalse,
+          reason: 'history_visible=0 → false');
       expect(group.historyLimit, 20);
     });
 

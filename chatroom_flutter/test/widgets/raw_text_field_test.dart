@@ -29,8 +29,8 @@ Future<void> press(WidgetTester tester, LogicalKeyboardKey key) async {
   await tester.pump();
 }
 
-Future<void> pressWith(
-    WidgetTester tester, LogicalKeyboardKey modifier, LogicalKeyboardKey key) async {
+Future<void> pressWith(WidgetTester tester, LogicalKeyboardKey modifier,
+    LogicalKeyboardKey key) async {
   await tester.sendKeyDownEvent(modifier);
   await tester.pump();
   await tester.sendKeyEvent(key);
@@ -69,7 +69,11 @@ void main() {
         controller: ctrl,
       )));
       await focusField(tester, const ValueKey('field'));
-      for (final key in [LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyB, LogicalKeyboardKey.keyC]) {
+      for (final key in [
+        LogicalKeyboardKey.keyA,
+        LogicalKeyboardKey.keyB,
+        LogicalKeyboardKey.keyC
+      ]) {
         await press(tester, key);
       }
       await press(tester, LogicalKeyboardKey.backspace);
@@ -178,12 +182,17 @@ void main() {
         controller: ctrl,
       )));
       await focusField(tester, const ValueKey('field'));
-      for (final key in [LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyB, LogicalKeyboardKey.keyC]) {
+      for (final key in [
+        LogicalKeyboardKey.keyA,
+        LogicalKeyboardKey.keyB,
+        LogicalKeyboardKey.keyC
+      ]) {
         await press(tester, key);
       }
       // 光标在 c 后，Shift+左 → 光标移到 c 上
       // （选区修复前：_deleteAfter 删 'c'；修复后：_deleteSelection 删选区 'c'，结果同为 'ab'）
-      await pressWith(tester, LogicalKeyboardKey.shiftLeft, LogicalKeyboardKey.arrowLeft);
+      await pressWith(
+          tester, LogicalKeyboardKey.shiftLeft, LogicalKeyboardKey.arrowLeft);
       await press(tester, LogicalKeyboardKey.delete);
       expect(ctrl.text, 'ab');
     });
@@ -195,10 +204,15 @@ void main() {
         controller: ctrl,
       )));
       await focusField(tester, const ValueKey('field'));
-      for (final key in [LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyB, LogicalKeyboardKey.keyC]) {
+      for (final key in [
+        LogicalKeyboardKey.keyA,
+        LogicalKeyboardKey.keyB,
+        LogicalKeyboardKey.keyC
+      ]) {
         await press(tester, key);
       }
-      await pressWith(tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyA);
+      await pressWith(
+          tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyA);
       await press(tester, LogicalKeyboardKey.keyZ);
       expect(ctrl.text, 'z');
     });
@@ -213,8 +227,10 @@ void main() {
         controller: ctrl,
       )));
       await focusField(tester, const ValueKey('field'));
-      await pressWith(tester, LogicalKeyboardKey.shiftLeft, LogicalKeyboardKey.arrowLeft);
-      await pressWith(tester, LogicalKeyboardKey.shiftLeft, LogicalKeyboardKey.arrowLeft);
+      await pressWith(
+          tester, LogicalKeyboardKey.shiftLeft, LogicalKeyboardKey.arrowLeft);
+      await pressWith(
+          tester, LogicalKeyboardKey.shiftLeft, LogicalKeyboardKey.arrowLeft);
       await press(tester, LogicalKeyboardKey.keyX);
       expect(ctrl.text, 'x', reason: '选区应替换而非插入（缺陷修复后应成立）');
     });
@@ -239,8 +255,10 @@ void main() {
         controller: ctrl,
       )));
       await focusField(tester, const ValueKey('field'));
-      await pressWith(tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyA);
-      await pressWith(tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyC);
+      await pressWith(
+          tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyA);
+      await pressWith(
+          tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyC);
       expect(copied, 'hello world');
       expect(ctrl.text, 'hello world', reason: '复制不改动原文');
     });
@@ -265,7 +283,8 @@ void main() {
         controller: ctrl,
       )));
       await focusField(tester, const ValueKey('field'));
-      await pressWith(tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyC);
+      await pressWith(
+          tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyC);
       expect(copied, isNull);
     });
 
@@ -289,8 +308,10 @@ void main() {
         controller: ctrl,
       )));
       await focusField(tester, const ValueKey('field'));
-      await pressWith(tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyA);
-      await pressWith(tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyX);
+      await pressWith(
+          tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyA);
+      await pressWith(
+          tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyX);
       expect(copied, 'abcdef');
       expect(ctrl.text, '');
     });
@@ -315,7 +336,8 @@ void main() {
       )));
       await focusField(tester, const ValueKey('field'));
       await press(tester, LogicalKeyboardKey.arrowLeft);
-      await pressWith(tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyV);
+      await pressWith(
+          tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyV);
       await tester.pump();
       expect(ctrl.text, 'aPASTEDb');
     });
@@ -341,7 +363,8 @@ void main() {
         onSubmitted: (t) => submitted = t,
       )));
       await focusField(tester, const ValueKey('field'));
-      await pressWith(tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyV);
+      await pressWith(
+          tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyV);
       await tester.pump();
       expect(submitted, 'first');
       // 记录现状：提交后不清空输入框，换行后内容继续追加
@@ -367,7 +390,8 @@ void main() {
         controller: ctrl,
       )));
       await focusField(tester, const ValueKey('field'));
-      await pressWith(tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyV);
+      await pressWith(
+          tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyV);
       await tester.pump();
       expect(ctrl.text, '中文🙂x');
     });
@@ -389,7 +413,8 @@ void main() {
         controller: ctrl,
       )));
       await focusField(tester, const ValueKey('field'));
-      await pressWith(tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyV);
+      await pressWith(
+          tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyV);
       await tester.pump();
       expect(ctrl.text, 'keep');
     });
@@ -402,7 +427,8 @@ void main() {
       )));
       await focusField(tester, const ValueKey('field'));
       // 全选后输入 'X' → 替换全部
-      await pressWith(tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyA);
+      await pressWith(
+          tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyA);
       await press(tester, LogicalKeyboardKey.keyX);
       expect(ctrl.text, 'x');
     });
@@ -417,7 +443,8 @@ void main() {
       )));
       await focusField(tester, const ValueKey('field'));
       for (var i = 0; i < 5; i++) {
-        await pressWith(tester, LogicalKeyboardKey.shiftLeft, LogicalKeyboardKey.arrowLeft);
+        await pressWith(
+            tester, LogicalKeyboardKey.shiftLeft, LogicalKeyboardKey.arrowLeft);
       }
       await press(tester, LogicalKeyboardKey.backspace);
       expect(ctrl.text, '', reason: '退格应删除选区（缺陷修复后应成立）');
@@ -510,7 +537,8 @@ void main() {
       expect(handled, isTrue);
       expect(ctrl.text, 'q');
       // Ctrl+未定义组合键 → ignored 且不产生输入
-      await pressWith(tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyQ);
+      await pressWith(
+          tester, LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.keyQ);
       expect(ctrl.text, 'q');
     });
 

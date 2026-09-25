@@ -195,14 +195,12 @@ void main() {
     test('removeMessageLocally 对不存在消息静默不崩溃', () {
       state.setLoggedIn('alice', false);
       state.addMessage('bob', _chatMsg('m1', 'alice', 'x'));
-      expect(
-          () => state.removeMessageLocally('bob', 'ghost'), returnsNormally);
+      expect(() => state.removeMessageLocally('bob', 'ghost'), returnsNormally);
       expect(state.getMessages('bob').length, 1);
     });
 
     test('removeMessageLocally 对未知会话静默不崩溃', () {
-      expect(
-          () => state.removeMessageLocally('ghost', 'm1'), returnsNormally);
+      expect(() => state.removeMessageLocally('ghost', 'm1'), returnsNormally);
     });
 
     test('removeMessageLocally 触发监听通知', () {

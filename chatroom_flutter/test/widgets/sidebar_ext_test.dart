@@ -43,7 +43,8 @@ void main() {
     testWidgets('长按群组触发 onGroupLongPress 且携带目标', (tester) async {
       ChatTarget? pressed;
       final targets = [
-        const ChatTarget(key: 'group_1', displayName: '开发组 (ID:1)', isGroup: true),
+        const ChatTarget(
+            key: 'group_1', displayName: '开发组 (ID:1)', isGroup: true),
       ];
       await tester.pumpWidget(wrap(Sidebar(
         chatTargets: targets,
@@ -137,7 +138,8 @@ void main() {
     testWidgets('选中会话高亮且标题加粗（不崩溃）', (tester) async {
       final targets = [
         const ChatTarget(key: 'bob', displayName: 'bob'),
-        const ChatTarget(key: 'group_1', displayName: 'g (ID:1)', isGroup: true),
+        const ChatTarget(
+            key: 'group_1', displayName: 'g (ID:1)', isGroup: true),
         const ChatTarget(key: '服务器', displayName: '系统消息'),
       ];
       await tester.pumpWidget(wrap(Sidebar(

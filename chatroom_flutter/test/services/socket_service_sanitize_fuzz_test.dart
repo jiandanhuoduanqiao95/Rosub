@@ -24,7 +24,9 @@ void main() {
             (_) => _alnum.codeUnitAt(prng.nextInt(_alnum.length)))),
         1 => String.fromCharCodes(List.generate(prng.nextInt(15) + 1,
             (_) => _mixed.codeUnitAt(prng.nextInt(_mixed.length)))),
-        _ => List.generate(prng.nextInt(5) + 1, (_) => prng.nextInt(2) == 0 ? '/' : r'\').join(),
+        _ => List.generate(
+                prng.nextInt(5) + 1, (_) => prng.nextInt(2) == 0 ? '/' : r'\')
+            .join(),
       };
     }
 
@@ -60,8 +62,8 @@ void main() {
     test('纯随机字节串（含控制字符）不崩溃且保持不变量', () {
       for (var i = 0; i < 2000; i++) {
         final len = prng.nextInt(64);
-        final bytes = List.generate(
-            len, (_) => prng.nextInt(0x100)); // 任意字节 0-255
+        final bytes =
+            List.generate(len, (_) => prng.nextInt(0x100)); // 任意字节 0-255
         final input = String.fromCharCodes(bytes);
         final out = SocketService.sanitizeFilename(input);
         expect(out.contains('/'), isFalse, reason: 'input=${input.codeUnits}');
@@ -76,7 +78,11 @@ void main() {
         final input = List.generate(n, (_) => '.').join() +
             (prng.nextInt(2) == 0 ? '/' : '');
         final out = SocketService.sanitizeFilename(input);
-        if (input == '..' || input == '.' || input == '/' || input == r'\' || input.isEmpty) {
+        if (input == '..' ||
+            input == '.' ||
+            input == '/' ||
+            input == r'\' ||
+            input.isEmpty) {
           expect(out, 'received_file', reason: 'input=$input');
         } else {
           expect(out, isNot('..'), reason: 'input=$input');

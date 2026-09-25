@@ -52,11 +52,15 @@ void main() {
     });
 
     test('android 应用级构建文件存在', () {
-      expect(anyFileNamed('android', 'build.gradle')
-          .xor(anyFileNamed('android', 'build.gradle.kts')), isTrue,
+      expect(
+          anyFileNamed('android', 'build.gradle')
+              .xor(anyFileNamed('android', 'build.gradle.kts')),
+          isTrue,
           reason: 'android/app/build.gradle（Groovy 或 Kotlin DSL 均可）');
-      expect(anyFileNamed('android', 'settings.gradle')
-          .xor(anyFileNamed('android', 'settings.gradle.kts')), isTrue);
+      expect(
+          anyFileNamed('android', 'settings.gradle')
+              .xor(anyFileNamed('android', 'settings.gradle.kts')),
+          isTrue);
     });
 
     test('AndroidManifest.xml 存在', () {
@@ -64,8 +68,10 @@ void main() {
     });
 
     test('MainActivity 入口存在（Kotlin 或 Java）', () {
-      expect(anyFileNamed('android', 'MainActivity.kt')
-          .xor(anyFileNamed('android', 'MainActivity.java')), isTrue);
+      expect(
+          anyFileNamed('android', 'MainActivity.kt')
+              .xor(anyFileNamed('android', 'MainActivity.java')),
+          isTrue);
     });
   });
 
@@ -88,8 +94,7 @@ void main() {
     });
 
     test('Xcode 工程与 Runner 入口存在', () {
-      expect(
-          fileExists('macos/Runner.xcodeproj/project.pbxproj'), isTrue);
+      expect(fileExists('macos/Runner.xcodeproj/project.pbxproj'), isTrue);
       expect(fileExists('macos/Runner/AppDelegate.swift'), isTrue);
       expect(fileExists('macos/Runner/Info.plist'), isTrue);
     });
@@ -102,8 +107,10 @@ void main() {
 
     test('Xcode 工程与 Runner 入口存在', () {
       expect(fileExists('ios/Runner.xcodeproj/project.pbxproj'), isTrue);
-      expect(fileExists('ios/Runner/AppDelegate.swift')
-          .xor(fileExists('ios/Runner/AppDelegate.mm')), isTrue);
+      expect(
+          fileExists('ios/Runner/AppDelegate.swift')
+              .xor(fileExists('ios/Runner/AppDelegate.mm')),
+          isTrue);
       expect(fileExists('ios/Runner/Info.plist'), isTrue);
     });
   });

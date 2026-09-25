@@ -288,18 +288,15 @@ class _LoginScreenState extends State<LoginScreen> {
             const EdgeInsets.symmetric(horizontal: 16, vertical: 15),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
-          borderSide:
-              BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+          borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
-          borderSide:
-              BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+          borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
-          borderSide: const BorderSide(
-              color: Color(0xFF3B82F6), width: 1.4),
+          borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.4),
         ),
       ),
     );
@@ -597,8 +594,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       }
                       _fillAccount(account);
                     },
-                    onLongPress: () =>
-                        setState(() => _accountEditMode = true),
+                    onLongPress: () => setState(() => _accountEditMode = true),
                     onRemove: () => _removeAccount(account),
                   ),
               ],
@@ -640,8 +636,7 @@ class _LoginScreenState extends State<LoginScreen> {
             borderRadius: BorderRadius.circular(10),
             onTap: _loading
                 ? null
-                : () =>
-                    setState(() => _dontRecordLogin = !_dontRecordLogin),
+                : () => setState(() => _dontRecordLogin = !_dontRecordLogin),
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: 6),
               child: Row(
@@ -655,15 +650,14 @@ class _LoginScreenState extends State<LoginScreen> {
                       visualDensity: VisualDensity.compact,
                       onChanged: _loading
                           ? null
-                          : (v) => setState(
-                              () => _dontRecordLogin = v ?? false),
+                          : (v) =>
+                              setState(() => _dontRecordLogin = v ?? false),
                     ),
                   ),
                   const SizedBox(width: 10),
                   const Text(
                     '不记录此次登录',
-                    style:
-                        TextStyle(fontSize: 13, color: Color(0xFFCBD5E1)),
+                    style: TextStyle(fontSize: 13, color: Color(0xFFCBD5E1)),
                   ),
                 ],
               ),
@@ -1425,8 +1419,8 @@ class _SavedAccountChip extends StatelessWidget {
                     account.username,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        fontSize: 14, color: Color(0xFFE2E8F0)),
+                    style:
+                        const TextStyle(fontSize: 14, color: Color(0xFFE2E8F0)),
                   ),
                 ),
               ],
@@ -1446,8 +1440,8 @@ class _SavedAccountChip extends StatelessWidget {
                   decoration: BoxDecoration(
                     color: const Color(0xFFEF4444),
                     shape: BoxShape.circle,
-                    border: Border.all(
-                        color: const Color(0xFF070D1A), width: 2),
+                    border:
+                        Border.all(color: const Color(0xFF070D1A), width: 2),
                   ),
                   child: const Icon(Icons.close_rounded,
                       size: 13, color: Colors.white),

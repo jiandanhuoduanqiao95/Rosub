@@ -88,8 +88,8 @@ void main() {
       // 已回到登录页，session 已清除 → 字段为空
       expect(find.text('登录'), findsWidgets);
       expect(find.textContaining('自动登录'), findsNothing);
-      final usernameField = tester
-          .widget<AdaptiveTextField>(find.byKey(const ValueKey('username_field')));
+      final usernameField = tester.widget<AdaptiveTextField>(
+          find.byKey(const ValueKey('username_field')));
       expect(usernameField.controller.text, '');
     });
 

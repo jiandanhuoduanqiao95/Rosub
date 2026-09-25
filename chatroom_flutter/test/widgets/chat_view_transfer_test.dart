@@ -115,8 +115,7 @@ void main() {
   });
 
   group('Q1 七轮 —— 文件传输失败行（发送方提醒）', () {
-    testWidgets('failed 文件气泡显示"传输失败，点击重新发送"，点击触发重发回调',
-        (tester) async {
+    testWidgets('failed 文件气泡显示"传输失败，点击重新发送"，点击触发重发回调', (tester) async {
       final retried = <String>[];
       await tester.pumpWidget(buildView([
         ChatMessage(
@@ -139,8 +138,7 @@ void main() {
       expect(retried, ['f9']);
     });
 
-    testWidgets('未提供重发回调时显示"传输失败，建议重新发送"（仅提醒）',
-        (tester) async {
+    testWidgets('未提供重发回调时显示"传输失败，建议重新发送"（仅提醒）', (tester) async {
       await tester.pumpWidget(buildView([
         ChatMessage(
           sender: 'alice',

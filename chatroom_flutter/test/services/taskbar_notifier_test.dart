@@ -176,16 +176,14 @@ void main() {
     test('未聚焦 + 系统公告 → 闪烁', () {
       FocusTracker.instance.updateFocus(false);
       TaskbarNotifier.maybeFlashForMessage(
-          msg(sender: '[系统公告]', content: '今晚维护', type: 'system'),
-          '服务器');
+          msg(sender: '[系统公告]', content: '今晚维护', type: 'system'), '服务器');
       expect(calls, [true]);
     });
 
     test('未聚焦 + 普通系统消息（操作确认）→ 不闪烁', () {
       FocusTracker.instance.updateFocus(false);
       TaskbarNotifier.maybeFlashForMessage(
-          msg(sender: '系统', content: '好友请求已发送', type: 'system'),
-          '服务器');
+          msg(sender: '系统', content: '好友请求已发送', type: 'system'), '服务器');
       expect(calls, isEmpty);
     });
 

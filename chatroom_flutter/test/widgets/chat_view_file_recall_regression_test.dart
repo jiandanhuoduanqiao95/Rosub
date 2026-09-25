@@ -65,8 +65,7 @@ ChatView view(List<ChatMessage> messages) {
 
 void main() {
   group('文件撤回气泡 —— 消息体后附加"已撤回"标志（P-48 缺陷回归锁定）', () {
-    testWidgets('自己撤回的文件消息：显示文件体 + [已撤回]，不再替换为 [消息已撤回]',
-        (tester) async {
+    testWidgets('自己撤回的文件消息：显示文件体 + [已撤回]，不再替换为 [消息已撤回]', (tester) async {
       await tester.pumpWidget(wrap(view([
         fileMsg('alice', 'f1', filename: '报告.pdf', status: 'recalled'),
       ])));
@@ -74,17 +73,14 @@ void main() {
           reason: '消息体后附加"已撤回"标志');
       expect(find.textContaining('[消息已撤回]'), findsNothing,
           reason: '文件消息不得替换为 [消息已撤回]');
-      expect(find.textContaining('报告.pdf'), findsOneWidget,
-          reason: '文件信息必须保留');
+      expect(find.textContaining('报告.pdf'), findsOneWidget, reason: '文件信息必须保留');
       await tester.pump(const Duration(seconds: 3));
     });
 
     testWidgets('对方撤回的文件消息（接收侧）：同样显示文件体 + [已撤回]', (tester) async {
       await tester.pumpWidget(wrap(view([
         fileMsg('bob', 'f2',
-            content: '[收到文件] 资料.zip',
-            filename: '资料.zip',
-            status: 'recalled'),
+            content: '[收到文件] 资料.zip', filename: '资料.zip', status: 'recalled'),
       ])));
       expect(find.text('[收到文件] 资料.zip [已撤回]'), findsOneWidget);
       expect(find.textContaining('[消息已撤回]'), findsNothing);
@@ -123,8 +119,7 @@ void main() {
       await tester.pump(const Duration(seconds: 3));
     });
 
-    testWidgets('已撤回的文件消息长按不弹菜单（系统/已撤回消息不弹菜单回归）',
-        (tester) async {
+    testWidgets('已撤回的文件消息长按不弹菜单（系统/已撤回消息不弹菜单回归）', (tester) async {
       await tester.pumpWidget(wrap(view([
         fileMsg('alice', 'f4', filename: '报告.pdf', status: 'recalled'),
       ])));
@@ -144,12 +139,13 @@ void main() {
           messageId: 'f5',
           filename: 'a.pdf',
           status: 'recalled',
-          reactions: const {'👍': ['bob']},
+          reactions: const {
+            '👍': ['bob']
+          },
         ),
       ])));
       expect(find.text('[文件] a.pdf [已撤回]'), findsOneWidget);
-      expect(find.textContaining('👍'), findsNothing,
-          reason: '已撤回消息不渲染表情回应');
+      expect(find.textContaining('👍'), findsNothing, reason: '已撤回消息不渲染表情回应');
       await tester.pump(const Duration(seconds: 3));
     });
   });

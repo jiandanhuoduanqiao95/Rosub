@@ -77,8 +77,7 @@ void main() {
           path,
           _zip({
             '[Content_Types].xml': '<Types/>',
-            'word/document.xml':
-                '<w:document><w:body>'
+            'word/document.xml': '<w:document><w:body>'
                 '<w:p><w:r><w:t>第一段标题</w:t></w:r></w:p>'
                 '<w:p><w:r><w:t>A &amp; B &lt;tag&gt;</w:t></w:r></w:p>'
                 '</w:body></w:document>',
@@ -119,8 +118,7 @@ void main() {
           _zip({
             'xl/sharedStrings.xml': '<sst><si><t>名称</t></si>'
                 '<si><t>数量</t></si></sst>',
-            'xl/worksheets/sheet1.xml':
-                '<worksheet><sheetData>'
+            'xl/worksheets/sheet1.xml': '<worksheet><sheetData>'
                 '<row r="1"><c r="A1" t="s"><v>0</v></c>'
                 '<c r="B1" t="s"><v>1</v></c></row>'
                 '<row r="2"><c r="A2"><v>42</v></c>'
@@ -196,16 +194,18 @@ void main() {
       _write(
           path,
           _zip({
-            'word/document.xml':
-                '<w:document><w:body>'
+            'word/document.xml': '<w:document><w:body>'
                 '<w:p><w:r><w:t>项目周报正文</w:t></w:r></w:p>'
                 '</w:body></w:document>',
           }));
 
       await pumpPreviewOpener(
         tester,
-        (ctx) => showFilePreviewDialog(ctx, filename: 'report.docx',
-            path: path, filesize: 2048, sender: 'alice'),
+        (ctx) => showFilePreviewDialog(ctx,
+            filename: 'report.docx',
+            path: path,
+            filesize: 2048,
+            sender: 'alice'),
       );
 
       expect(find.textContaining('Word 文档预览'), findsOneWidget,

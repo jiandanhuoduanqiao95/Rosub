@@ -44,7 +44,8 @@ Future<Uint8List> makePng(int w, int h) async {
 Future<ui.Size> decodeSize(Uint8List bytes) async {
   final codec = await ui.instantiateImageCodec(bytes);
   final frame = await codec.getNextFrame();
-  final size = Size(frame.image.width.toDouble(), frame.image.height.toDouble());
+  final size =
+      Size(frame.image.width.toDouble(), frame.image.height.toDouble());
   frame.image.dispose();
   codec.dispose();
   return size;
@@ -64,12 +65,10 @@ void main() {
   });
 
   group('P4 —— ImageAnnotator.compose 合成', () {
-    testWidgets('无标注（controller null）→ 原字节直通（同一实例）',
-        (tester) async {
+    testWidgets('无标注（controller null）→ 原字节直通（同一实例）', (tester) async {
       final bytes = (await tester.runAsync(() => makePng(60, 40)))!;
       final out = await ImageAnnotator.compose(bytes);
-      expect(identical(out, bytes), isTrue,
-          reason: '无标注走零重绘快速路径');
+      expect(identical(out, bytes), isTrue, reason: '无标注走零重绘快速路径');
     });
 
     testWidgets('无标注（controller 无修改）→ 原字节直通', (tester) async {
@@ -126,8 +125,7 @@ void main() {
       expect(size.height, 40);
     });
 
-    testWidgets('越界裁剪框：调用方用 clampCropRect 钳制后合成不抛异常',
-        (tester) async {
+    testWidgets('越界裁剪框：调用方用 clampCropRect 钳制后合成不抛异常', (tester) async {
       final bytes = (await tester.runAsync(() => makePng(100, 80)))!;
       const raw = Rect.fromLTWH(60, 50, 80, 60);
       final clamped = clampCropRect(raw, const Size(100, 80));

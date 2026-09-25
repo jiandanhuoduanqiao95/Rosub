@@ -79,8 +79,8 @@ void main() {
 
   group('Q1 二轮 —— Android 登录/注册布局（问题7）', () {
     testWidgetsOnPlatform(
-        '无品牌区（logo/标题/介绍），滑块切换 + 账号磁贴 + 表单全屏',
-        TargetPlatform.android, (tester) async {
+        '无品牌区（logo/标题/介绍），滑块切换 + 账号磁贴 + 表单全屏', TargetPlatform.android,
+        (tester) async {
       await pumpLogin(tester);
 
       expect(find.text('私有化部署的即时通讯'), findsNothing, reason: '品牌介绍删除');
@@ -121,8 +121,7 @@ void main() {
   });
 
   group('Q1 三轮 —— 账号删除编辑态（问题1：长按出叉 / 点叉删除 / 侧滑取消）', () {
-    testWidgetsOnPlatform(
-        '普通态无叉号；长按磁贴 → 编辑态叉号浮现', TargetPlatform.android,
+    testWidgetsOnPlatform('普通态无叉号；长按磁贴 → 编辑态叉号浮现', TargetPlatform.android,
         (tester) async {
       await pumpLogin(tester);
 
@@ -137,8 +136,8 @@ void main() {
           reason: '长按进入编辑态：磁贴右上角叉号');
     });
 
-    testWidgetsOnPlatform('点叉号 → 直接删除（钥匙串账号列表与当前凭据清除）',
-        TargetPlatform.android, (tester) async {
+    testWidgetsOnPlatform('点叉号 → 直接删除（钥匙串账号列表与当前凭据清除）', TargetPlatform.android,
+        (tester) async {
       await pumpLogin(tester);
 
       await tester.longPress(find.byKey(const ValueKey('saved_account_alice')));
@@ -173,8 +172,8 @@ void main() {
       expect(await SessionStore.loadAccounts(), isNotEmpty);
     });
 
-    testWidgetsOnPlatform('编辑态点击磁贴本体 → 退出编辑态（不回填不删除）',
-        TargetPlatform.android, (tester) async {
+    testWidgetsOnPlatform('编辑态点击磁贴本体 → 退出编辑态（不回填不删除）', TargetPlatform.android,
+        (tester) async {
       await pumpLogin(tester);
 
       await tester.longPress(find.byKey(const ValueKey('saved_account_alice')));
@@ -190,8 +189,7 @@ void main() {
   });
 
   group('Q1 三轮 —— 不记录此次登录（问题1 勾选项）', () {
-    testWidgetsOnPlatform('勾选行点击切换勾选态', TargetPlatform.android,
-        (tester) async {
+    testWidgetsOnPlatform('勾选行点击切换勾选态', TargetPlatform.android, (tester) async {
       await pumpLogin(tester);
 
       Checkbox checkbox() => tester.widget<Checkbox>(

@@ -198,8 +198,7 @@ void main() {
             .hasFilters,
         isTrue,
       );
-      expect(
-          const MessageSearchFilter(keyword: 'x').hasFilters, isTrue);
+      expect(const MessageSearchFilter(keyword: 'x').hasFilters, isTrue);
     });
 
     test('toHeaders：空条件仅携带 keyword', () {
@@ -229,10 +228,9 @@ void main() {
       final headers = filter.toHeaders();
       final expectedFrom =
           (DateTime(2026, 1, 1).millisecondsSinceEpoch ~/ 1000).toString();
-      final expectedTo = (DateTime(2026, 12, 31, 23, 59, 59)
-              .millisecondsSinceEpoch ~/
-          1000)
-          .toString();
+      final expectedTo =
+          (DateTime(2026, 12, 31, 23, 59, 59).millisecondsSinceEpoch ~/ 1000)
+              .toString();
       expect(headers['time_from'], expectedFrom);
       expect(headers['time_to'], expectedTo);
       expect(headers.length, 3, reason: 'keyword 恒在');

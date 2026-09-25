@@ -152,8 +152,7 @@ void main() {
       expect(find.byTooltip('退出'), findsOneWidget);
     });
 
-    testWidgets('Q1 八轮问题1：进入聊天后返回列表态，AppBar 不残留会话名',
-        (tester) async {
+    testWidgets('Q1 八轮问题1：进入聊天后返回列表态，AppBar 不残留会话名', (tester) async {
       final socket = MockSocketService();
       stubCommon(socket);
       state.setLoggedIn('alice', false);
@@ -162,7 +161,8 @@ void main() {
       await pumpChat(tester, socket);
       await tester.tap(find.text('bob'));
       await tester.pumpAndSettle();
-      expect(find.descendant(of: find.byType(AppBar), matching: find.text('bob')),
+      expect(
+          find.descendant(of: find.byType(AppBar), matching: find.text('bob')),
           findsOneWidget,
           reason: '聊天态 AppBar 显示会话名');
 
@@ -171,13 +171,11 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-          find.descendant(
-              of: find.byType(AppBar), matching: find.text('bob')),
+          find.descendant(of: find.byType(AppBar), matching: find.text('bob')),
           findsNothing,
           reason: 'currentChat 常驻（selectChat 语义）但列表态 AppBar '
               '不得残留对方名称（六轮宽屏标题条件的回归）');
-      expect(find.byTooltip('退出'), findsOneWidget,
-          reason: '列表态工具栏正常');
+      expect(find.byTooltip('退出'), findsOneWidget, reason: '列表态工具栏正常');
     });
 
     testWidgets('Q1 六轮问题2：Android 宽屏选中会话 AppBar 恒显示会话名', (tester) async {
@@ -349,8 +347,8 @@ void main() {
     });
 
     testWidgetsOnPlatform(
-        'Android 会话列表态：AppBar 无"聊天室 - 用户名"标题（Q1 四轮问题3）',
-        TargetPlatform.android, (tester) async {
+        'Android 会话列表态：AppBar 无"聊天室 - 用户名"标题（Q1 四轮问题3）', TargetPlatform.android,
+        (tester) async {
       final socket = MockSocketService();
       stubCommon(socket);
       state.setLoggedIn('alice', false);
@@ -455,13 +453,12 @@ void main() {
           reason: '接收方气泡内进度条 + 全局传输指示条（AppBar 下方，'
               '任何界面可见）；与服务端 send_message_header_only 携带 '
               'message_id 的头部契约对齐：气泡 id == 传输 id');
-      expect(find.text('接收 big.bin'), findsOneWidget,
-          reason: '全局指示条：方向 + 文件名');
+      expect(find.text('接收 big.bin'), findsOneWidget, reason: '全局指示条：方向 + 文件名');
       expect(find.text('40%'), findsNWidgets(2));
     });
 
-    testWidgetsOnPlatform('传输发生在别的会话：全局指示条仍可见，点击跳转',
-        TargetPlatform.android, (tester) async {
+    testWidgetsOnPlatform('传输发生在别的会话：全局指示条仍可见，点击跳转', TargetPlatform.android,
+        (tester) async {
       final socket = MockSocketService();
       stubCommon(socket);
       state.setLoggedIn('alice', false);
@@ -491,9 +488,7 @@ void main() {
 
       await tester.tap(find.text('接收 movie.mp4'));
       await tester.pumpAndSettle();
-      expect(find.text('carol'), findsWidgets,
-          reason: '点击指示条跳转到传输所属会话');
+      expect(find.text('carol'), findsWidgets, reason: '点击指示条跳转到传输所属会话');
     });
   });
-
 }

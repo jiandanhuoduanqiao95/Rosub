@@ -135,14 +135,14 @@ s.close()
 ''';
 
 Future<bool> waitUntil(bool Function() cond,
-    {int tries = 40, Duration delay = const Duration(milliseconds: 250)}) async {
+    {int tries = 40,
+    Duration delay = const Duration(milliseconds: 250)}) async {
   for (var i = 0; i < tries; i++) {
     if (cond()) return true;
     await Future<void>.delayed(delay);
   }
   return cond();
 }
-
 
 /// 写入 E2E 辅助脚本：确保 /tmp/opencode 目录存在
 /// （部分环境该目录缺失会导致 writeAsStringSync 抛 PathNotFoundException）
@@ -184,13 +184,13 @@ void main() {
     AppConfig.serverPort = 8090;
   });
 
-  Future<Process> startHelper(String name, String scriptSrc, String pyFile) async {
+  Future<Process> startHelper(
+      String name, String scriptSrc, String pyFile) async {
     final root = Directory.current.parent;
     final script = File('/tmp/opencode/$pyFile');
     _writeE2eScript(script, scriptSrc);
     return Process.start('${root.path}/.venv/bin/python', [script.path],
-        environment: {'CHATROOM_ROOT': root.path},
-        workingDirectory: root.path);
+        environment: {'CHATROOM_ROOT': root.path}, workingDirectory: root.path);
   }
 
   test('群主治理端到端：邀请/审批/踢人/改名/历史可见性/转让（真实服务端）', () async {
@@ -210,44 +210,41 @@ void main() {
     await carol.requestJoinGroup(2);
 
     // ---- 2. M2 邀请制：alice 邀请 → carol 收到邀请并接受 ----
-    final invited = await waitUntil(
-        () => state.invitations.any((i) => i.groupId == 1));
+    final invited =
+        await waitUntil(() => state.invitations.any((i) => i.groupId == 1));
     expect(invited, isTrue, reason: 'alice 邀请后 carol 应收到 group_invite');
     await carol.acceptGroupInvite(1);
     final joined1 = await waitUntil(() => state.groups.any((g) => g.id == 1));
     expect(joined1, isTrue, reason: '接受邀请后 carol 群列表应含群 1');
 
     // ---- 3. M1 群主标识：alice 批准后 carol 入群 2，但群主仍是 alice ----
-    final joined2 = await waitUntil(() => state.groups.any((g) => g.id == 2),
-        tries: 60);
-    expect(joined2, isTrue,
-        reason: 'alice 批准后 carol 群列表应含群 2（list_groups 刷新）');
+    final joined2 =
+        await waitUntil(() => state.groups.any((g) => g.id == 2), tries: 60);
+    expect(joined2, isTrue, reason: 'alice 批准后 carol 群列表应含群 2（list_groups 刷新）');
     expect(state.isGroupOwner(2), isFalse,
         reason: 'carol 加入后不是群 2 群主（created_by=alice）');
 
     // ---- 4. M3 历史可见性（开启）：carol 可见 bob 加入前消息 ----
     await carol.fetchHistory(groupId: 2);
-    final sawPreJoin = await waitUntil(
-        () => state.getMessages('group_2').any((m) => m.content == 'before-carol'));
-    expect(sawPreJoin, isTrue,
-        reason: '历史可见性开启时新成员应可见加入前最近消息（P1-18 默认）');
+    final sawPreJoin = await waitUntil(() =>
+        state.getMessages('group_2').any((m) => m.content == 'before-carol'));
+    expect(sawPreJoin, isTrue, reason: '历史可见性开启时新成员应可见加入前最近消息（P1-18 默认）');
 
     // ---- 5. M1 踢人：alice 将 carol 移出群 1 → carol 群列表移除 ----
-    final kicked = await waitUntil(() => !state.groups.any((g) => g.id == 1),
-        tries: 60);
+    final kicked =
+        await waitUntil(() => !state.groups.any((g) => g.id == 1), tries: 60);
     expect(kicked, isTrue, reason: '被群主移出后 carol 群列表应移除群 1');
 
     // ---- 6. M1 改名：alice 改名 → carol 侧群名称更新 ----
-    final renamed = await waitUntil(() => state.getGroupName(2) == '新群名',
-        tries: 60);
+    final renamed =
+        await waitUntil(() => state.getGroupName(2) == '新群名', tries: 60);
     expect(renamed, isTrue, reason: '群主改名后 carol 侧群名称应更新');
 
     // ---- 7. M3 历史可见性（关闭）：carol 重新登录后 fetchHistory 为空 ----
     // 转让前 alice 已关闭群 2 历史可见性（t≈13.3s 先于 t≈16.1s 转让）；
     // carol 本地已缓存 step 4 拉取的 before-carol，重新登录（清空本地）
     // 后 fetch 验证服务端过滤（P1-18）。
-    final transferred = await waitUntil(() => state.isGroupOwner(2),
-        tries: 60);
+    final transferred = await waitUntil(() => state.isGroupOwner(2), tries: 60);
     expect(transferred, isTrue,
         reason: '群主转让后 carol 应成为群 2 群主（list_groups created_by 刷新）');
     carol.disconnect();
@@ -258,15 +255,15 @@ void main() {
         reason: 'carol 重新登录应成功');
     await carol2.fetchHistory(groupId: 2);
     await Future<void>.delayed(const Duration(milliseconds: 500));
-    expect(state.getMessages('group_2').where((m) => m.content == 'before-carol'),
+    expect(
+        state.getMessages('group_2').where((m) => m.content == 'before-carol'),
         isEmpty,
         reason: '群主关闭历史可见性后，新成员历史应不可见（P1-18）');
 
     // ---- 8. M8 文件列表：契约接线（无文件 → 空记录）----
     await carol2.fetchFileList();
     await Future<void>.delayed(const Duration(milliseconds: 500));
-    expect(state.fileRecords, isEmpty,
-        reason: '无文件历史时文件列表应为空');
+    expect(state.fileRecords, isEmpty, reason: '无文件历史时文件列表应为空');
 
     // ---- 9. 离线邀请登录补发（P-11 修复回归）：carol 离线期间 alice
     // 邀请她加入群 3（t≈14.1s）→ carol 重新登录时服务端补发
@@ -278,10 +275,9 @@ void main() {
     expect(await carol3.connect(), isTrue);
     expect(await carol3.login('carol', 'password789'), isNull,
         reason: 'carol 重新登录应成功');
-    final offlineInvite = await waitUntil(
-        () => state.invitations.any((i) => i.groupId == 3));
-    expect(offlineInvite, isTrue,
-        reason: '离线期间收到的邀请应在登录补发后出现在邀请入口（P-11）');
+    final offlineInvite =
+        await waitUntil(() => state.invitations.any((i) => i.groupId == 3));
+    expect(offlineInvite, isTrue, reason: '离线期间收到的邀请应在登录补发后出现在邀请入口（P-11）');
     await carol3.acceptGroupInvite(3);
     final joined3 = await waitUntil(() => state.groups.any((g) => g.id == 3));
     expect(joined3, isTrue, reason: '接受离线补发的邀请后应入群 3');

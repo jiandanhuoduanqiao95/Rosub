@@ -14,8 +14,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('list_users 响应中 is_admin 为 JSON 布尔时，Dart 端 == true 正确判定',
-      () {
+  test('list_users 响应中 is_admin 为 JSON 布尔时，Dart 端 == true 正确判定', () {
     // 修复后服务端发送的 JSON：is_admin 字段为 true/false 而非 1/0
     const jsonFromServer =
         '[["admin",true,true],["alice",false,false],["bob",true,false]]';
@@ -40,11 +39,9 @@ void main() {
     expect(admins, isNot(contains('bob')));
   });
 
-  test('list_users 响应中 is_admin 为 JSON 整数时，Dart 端 == true 失败（回归反例）',
-      () {
+  test('list_users 响应中 is_admin 为 JSON 整数时，Dart 端 == true 失败（回归反例）', () {
     // 缺陷版本的 JSON：is_admin 字段为 1/0 整数（这是 bug 触发态）
-    const buggyJsonFromServer =
-        '[["admin",true,1],["alice",false,0]]';
+    const buggyJsonFromServer = '[["admin",true,1],["alice",false,0]]';
     final List<dynamic> list = jsonDecode(buggyJsonFromServer);
 
     final admins = <String>[];

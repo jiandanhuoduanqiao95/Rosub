@@ -99,10 +99,8 @@ void main() {
 
       expect(find.text('linux'), findsOneWidget);
       expect(find.text('android'), findsOneWidget);
-      expect(find.textContaining('当前'), findsOneWidget,
-          reason: '当前会话有标记');
-      expect(find.textContaining('10:30'), findsWidgets,
-          reason: '显示最后活跃时间');
+      expect(find.textContaining('当前'), findsOneWidget, reason: '当前会话有标记');
+      expect(find.textContaining('10:30'), findsWidgets, reason: '显示最后活跃时间');
     });
 
     testWidgets('当前设备不显示"下线"按钮', (tester) async {
@@ -127,8 +125,7 @@ void main() {
       await tester.tap(find.text('open'));
       await tester.pumpAndSettle();
 
-      expect(find.text('下线'), findsOneWidget,
-          reason: '仅 android 一个下线按钮');
+      expect(find.text('下线'), findsOneWidget, reason: '仅 android 一个下线按钮');
     });
 
     testWidgets('点击"下线" → kickSession(deviceId) 并刷新列表', (tester) async {
@@ -230,8 +227,7 @@ void main() {
       expect(find.text('bob'), findsOneWidget);
       expect(find.text('kick_member'), findsOneWidget);
       expect(find.text('carol'), findsOneWidget);
-      expect(find.textContaining('2026-08-26'), findsWidgets,
-          reason: '显示操作时间');
+      expect(find.textContaining('2026-08-26'), findsWidgets, reason: '显示操作时间');
     });
 
     testWidgets('无审计记录时显示空态', (tester) async {

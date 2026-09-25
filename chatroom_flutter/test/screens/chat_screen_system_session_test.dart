@@ -145,8 +145,7 @@ void main() {
   setUp(resetState);
 
   group('系统会话只读 —— 不向服务端泄漏会话请求（P-46 缺陷回归锁定）', () {
-    testWidgets('查看系统消息后切到好友会话：不保存"服务器"草稿（缺陷主路径）',
-        (tester) async {
+    testWidgets('查看系统消息后切到好友会话：不保存"服务器"草稿（缺陷主路径）', (tester) async {
       final socket = buildService();
       seedSystemAndFriend(socket);
       await pumpScreen(tester, socket);
@@ -166,8 +165,7 @@ void main() {
       await tester.pump(const Duration(seconds: 3));
     });
 
-    testWidgets('好友会话切到系统会话：输入框文本变化不触发"服务器"草稿防抖保存',
-        (tester) async {
+    testWidgets('好友会话切到系统会话：输入框文本变化不触发"服务器"草稿防抖保存', (tester) async {
       final socket = buildService();
       seedSystemAndFriend(socket);
       await pumpScreen(tester, socket);
@@ -258,8 +256,8 @@ void main() {
       await tester.pumpAndSettle();
 
       // 好友草稿同步语义不受影响：bob 草稿被保存（切换 flush + 恢复时防抖均合法）且本地状态保留
-      verify(() => socket.saveConversationDraft('bob', 'hi bob')).called(
-          greaterThan(0));
+      verify(() => socket.saveConversationDraft('bob', 'hi bob'))
+          .called(greaterThan(0));
       expect(state.draftOf('bob'), 'hi bob');
       // 草稿恢复回输入栏
       expect(find.textContaining('hi bob', findRichText: true), findsOneWidget);

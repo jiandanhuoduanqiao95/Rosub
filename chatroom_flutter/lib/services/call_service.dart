@@ -94,6 +94,10 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   bool cameraOff = false;
   bool speakerOn = false;
 
+  /// 当前摄像头朝向（默认前置自拍；切换镜头后翻转——本地小窗镜像跟随，
+  /// 后置不镜像）
+  bool isFrontCamera = true;
+
   // ---- R2 群通话状态 ----
   bool _isGroup = false;
   int? _groupId;
@@ -214,6 +218,17 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     cameraOff = false;
     // 微信式默认路由：语音通话听筒、视频通话外放
     speakerOn = type == CallType.video;
+    isFrontCamera = true;
+  }
+
+  /// 视频输入设备数（>1 时通话界面显示"切换镜头"键）
+  Future<int> videoInputCount() => _engine.videoInputCount();
+
+  /// 切换摄像头（移动端前后翻转 / 桌面多摄循环）；本地小窗镜像跟随
+  Future<void> switchCamera() async {
+    await _engine.switchCamera();
+    isFrontCamera = !isFrontCamera;
+    notifyListeners();
   }
 
   void _resetGroupSessionState(Set<String> initial) {

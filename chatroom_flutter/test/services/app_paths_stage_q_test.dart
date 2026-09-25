@@ -91,8 +91,7 @@ void main() {
       expect(AppPaths.receivedFilesDir, AppConfig.receivedFilesDir);
     });
 
-    test('resolver 注入文档目录不改变 Linux 结果（Linux 恒 CWD 兼容）',
-        () async {
+    test('resolver 注入文档目录不改变 Linux 结果（Linux 恒 CWD 兼容）', () async {
       AppPaths.documentsDirResolver = () async => '/fake/docs';
       await AppPaths.ensureInitialized();
       expect(AppPaths.receivedFilesDir, AppConfig.receivedFilesDir,
@@ -106,8 +105,8 @@ void main() {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       AppPaths.documentsDirResolver = () async => '/data/user/0/cn.tset/files';
       await AppPaths.ensureInitialized();
-      expect(
-          AppPaths.receivedFilesDir, '/data/user/0/cn.tset/files/received_files');
+      expect(AppPaths.receivedFilesDir,
+          '/data/user/0/cn.tset/files/received_files');
     });
 
     test('android：stickerStoreDir = <documentsDir>/stickers', () async {
@@ -133,8 +132,7 @@ void main() {
       }
     });
 
-    test('path_provider 异常（插件未注册）→ ensureInitialized 不崩并回退兼容值',
-        () async {
+    test('path_provider 异常（插件未注册）→ ensureInitialized 不崩并回退兼容值', () async {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       await AppPaths.ensureInitialized();
       expect(AppPaths.receivedFilesDir, AppConfig.receivedFilesDir,
@@ -159,8 +157,7 @@ void main() {
       SharedPreferences.setMockInitialValues({});
     });
 
-    test('main 接线等价路径：AppPaths.stickerStoreDir 注入后贴纸落盘 CWD/stickers',
-        () async {
+    test('main 接线等价路径：AppPaths.stickerStoreDir 注入后贴纸落盘 CWD/stickers', () async {
       await AppPaths.ensureInitialized();
       await StickerStore.instance.init(baseDir: AppPaths.stickerStoreDir);
       await StickerStore.instance.bindUser(null);
@@ -168,8 +165,7 @@ void main() {
       expect(sticker, isNotNull, reason: 'AppPaths 注入值可正常落盘');
       final file = File(
           '${Directory.current.path}/${AppConfig.stickerStoreDir}/${sticker!.id}.png');
-      expect(file.existsSync(), isTrue,
-          reason: 'Linux 兼容：落盘位置与迁移前一致');
+      expect(file.existsSync(), isTrue, reason: 'Linux 兼容：落盘位置与迁移前一致');
       await StickerStore.instance.removeSticker(sticker.id);
       expect(file.existsSync(), isFalse);
     });
@@ -180,8 +176,8 @@ void main() {
       final src = srcOf('services/socket_service.dart');
       expect(countOf(src, 'AppConfig.receivedFilesDir'), 0,
           reason: '_prepareReceiveTarget/_saveReceivedFile 改走 AppPaths');
-      expect(countOf(src, 'AppPaths.receivedFilesDir'),
-          greaterThanOrEqualTo(2));
+      expect(
+          countOf(src, 'AppPaths.receivedFilesDir'), greaterThanOrEqualTo(2));
     });
 
     test('chat_screen.dart 不再直接引用 AppConfig.receivedFilesDir', () {
@@ -195,7 +191,8 @@ void main() {
     test('chat_view.dart 不再直接引用 AppConfig.receivedFilesDir', () {
       final src = srcOf('widgets/chat_view.dart');
       expect(countOf(src, 'AppConfig.receivedFilesDir'), 0);
-      expect(countOf(src, 'AppPaths.receivedFilesDir'), greaterThanOrEqualTo(1));
+      expect(
+          countOf(src, 'AppPaths.receivedFilesDir'), greaterThanOrEqualTo(1));
     });
 
     test('app_paths.dart 确实使用 path_provider（迁移本体锁定）', () {
@@ -205,8 +202,7 @@ void main() {
       expect(src.contains("package:path_provider/path_provider.dart"), isTrue);
     });
 
-    test('main.dart 接线：ensureInitialized + StickerStore 用 AppPaths 目录',
-        () {
+    test('main.dart 接线：ensureInitialized + StickerStore 用 AppPaths 目录', () {
       final src = srcOf('main.dart');
       expect(src.contains('AppPaths.ensureInitialized'), isTrue);
       expect(src.contains('AppPaths.stickerStoreDir'), isTrue,

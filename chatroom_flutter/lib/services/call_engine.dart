@@ -72,6 +72,13 @@ abstract class CallEngine {
   Future<void> setMicMuted(bool muted);
   Future<void> setCameraEnabled(bool enabled);
   Future<void> setSpeakerphoneOn(bool on);
+
+  /// 视频输入设备数（>1 时通话界面显示"切换镜头"键；探测失败为 0）
+  Future<int> videoInputCount();
+
+  /// 切换摄像头：移动端翻转前后置（facing），桌面端按 deviceId 在
+  /// 多摄像头间循环；无多摄为 no-op
+  Future<void> switchCamera();
   Future<void> close();
 }
 
@@ -464,6 +471,31 @@ class WebRtcCallEngine implements CallEngine {
     // AudioSwitch 无关），iOS 待 Q4 接入
     if (!Platform.isAndroid) return;
     Helper.setSpeakerphoneOn(on);
+  }
+
+  @override
+  Future<int> videoInputCount() async {
+    try {
+      final devices = await navigator.mediaDevices.enumerateDevices();
+      return devices.where((d) => d.kind == 'videoinput').length;
+    } catch (e) {
+      debugPrint('[call-trace] enumerateDevices FAILED: $e');
+      return 0;
+    }
+  }
+
+  @override
+  Future<void> switchCamera() async {
+    final tracks = _local?.getVideoTracks() ?? const <MediaStreamTrack>[];
+    for (final track in tracks) {
+      try {
+        // 移动端：facing 前后置翻转（多后置镜头由系统聚合）。桌面原生子
+        // 路径忽略 deviceId（仅 web 支持），多摄切换 UI 键在桌面不显示。
+        await Helper.switchCamera(track);
+      } catch (e) {
+        debugPrint('[call-trace] switchCamera(${track.kind}) FAILED: $e');
+      }
+    }
   }
 
   /// Q2 排障：周期性上报 RTP 收发统计（判别"发送端编码产黑/哑"与

@@ -50,7 +50,6 @@ server.db = db
 server.build_listen()
 ''';
 
-
 /// 写入 E2E 辅助脚本：确保 /tmp/opencode 目录存在
 /// （部分环境该目录缺失会导致 writeAsStringSync 抛 PathNotFoundException）
 void _writeE2eScript(File file, String content) {

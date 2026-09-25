@@ -33,8 +33,8 @@ class CertificateTrust {
   static String? pinnedSha256;
 
   /// 首连确认钩子（展示指纹/目标地址 → 用户裁决；null → 未知指纹直接拒绝）
-  static Future<bool> Function(
-      X509Certificate cert, String host, int port)? confirmUnknownFingerprint;
+  static Future<bool> Function(X509Certificate cert, String host, int port)?
+      confirmUnknownFingerprint;
 
   static final Set<String> _confirmed = {};
   static final Set<String> _confirming = {};

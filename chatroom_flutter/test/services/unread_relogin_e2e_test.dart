@@ -132,7 +132,6 @@ else:
 time.sleep(2.0)
 ''';
 
-
 /// 写入 E2E 辅助脚本：确保 /tmp/opencode 目录存在
 /// （部分环境该目录缺失会导致 writeAsStringSync 抛 PathNotFoundException）
 void _writeE2eScript(File file, String content) {
@@ -178,11 +177,9 @@ void main() {
     final root = Directory.current.parent;
     final script = File('/tmp/opencode/unread_regression_py_sender.py');
     _writeE2eScript(script, pySender);
-    return Process.start(
-        '${root.path}/.venv/bin/python',
+    return Process.start('${root.path}/.venv/bin/python',
         [script.path, user, pw, to, msgType, msg, gid, seed],
-        environment: {'CHATROOM_ROOT': root.path},
-        workingDirectory: root.path);
+        environment: {'CHATROOM_ROOT': root.path}, workingDirectory: root.path);
   }
 
   Future<void> sendAnnouncement(String content) async {
@@ -191,8 +188,7 @@ void main() {
     _writeE2eScript(script, pyAdmin);
     final py = await Process.start(
         '${root.path}/.venv/bin/python', [script.path, content],
-        environment: {'CHATROOM_ROOT': root.path},
-        workingDirectory: root.path);
+        environment: {'CHATROOM_ROOT': root.path}, workingDirectory: root.path);
     await py.exitCode;
     await Future<void>.delayed(const Duration(milliseconds: 400));
   }
@@ -238,10 +234,8 @@ void main() {
     bob.disconnect();
     await Future<void>.delayed(const Duration(milliseconds: 300));
     await loginBob();
-    expect(state.unreadOf('alice'), 0,
-        reason: '已查看过的消息重登后不得复发未读徽标（缺陷锁定）');
-    expect(state.getMessages('alice').length, 2,
-        reason: '消息仍作为已送达历史可见');
+    expect(state.unreadOf('alice'), 0, reason: '已查看过的消息重登后不得复发未读徽标（缺陷锁定）');
+    expect(state.getMessages('alice').length, 2, reason: '消息仍作为已送达历史可见');
   });
 
   test('② 回归保护：离线消息首次登录仍显示未读，查看后重登不复发', () async {
@@ -298,8 +292,7 @@ void main() {
     bob.disconnect();
     await Future<void>.delayed(const Duration(milliseconds: 300));
     await loginBob();
-    expect(state.unreadOf('alice'), 0,
-        reason: '已实时送达（delivered）的消息不得在重登后复发未读');
+    expect(state.unreadOf('alice'), 0, reason: '已实时送达（delivered）的消息不得在重登后复发未读');
   });
 
   test('⑤ 管理员发送公告 → 系统会话出现未读徽标，查看后清零（P-60 缺陷锁定）', () async {
@@ -314,10 +307,8 @@ void main() {
 
     // 管理员（独立进程）发送公告 → 实时广播
     await sendAnnouncement('系统维护通知');
-    expect(state.unreadOf('服务器'), 1,
-        reason: '管理员发送公告后系统会话应出现未读徽标（缺陷锁定）');
-    expect(
-        state.getMessages('服务器').any((m) => m.content == '系统维护通知'), isTrue,
+    expect(state.unreadOf('服务器'), 1, reason: '管理员发送公告后系统会话应出现未读徽标（缺陷锁定）');
+    expect(state.getMessages('服务器').any((m) => m.content == '系统维护通知'), isTrue,
         reason: '公告应进入系统消息会话');
 
     // 查看系统会话 → 徽标清零

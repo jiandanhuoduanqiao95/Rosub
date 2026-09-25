@@ -127,8 +127,8 @@ void main() {
         ),
       );
       // RawTextField 自绘文本（无 Text widget）：经 controller 断言回填
-      final field = tester.widget<RawTextField>(
-          find.byType(RawTextField).first);
+      final field =
+          tester.widget<RawTextField>(find.byType(RawTextField).first);
       expect(field.controller.text, '现有公告', reason: '初始公告回填输入框');
       expect(find.text('发布公告'), findsOneWidget, reason: '发布选项页');
       expect(find.text('清除公告'), findsOneWidget, reason: '清除选项页');

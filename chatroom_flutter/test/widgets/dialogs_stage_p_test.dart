@@ -228,8 +228,7 @@ void main() {
 
       expect(picked.length, 1, reason: '点击贴纸即发送');
       expect(picked.first.name.endsWith('.png'), isTrue);
-      expect(closed, isTrue,
-          reason: 'R-P14：选择后回调 onClose（宿主收起面板；嵌入组件自身不 pop）');
+      expect(closed, isTrue, reason: 'R-P14：选择后回调 onClose（宿主收起面板；嵌入组件自身不 pop）');
     });
 
     testWidgets('长按贴纸 → 删除确认 → store 移除并刷新', (tester) async {
@@ -250,8 +249,7 @@ void main() {
   });
 
   group('P3 —— 高级搜索对话框（showAdvancedSearchDialog）', () {
-    testWidgets('渲染：关键词输入 + 发送者选项 chips + 日期单入口（R-P28）',
-        (tester) async {
+    testWidgets('渲染：关键词输入 + 发送者选项 chips + 日期单入口（R-P28）', (tester) async {
       await pumpOpener(
           tester,
           (ctx) => showAdvancedSearchDialog(
@@ -331,10 +329,11 @@ void main() {
               ));
       await typeAscii(
           tester, find.byKey(const ValueKey('adv_search_keyword')), 'report');
-      await tester.tap(find.byKey(const ValueKey('adv_search_sender_chip_bob')));
+      await tester
+          .tap(find.byKey(const ValueKey('adv_search_sender_chip_bob')));
       await tester.pumpAndSettle();
-      await tester.tap(
-          find.byKey(const ValueKey('adv_search_sender_chip_alice')));
+      await tester
+          .tap(find.byKey(const ValueKey('adv_search_sender_chip_alice')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('搜索'));
       await tester.pumpAndSettle();
@@ -354,12 +353,14 @@ void main() {
               ));
       await typeAscii(
           tester, find.byKey(const ValueKey('adv_search_keyword')), 'report');
-      await tester.tap(find.byKey(const ValueKey('adv_search_sender_chip_bob')));
+      await tester
+          .tap(find.byKey(const ValueKey('adv_search_sender_chip_bob')));
       await tester.pumpAndSettle();
-      await tester.tap(
-          find.byKey(const ValueKey('adv_search_sender_chip_alice')));
+      await tester
+          .tap(find.byKey(const ValueKey('adv_search_sender_chip_alice')));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('adv_search_sender_chip_bob')));
+      await tester
+          .tap(find.byKey(const ValueKey('adv_search_sender_chip_bob')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('搜索'));
       await tester.pumpAndSettle();
@@ -454,9 +455,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(got!.from, DateTime(now.year, now.month, now.day));
-      expect(
-          got!.to,
-          DateTime(now.year, now.month, now.day, 23, 59, 59),
+      expect(got!.to, DateTime(now.year, now.month, now.day, 23, 59, 59),
           reason: '全天范围');
     });
 

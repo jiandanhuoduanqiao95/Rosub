@@ -116,6 +116,12 @@ class _FakeEngine implements CallEngine {
   bool get hasLocalMedia => true;
 
   @override
+  Future<int> videoInputCount() async => 0;
+
+  @override
+  Future<void> switchCamera() async {}
+
+  @override
   MediaStream? get localStream => null;
 
   @override

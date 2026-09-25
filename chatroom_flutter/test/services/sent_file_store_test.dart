@@ -30,8 +30,7 @@ void main() {
       expect(SentFileStore.pathOf('m1'), isNull);
     });
 
-    test('init 后 record → pathOf 同步可查（自己发送的文件回看数据源）',
-        () async {
+    test('init 后 record → pathOf 同步可查（自己发送的文件回看数据源）', () async {
       await SentFileStore.init();
       await SentFileStore.record('m1', '/tmp/a.pdf');
       expect(SentFileStore.pathOf('m1'), '/tmp/a.pdf');

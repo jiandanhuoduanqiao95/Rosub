@@ -311,8 +311,7 @@ void main() {
       expect(svc.phase, CallPhase.connecting, reason: '首个对端连通前保持接通中');
     });
 
-    test('gc2 加固：本地媒体轨道缺失时禁止发空 offer（leave + 显式错误）',
-        () async {
+    test('gc2 加固：本地媒体轨道缺失时禁止发空 offer（leave + 显式错误）', () async {
       final h = _Harness();
       final svc = h.build();
       when(() => h.engine.hasLocalMedia).thenReturn(false);
@@ -336,8 +335,7 @@ void main() {
       expect(svc.phase, CallPhase.ended);
     });
 
-    test('gc2 加固：ensureMedia 抛错（getUserMedia 空轨道）→ leave + 显式错误',
-        () async {
+    test('gc2 加固：ensureMedia 抛错（getUserMedia 空轨道）→ leave + 显式错误', () async {
       final h = _Harness();
       final svc = h.build();
       when(() => h.engine.ensureMedia(video: any(named: 'video')))

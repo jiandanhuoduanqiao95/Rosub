@@ -94,8 +94,8 @@ void main() {
     test('搜索结果不计未读', () {
       state.setLoggedIn('alice', false);
       state.setSearchResults('bob', [
-        ChatMessage(sender: 'bob', content: 'x', messageId: 's1',
-            status: 'sent'),
+        ChatMessage(
+            sender: 'bob', content: 'x', messageId: 's1', status: 'sent'),
       ]);
       expect(state.totalUnread, 0);
     });

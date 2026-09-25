@@ -32,10 +32,10 @@ void main() {
       state.setLoggedIn('alice', false);
       state.setGroups([Group(id: 1, name: 'g')]);
       state.setFriends(['bob']);
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'x', messageId: 'm1'));
-      state.addFileRequest(
-          FileRequest(messageId: 'f1', sender: 'bob', filename: 'a', filesize: 1));
+      state.addMessage(
+          'bob', ChatMessage(sender: 'bob', content: 'x', messageId: 'm1'));
+      state.addFileRequest(FileRequest(
+          messageId: 'f1', sender: 'bob', filename: 'a', filesize: 1));
       state.updateTransfer('t1', 10, 100);
       state.setNoMoreHistory('bob');
 
@@ -46,13 +46,13 @@ void main() {
       expect(state.messages, isEmpty);
       expect(state.pendingFileRequests, isEmpty);
       expect(state.transferFraction('t1'), isNull);
-      expect(state.hasMoreHistory('bob'), isTrue, reason: '登出后 noMoreHistory 被清空');
+      expect(state.hasMoreHistory('bob'), isTrue,
+          reason: '登出后 noMoreHistory 被清空');
       expect(state.unreadOf('bob'), 0);
       expect(state.noticeQueue, isEmpty);
     });
 
-    test('setLoggedOut 不清除 processedGroupFileRequests（跨会话去重状态泄漏，记录现状）',
-        () {
+    test('setLoggedOut 不清除 processedGroupFileRequests（跨会话去重状态泄漏，记录现状）', () {
       expect(state.markGroupFileProcessed('gmsg1'), isTrue);
       state.setLoggedIn('alice', false);
       state.setLoggedOut();
@@ -80,22 +80,27 @@ void main() {
   group('未读计数攻击', () {
     test('未登录（username=null）时他人消息计入未读', () {
       // 不调用 setLoggedIn，直接收消息
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'x', messageId: 'm1', status: 'sent'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob', content: 'x', messageId: 'm1', status: 'sent'));
       expect(state.unreadOf('bob'), 1);
     });
 
     test('未登录时 status=sent 的自身消息也计入未读（_username 为 null 无法比对）', () {
-      state.addMessage('bob',
-          ChatMessage(sender: 'alice', content: 'x', messageId: 'm1', status: 'sent'));
-      expect(state.unreadOf('bob'), 1,
-          reason: '未登录时无法判断"自己"，任何 sent 消息都计未读');
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'alice', content: 'x', messageId: 'm1', status: 'sent'));
+      expect(state.unreadOf('bob'), 1, reason: '未登录时无法判断"自己"，任何 sent 消息都计未读');
     });
 
     test('重复登录不清空旧未读（记录现状：依赖 setLoggedOut 清理）', () {
       state.setLoggedIn('alice', false);
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'x', messageId: 'm1', status: 'sent'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob', content: 'x', messageId: 'm1', status: 'sent'));
       expect(state.unreadOf('bob'), 1);
 
       // 不登出直接重新登录
@@ -105,8 +110,10 @@ void main() {
 
     test('selectChat(null) 不清除当前会话未读', () {
       state.setLoggedIn('alice', false);
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'x', messageId: 'm1', status: 'sent'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob', content: 'x', messageId: 'm1', status: 'sent'));
       state.selectChat(null);
       expect(state.unreadOf('bob'), 1);
     });
@@ -114,8 +121,13 @@ void main() {
     test('未读计数超大不溢出（int 累加）', () {
       state.setLoggedIn('alice', false);
       for (var i = 0; i < 50000; i++) {
-        state.addMessage('bob',
-            ChatMessage(sender: 'bob', content: '$i', messageId: 'm$i', status: 'sent'));
+        state.addMessage(
+            'bob',
+            ChatMessage(
+                sender: 'bob',
+                content: '$i',
+                messageId: 'm$i',
+                status: 'sent'));
       }
       expect(state.unreadOf('bob'), 50000);
       expect(state.totalUnread, 50000);
@@ -126,22 +138,34 @@ void main() {
     setUp(() => state.setLoggedIn('alice', false));
 
     test('重复 messageId 只更新状态，不重复计未读', () {
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: '1', messageId: 'm1', status: 'sent'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob', content: '1', messageId: 'm1', status: 'sent'));
       expect(state.unreadOf('bob'), 1);
       // 服务器回显同 id 不同 status
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: '1', messageId: 'm1', status: 'delivered'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob',
+              content: '1',
+              messageId: 'm1',
+              status: 'delivered'));
       expect(state.getMessages('bob').length, 1);
       expect(state.getMessages('bob').first.status, 'delivered');
       expect(state.unreadOf('bob'), 1, reason: '去重路径不再重复计未读');
     });
 
     test('重复 messageId 但内容/发送者不同：保留旧内容（记录现状）', () {
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: '原内容', messageId: 'm1'));
-      state.addMessage('bob',
-          ChatMessage(sender: 'malice', content: '篡改内容', messageId: 'm1', status: 'delivered'));
+      state.addMessage(
+          'bob', ChatMessage(sender: 'bob', content: '原内容', messageId: 'm1'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'malice',
+              content: '篡改内容',
+              messageId: 'm1',
+              status: 'delivered'));
       final msg = state.getMessages('bob').first;
       expect(msg.sender, 'bob');
       expect(msg.content, '原内容');
@@ -151,21 +175,25 @@ void main() {
     test('【已修复】空 messageId 的消息各自保存而非合并（回归锁定）', () {
       // 回归锁定：两条不同内容的消息（messageId 均为 ''）都应入列。
       // 曾因 _messageMap[''] 命中同一条，第二条被吞 → 只剩 1 条。
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'a', messageId: ''));
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'b', messageId: ''));
-      expect(state.getMessages('bob').length, 2,
-          reason: '2 条消息均保留（缺陷修复后应成立）');
+      state.addMessage(
+          'bob', ChatMessage(sender: 'bob', content: 'a', messageId: ''));
+      state.addMessage(
+          'bob', ChatMessage(sender: 'bob', content: 'b', messageId: ''));
+      expect(state.getMessages('bob').length, 2, reason: '2 条消息均保留（缺陷修复后应成立）');
       final contents = state.getMessages('bob').map((m) => m.content).toSet();
       expect(contents, {'a', 'b'});
     });
 
     test('同一消息 id 跨会话：状态更新作用于首次注册的会话（记录现状）', () {
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'x', messageId: 'dup'));
-      state.addMessage('carol',
-          ChatMessage(sender: 'carol', content: 'y', messageId: 'dup', status: 'delivered'));
+      state.addMessage(
+          'bob', ChatMessage(sender: 'bob', content: 'x', messageId: 'dup'));
+      state.addMessage(
+          'carol',
+          ChatMessage(
+              sender: 'carol',
+              content: 'y',
+              messageId: 'dup',
+              status: 'delivered'));
       expect(state.getMessages('bob').length, 1);
       expect(state.getMessages('carol'), isEmpty);
       expect(state.getMessages('bob').first.status, 'delivered');
@@ -178,11 +206,15 @@ void main() {
     test('全部重复时列表不排序、无重复添加', () {
       final t1 = DateTime(2026, 1, 1, 10);
       final t2 = DateTime(2026, 1, 1, 9);
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'a', messageId: 'm1', timestamp: t1));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob', content: 'a', messageId: 'm1', timestamp: t1));
       state.prependHistoryMessages('bob', [
-        ChatMessage(sender: 'bob', content: 'a', messageId: 'm1', timestamp: t1),
-        ChatMessage(sender: 'bob', content: 'a', messageId: 'm1', timestamp: t2),
+        ChatMessage(
+            sender: 'bob', content: 'a', messageId: 'm1', timestamp: t1),
+        ChatMessage(
+            sender: 'bob', content: 'a', messageId: 'm1', timestamp: t2),
       ]);
       expect(state.getMessages('bob').length, 1);
     });
@@ -200,21 +232,25 @@ void main() {
 
     test('1000 条历史消息去重后数量正确', () {
       final base = DateTime(2026, 1, 1);
-      final msgs = List.generate(1000, (i) => ChatMessage(
-            sender: 'bob',
-            content: 'h$i',
-            messageId: 'hid$i',
-            timestamp: base.add(Duration(minutes: i)),
-          ));
+      final msgs = List.generate(
+          1000,
+          (i) => ChatMessage(
+                sender: 'bob',
+                content: 'h$i',
+                messageId: 'hid$i',
+                timestamp: base.add(Duration(minutes: i)),
+              ));
       state.prependHistoryMessages('bob', msgs);
       expect(state.getMessages('bob').length, 1000);
       // 再追加 500 条旧的
-      final older = List.generate(500, (i) => ChatMessage(
-            sender: 'bob',
-            content: 'o$i',
-            messageId: 'oid$i',
-            timestamp: base.subtract(Duration(minutes: 500 - i)),
-          ));
+      final older = List.generate(
+          500,
+          (i) => ChatMessage(
+                sender: 'bob',
+                content: 'o$i',
+                messageId: 'oid$i',
+                timestamp: base.subtract(Duration(minutes: 500 - i)),
+              ));
       state.prependHistoryMessages('bob', older);
       expect(state.getMessages('bob').length, 1500);
       // 时间有序：最旧的在前
@@ -224,7 +260,8 @@ void main() {
 
     test('prependHistoryMessages 不产生未读（历史消息不计未读）', () {
       state.prependHistoryMessages('bob', [
-        ChatMessage(sender: 'bob', content: 'h', messageId: 'm1', status: 'sent'),
+        ChatMessage(
+            sender: 'bob', content: 'h', messageId: 'm1', status: 'sent'),
       ]);
       expect(state.unreadOf('bob'), 0);
       expect(state.totalUnread, 0);
@@ -244,8 +281,8 @@ void main() {
     test('getMessages 返回内部 List 引用，外部可绕过去重直接添加', () {
       state.setLoggedIn('alice', false);
       // 先让 'bob' 会话存在，getMessages 才会返回内部列表引用
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: '合法', messageId: 'm1'));
+      state.addMessage(
+          'bob', ChatMessage(sender: 'bob', content: '合法', messageId: 'm1'));
       final list = state.getMessages('bob');
       list.add(ChatMessage(sender: 'hack', content: 'x', messageId: 'hm1'));
       expect(state.getMessages('bob').length, 2,
@@ -265,13 +302,19 @@ void main() {
 
   group('displayNameForChat 与 chatTargets 攻击', () {
     test('畸形 group key 全部回退原值', () {
-      for (final k in ['group_', 'group_abc', 'group_9999999999999999999999', 'group']) {
+      for (final k in [
+        'group_',
+        'group_abc',
+        'group_9999999999999999999999',
+        'group'
+      ]) {
         expect(state.displayNameForChat(k), k, reason: k);
       }
     });
 
     test('超大 groupId 溢出 int 时回退原 key', () {
-      expect(state.displayNameForChat('group_9223372036854775808'), 'group_9223372036854775808');
+      expect(state.displayNameForChat('group_9223372036854775808'),
+          'group_9223372036854775808');
     });
 
     test('好友名与群组 key 字符串碰撞（好友名 group_1）', () {
@@ -341,16 +384,16 @@ void main() {
 
     test('addFileRequest 大量请求不重复', () {
       for (var i = 0; i < 100; i++) {
-        state.addFileRequest(
-            FileRequest(messageId: 'f1', sender: 's', filename: 'a', filesize: 1));
+        state.addFileRequest(FileRequest(
+            messageId: 'f1', sender: 's', filename: 'a', filesize: 1));
       }
       expect(state.pendingFileRequests.length, 1);
     });
 
     test('removeFileRequest 批量移除', () {
       for (var i = 0; i < 10; i++) {
-        state.addFileRequest(
-            FileRequest(messageId: 'f$i', sender: 's', filename: 'a', filesize: 1));
+        state.addFileRequest(FileRequest(
+            messageId: 'f$i', sender: 's', filename: 'a', filesize: 1));
       }
       for (var i = 0; i < 10; i++) {
         state.removeFileRequest('f$i');

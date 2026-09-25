@@ -48,60 +48,63 @@ Future<void> pumpChatView(
 void main() {
   group('搜索入口（非搜索模式）', () {
     testWidgets('私聊会话标题栏显示搜索按钮', (tester) async {
-      await pumpChatView(tester, chatView: ChatView(
-        chatKey: 'bob',
-        chatTitle: 'bob',
-        messages: const [],
-        username: 'alice',
-        inputCtrl: TextEditingController(),
-        onSend: () {},
-        onSendFile: () {},
-        onRecall: (_) {},
-        onLoadHistory: (_) async {},
-        hasMoreHistory: (_) => false,
-        onSearch: (_) {},
-        onSearchExit: () {},
-      ));
+      await pumpChatView(tester,
+          chatView: ChatView(
+            chatKey: 'bob',
+            chatTitle: 'bob',
+            messages: const [],
+            username: 'alice',
+            inputCtrl: TextEditingController(),
+            onSend: () {},
+            onSendFile: () {},
+            onRecall: (_) {},
+            onLoadHistory: (_) async {},
+            hasMoreHistory: (_) => false,
+            onSearch: (_) {},
+            onSearchExit: () {},
+          ));
 
       expect(find.byTooltip('搜索消息'), findsOneWidget);
       await tester.pump(const Duration(seconds: 3));
     });
 
     testWidgets('系统会话（服务器）不显示搜索按钮（只读会话）', (tester) async {
-      await pumpChatView(tester, chatView: ChatView(
-        chatKey: '服务器',
-        chatTitle: '系统消息',
-        messages: const [],
-        username: 'alice',
-        inputCtrl: TextEditingController(),
-        canSend: false,
-        onSend: () {},
-        onSendFile: () {},
-        onRecall: (_) {},
-        onLoadHistory: (_) async {},
-        hasMoreHistory: (_) => false,
-        onSearch: (_) {},
-        onSearchExit: () {},
-      ));
+      await pumpChatView(tester,
+          chatView: ChatView(
+            chatKey: '服务器',
+            chatTitle: '系统消息',
+            messages: const [],
+            username: 'alice',
+            inputCtrl: TextEditingController(),
+            canSend: false,
+            onSend: () {},
+            onSendFile: () {},
+            onRecall: (_) {},
+            onLoadHistory: (_) async {},
+            hasMoreHistory: (_) => false,
+            onSearch: (_) {},
+            onSearchExit: () {},
+          ));
 
       expect(find.byTooltip('搜索消息'), findsNothing);
     });
 
     testWidgets('群聊会话显示搜索按钮（group_id 范围）', (tester) async {
-      await pumpChatView(tester, chatView: ChatView(
-        chatKey: 'group_1',
-        chatTitle: '开发组 (ID:1)',
-        messages: const [],
-        username: 'alice',
-        inputCtrl: TextEditingController(),
-        onSend: () {},
-        onSendFile: () {},
-        onRecall: (_) {},
-        onLoadHistory: (_) async {},
-        hasMoreHistory: (_) => false,
-        onSearch: (_) {},
-        onSearchExit: () {},
-      ));
+      await pumpChatView(tester,
+          chatView: ChatView(
+            chatKey: 'group_1',
+            chatTitle: '开发组 (ID:1)',
+            messages: const [],
+            username: 'alice',
+            inputCtrl: TextEditingController(),
+            onSend: () {},
+            onSendFile: () {},
+            onRecall: (_) {},
+            onLoadHistory: (_) async {},
+            hasMoreHistory: (_) => false,
+            onSearch: (_) {},
+            onSearchExit: () {},
+          ));
 
       expect(find.byTooltip('搜索消息'), findsOneWidget);
       await tester.pump(const Duration(seconds: 3));
@@ -116,20 +119,21 @@ void main() {
     }
 
     testWidgets('点击搜索按钮 → 展开搜索输入栏', (tester) async {
-      await pumpChatView(tester, chatView: ChatView(
-        chatKey: 'bob',
-        chatTitle: 'bob',
-        messages: const [],
-        username: 'alice',
-        inputCtrl: TextEditingController(),
-        onSend: () {},
-        onSendFile: () {},
-        onRecall: (_) {},
-        onLoadHistory: (_) async {},
-        hasMoreHistory: (_) => false,
-        onSearch: (_) {},
-        onSearchExit: () {},
-      ));
+      await pumpChatView(tester,
+          chatView: ChatView(
+            chatKey: 'bob',
+            chatTitle: 'bob',
+            messages: const [],
+            username: 'alice',
+            inputCtrl: TextEditingController(),
+            onSend: () {},
+            onSendFile: () {},
+            onRecall: (_) {},
+            onLoadHistory: (_) async {},
+            hasMoreHistory: (_) => false,
+            onSearch: (_) {},
+            onSearchExit: () {},
+          ));
 
       expect(find.byKey(const ValueKey('search_field')), findsNothing);
       await openSearchBar(tester);
@@ -141,20 +145,21 @@ void main() {
 
     testWidgets('输入关键字 + Enter → onSearch(keyword)', (tester) async {
       final submitted = <String>[];
-      await pumpChatView(tester, chatView: ChatView(
-        chatKey: 'bob',
-        chatTitle: 'bob',
-        messages: const [],
-        username: 'alice',
-        inputCtrl: TextEditingController(),
-        onSend: () {},
-        onSendFile: () {},
-        onRecall: (_) {},
-        onLoadHistory: (_) async {},
-        hasMoreHistory: (_) => false,
-        onSearch: submitted.add,
-        onSearchExit: () {},
-      ));
+      await pumpChatView(tester,
+          chatView: ChatView(
+            chatKey: 'bob',
+            chatTitle: 'bob',
+            messages: const [],
+            username: 'alice',
+            inputCtrl: TextEditingController(),
+            onSend: () {},
+            onSendFile: () {},
+            onRecall: (_) {},
+            onLoadHistory: (_) async {},
+            hasMoreHistory: (_) => false,
+            onSearch: submitted.add,
+            onSearchExit: () {},
+          ));
       await openSearchBar(tester);
 
       await tester.tap(find.byKey(const ValueKey('search_field')));
@@ -172,20 +177,21 @@ void main() {
 
     testWidgets('输入关键字 + 点击确认按钮 → onSearch(keyword)', (tester) async {
       final submitted = <String>[];
-      await pumpChatView(tester, chatView: ChatView(
-        chatKey: 'bob',
-        chatTitle: 'bob',
-        messages: const [],
-        username: 'alice',
-        inputCtrl: TextEditingController(),
-        onSend: () {},
-        onSendFile: () {},
-        onRecall: (_) {},
-        onLoadHistory: (_) async {},
-        hasMoreHistory: (_) => false,
-        onSearch: submitted.add,
-        onSearchExit: () {},
-      ));
+      await pumpChatView(tester,
+          chatView: ChatView(
+            chatKey: 'bob',
+            chatTitle: 'bob',
+            messages: const [],
+            username: 'alice',
+            inputCtrl: TextEditingController(),
+            onSend: () {},
+            onSendFile: () {},
+            onRecall: (_) {},
+            onLoadHistory: (_) async {},
+            hasMoreHistory: (_) => false,
+            onSearch: submitted.add,
+            onSearchExit: () {},
+          ));
       await openSearchBar(tester);
 
       await tester.tap(find.byKey(const ValueKey('search_field')));
@@ -201,20 +207,21 @@ void main() {
 
     testWidgets('空关键字提交 → 不触发 onSearch', (tester) async {
       int calls = 0;
-      await pumpChatView(tester, chatView: ChatView(
-        chatKey: 'bob',
-        chatTitle: 'bob',
-        messages: const [],
-        username: 'alice',
-        inputCtrl: TextEditingController(),
-        onSend: () {},
-        onSendFile: () {},
-        onRecall: (_) {},
-        onLoadHistory: (_) async {},
-        hasMoreHistory: (_) => false,
-        onSearch: (_) => calls++,
-        onSearchExit: () {},
-      ));
+      await pumpChatView(tester,
+          chatView: ChatView(
+            chatKey: 'bob',
+            chatTitle: 'bob',
+            messages: const [],
+            username: 'alice',
+            inputCtrl: TextEditingController(),
+            onSend: () {},
+            onSendFile: () {},
+            onRecall: (_) {},
+            onLoadHistory: (_) async {},
+            hasMoreHistory: (_) => false,
+            onSearch: (_) => calls++,
+            onSearchExit: () {},
+          ));
       await openSearchBar(tester);
 
       await tester.tap(find.byKey(const ValueKey('search_field')));
@@ -231,20 +238,21 @@ void main() {
     testWidgets('关闭按钮 → 收起输入栏，不触发任何回调', (tester) async {
       int searchCalls = 0;
       int exitCalls = 0;
-      await pumpChatView(tester, chatView: ChatView(
-        chatKey: 'bob',
-        chatTitle: 'bob',
-        messages: const [],
-        username: 'alice',
-        inputCtrl: TextEditingController(),
-        onSend: () {},
-        onSendFile: () {},
-        onRecall: (_) {},
-        onLoadHistory: (_) async {},
-        hasMoreHistory: (_) => false,
-        onSearch: (_) => searchCalls++,
-        onSearchExit: () => exitCalls++,
-      ));
+      await pumpChatView(tester,
+          chatView: ChatView(
+            chatKey: 'bob',
+            chatTitle: 'bob',
+            messages: const [],
+            username: 'alice',
+            inputCtrl: TextEditingController(),
+            onSend: () {},
+            onSendFile: () {},
+            onRecall: (_) {},
+            onLoadHistory: (_) async {},
+            hasMoreHistory: (_) => false,
+            onSearch: (_) => searchCalls++,
+            onSearchExit: () => exitCalls++,
+          ));
       await openSearchBar(tester);
       expect(find.byKey(const ValueKey('search_field')), findsOneWidget);
 
@@ -258,20 +266,21 @@ void main() {
     });
 
     testWidgets('输入栏展开时再次点击搜索按钮 → 无异常（幂等）', (tester) async {
-      await pumpChatView(tester, chatView: ChatView(
-        chatKey: 'bob',
-        chatTitle: 'bob',
-        messages: const [],
-        username: 'alice',
-        inputCtrl: TextEditingController(),
-        onSend: () {},
-        onSendFile: () {},
-        onRecall: (_) {},
-        onLoadHistory: (_) async {},
-        hasMoreHistory: (_) => false,
-        onSearch: (_) {},
-        onSearchExit: () {},
-      ));
+      await pumpChatView(tester,
+          chatView: ChatView(
+            chatKey: 'bob',
+            chatTitle: 'bob',
+            messages: const [],
+            username: 'alice',
+            inputCtrl: TextEditingController(),
+            onSend: () {},
+            onSendFile: () {},
+            onRecall: (_) {},
+            onLoadHistory: (_) async {},
+            hasMoreHistory: (_) => false,
+            onSearch: (_) {},
+            onSearchExit: () {},
+          ));
       await openSearchBar(tester);
       await tester.tap(find.byTooltip('搜索消息'));
       await tester.pump();
@@ -283,114 +292,119 @@ void main() {
 
   group('搜索模式（isSearchMode=true）', () {
     testWidgets('标题栏显示返回按钮与"搜索：<query>"', (tester) async {
-      await pumpChatView(tester, chatView: ChatView(
-        chatKey: 'bob',
-        chatTitle: 'bob',
-        messages: [resultMsg('包含 flutter 的消息', 's1')],
-        username: 'alice',
-        inputCtrl: TextEditingController(),
-        isSearchMode: true,
-        searchQuery: 'flutter',
-        onSend: () {},
-        onSendFile: () {},
-        onRecall: (_) {},
-        onLoadHistory: (_) async {},
-        hasMoreHistory: (_) => false,
-        onSearch: (_) {},
-        onSearchExit: () {},
-      ));
+      await pumpChatView(tester,
+          chatView: ChatView(
+            chatKey: 'bob',
+            chatTitle: 'bob',
+            messages: [resultMsg('包含 flutter 的消息', 's1')],
+            username: 'alice',
+            inputCtrl: TextEditingController(),
+            isSearchMode: true,
+            searchQuery: 'flutter',
+            onSend: () {},
+            onSendFile: () {},
+            onRecall: (_) {},
+            onLoadHistory: (_) async {},
+            hasMoreHistory: (_) => false,
+            onSearch: (_) {},
+            onSearchExit: () {},
+          ));
 
       expect(find.byTooltip('退出搜索'), findsOneWidget);
       expect(find.text('搜索：flutter'), findsOneWidget);
     });
 
     testWidgets('搜索模式隐藏底部输入栏（无发送/文件按钮）', (tester) async {
-      await pumpChatView(tester, chatView: ChatView(
-        chatKey: 'bob',
-        chatTitle: 'bob',
-        messages: [resultMsg('x', 's1')],
-        username: 'alice',
-        inputCtrl: TextEditingController(),
-        canSend: true,
-        isSearchMode: true,
-        searchQuery: 'flutter',
-        onSend: () {},
-        onSendFile: () {},
-        onRecall: (_) {},
-        onLoadHistory: (_) async {},
-        hasMoreHistory: (_) => false,
-        onSearch: (_) {},
-        onSearchExit: () {},
-      ));
+      await pumpChatView(tester,
+          chatView: ChatView(
+            chatKey: 'bob',
+            chatTitle: 'bob',
+            messages: [resultMsg('x', 's1')],
+            username: 'alice',
+            inputCtrl: TextEditingController(),
+            canSend: true,
+            isSearchMode: true,
+            searchQuery: 'flutter',
+            onSend: () {},
+            onSendFile: () {},
+            onRecall: (_) {},
+            onLoadHistory: (_) async {},
+            hasMoreHistory: (_) => false,
+            onSearch: (_) {},
+            onSearchExit: () {},
+          ));
 
       expect(find.byTooltip('发送'), findsNothing);
       expect(find.byTooltip('发送文件'), findsNothing);
     });
 
     testWidgets('消息列表展示搜索结果', (tester) async {
-      await pumpChatView(tester, chatView: ChatView(
-        chatKey: 'bob',
-        chatTitle: 'bob',
-        messages: [
-          resultMsg('第一条匹配', 's1'),
-          resultMsg('第二条匹配', 's2'),
-        ],
-        username: 'alice',
-        inputCtrl: TextEditingController(),
-        isSearchMode: true,
-        searchQuery: 'flutter',
-        onSend: () {},
-        onSendFile: () {},
-        onRecall: (_) {},
-        onLoadHistory: (_) async {},
-        hasMoreHistory: (_) => false,
-        onSearch: (_) {},
-        onSearchExit: () {},
-      ));
+      await pumpChatView(tester,
+          chatView: ChatView(
+            chatKey: 'bob',
+            chatTitle: 'bob',
+            messages: [
+              resultMsg('第一条匹配', 's1'),
+              resultMsg('第二条匹配', 's2'),
+            ],
+            username: 'alice',
+            inputCtrl: TextEditingController(),
+            isSearchMode: true,
+            searchQuery: 'flutter',
+            onSend: () {},
+            onSendFile: () {},
+            onRecall: (_) {},
+            onLoadHistory: (_) async {},
+            hasMoreHistory: (_) => false,
+            onSearch: (_) {},
+            onSearchExit: () {},
+          ));
 
       expect(find.text('第一条匹配'), findsOneWidget);
       expect(find.text('第二条匹配'), findsOneWidget);
     });
 
     testWidgets('搜索模式结果为空 → 显示"无搜索结果"占位', (tester) async {
-      await pumpChatView(tester, chatView: ChatView(
-        chatKey: 'bob',
-        chatTitle: 'bob',
-        messages: const [],
-        username: 'alice',
-        inputCtrl: TextEditingController(),
-        isSearchMode: true,
-        searchQuery: 'flutter',
-        onSend: () {},
-        onSendFile: () {},
-        onRecall: (_) {},
-        onLoadHistory: (_) async {},
-        hasMoreHistory: (_) => false,
-        onSearch: (_) {},
-        onSearchExit: () {},
-      ));
+      await pumpChatView(tester,
+          chatView: ChatView(
+            chatKey: 'bob',
+            chatTitle: 'bob',
+            messages: const [],
+            username: 'alice',
+            inputCtrl: TextEditingController(),
+            isSearchMode: true,
+            searchQuery: 'flutter',
+            onSend: () {},
+            onSendFile: () {},
+            onRecall: (_) {},
+            onLoadHistory: (_) async {},
+            hasMoreHistory: (_) => false,
+            onSearch: (_) {},
+            onSearchExit: () {},
+          ));
 
       expect(find.text('无搜索结果'), findsOneWidget);
     });
 
     testWidgets('点击返回 → onSearchExit 回调', (tester) async {
       int exitCalls = 0;
-      await pumpChatView(tester, chatView: ChatView(
-        chatKey: 'bob',
-        chatTitle: 'bob',
-        messages: [resultMsg('x', 's1')],
-        username: 'alice',
-        inputCtrl: TextEditingController(),
-        isSearchMode: true,
-        searchQuery: 'flutter',
-        onSend: () {},
-        onSendFile: () {},
-        onRecall: (_) {},
-        onLoadHistory: (_) async {},
-        hasMoreHistory: (_) => false,
-        onSearch: (_) {},
-        onSearchExit: () => exitCalls++,
-      ));
+      await pumpChatView(tester,
+          chatView: ChatView(
+            chatKey: 'bob',
+            chatTitle: 'bob',
+            messages: [resultMsg('x', 's1')],
+            username: 'alice',
+            inputCtrl: TextEditingController(),
+            isSearchMode: true,
+            searchQuery: 'flutter',
+            onSend: () {},
+            onSendFile: () {},
+            onRecall: (_) {},
+            onLoadHistory: (_) async {},
+            hasMoreHistory: (_) => false,
+            onSearch: (_) {},
+            onSearchExit: () => exitCalls++,
+          ));
 
       await tester.tap(find.byTooltip('退出搜索'));
       await tester.pump();
@@ -400,31 +414,32 @@ void main() {
 
     testWidgets('搜索模式消息支持撤回回调（与普通模式一致）', (tester) async {
       final recalled = <String>[];
-      await pumpChatView(tester, chatView: ChatView(
-        chatKey: 'bob',
-        chatTitle: 'bob',
-        messages: [
-          ChatMessage(
-            sender: 'alice',
-            content: '自己发的匹配',
-            messageId: 's1',
-            type: 'chat',
-            isHistory: true,
-            status: 'delivered',
-          ),
-        ],
-        username: 'alice',
-        inputCtrl: TextEditingController(),
-        isSearchMode: true,
-        searchQuery: 'flutter',
-        onSend: () {},
-        onSendFile: () {},
-        onRecall: recalled.add,
-        onLoadHistory: (_) async {},
-        hasMoreHistory: (_) => false,
-        onSearch: (_) {},
-        onSearchExit: () {},
-      ));
+      await pumpChatView(tester,
+          chatView: ChatView(
+            chatKey: 'bob',
+            chatTitle: 'bob',
+            messages: [
+              ChatMessage(
+                sender: 'alice',
+                content: '自己发的匹配',
+                messageId: 's1',
+                type: 'chat',
+                isHistory: true,
+                status: 'delivered',
+              ),
+            ],
+            username: 'alice',
+            inputCtrl: TextEditingController(),
+            isSearchMode: true,
+            searchQuery: 'flutter',
+            onSend: () {},
+            onSendFile: () {},
+            onRecall: recalled.add,
+            onLoadHistory: (_) async {},
+            hasMoreHistory: (_) => false,
+            onSearch: (_) {},
+            onSearchExit: () {},
+          ));
 
       await tester.longPress(find.text('自己发的匹配'));
       await tester.pump();

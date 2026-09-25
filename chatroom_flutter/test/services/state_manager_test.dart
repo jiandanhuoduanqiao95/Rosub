@@ -44,8 +44,10 @@ void main() {
     test('setLoggedOut 清空所有会话状态', () {
       state.setLoggedIn('alice', true);
       state.setFriends(['bob']);
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'hi', messageId: 'm1', status: 'sent'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob', content: 'hi', messageId: 'm1', status: 'sent'));
       state.selectChat('bob');
 
       state.setLoggedOut();
@@ -90,8 +92,8 @@ void main() {
     test('removeFriend 移除消息并重置当前会话', () {
       state.setLoggedIn('alice', false);
       state.addFriend('bob');
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'x', messageId: 'm1'));
+      state.addMessage(
+          'bob', ChatMessage(sender: 'bob', content: 'x', messageId: 'm1'));
       state.selectChat('bob');
       expect(state.currentChat, 'bob');
 
@@ -124,17 +126,23 @@ void main() {
     setUp(() => state.setLoggedIn('alice', false));
 
     test('收到对方未读消息累加计数', () {
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: '1', messageId: 'm1', status: 'sent'));
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: '2', messageId: 'm2', status: 'sent'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob', content: '1', messageId: 'm1', status: 'sent'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob', content: '2', messageId: 'm2', status: 'sent'));
       expect(state.unreadOf('bob'), 2);
       expect(state.totalUnread, 2);
     });
 
     test('切换到该会话清零未读', () {
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'hi', messageId: 'm1', status: 'sent'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob', content: 'hi', messageId: 'm1', status: 'sent'));
       expect(state.unreadOf('bob'), 1);
       state.selectChat('bob');
       expect(state.unreadOf('bob'), 0);
@@ -143,20 +151,29 @@ void main() {
 
     test('当前会话收到消息不计未读', () {
       state.selectChat('bob');
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'live', messageId: 'm1', status: 'sent'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob', content: 'live', messageId: 'm1', status: 'sent'));
       expect(state.unreadOf('bob'), 0);
     });
 
     test('自身发送的消息不计未读', () {
-      state.addMessage('bob',
-          ChatMessage(sender: 'alice', content: 'me', messageId: 'm1', status: 'sent'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'alice', content: 'me', messageId: 'm1', status: 'sent'));
       expect(state.unreadOf('bob'), 0);
     });
 
     test('已读历史（delivered）不计未读', () {
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'history', messageId: 'm1', status: 'delivered'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob',
+              content: 'history',
+              messageId: 'm1',
+              status: 'delivered'));
       expect(state.unreadOf('bob'), 0);
       expect(state.totalUnread, 0);
     });
@@ -164,10 +181,14 @@ void main() {
     test('不同会话未读独立', () {
       state.addFriend('bob');
       state.addFriend('carol');
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'b', messageId: 'm1', status: 'sent'));
-      state.addMessage('carol',
-          ChatMessage(sender: 'carol', content: 'c', messageId: 'm2', status: 'sent'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob', content: 'b', messageId: 'm1', status: 'sent'));
+      state.addMessage(
+          'carol',
+          ChatMessage(
+              sender: 'carol', content: 'c', messageId: 'm2', status: 'sent'));
       expect(state.unreadOf('bob'), 1);
       expect(state.unreadOf('carol'), 1);
       expect(state.totalUnread, 2);
@@ -182,17 +203,24 @@ void main() {
     setUp(() => state.setLoggedIn('alice', false));
 
     test('addMessage 按 messageId 去重，仅更新状态', () {
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'hi', messageId: 'm1', status: 'sent'));
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'hi', messageId: 'm1', status: 'delivered'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob', content: 'hi', messageId: 'm1', status: 'sent'));
+      state.addMessage(
+          'bob',
+          ChatMessage(
+              sender: 'bob',
+              content: 'hi',
+              messageId: 'm1',
+              status: 'delivered'));
       expect(state.getMessages('bob').length, 1);
       expect(state.getMessages('bob').first.status, 'delivered');
     });
 
     test('updateMessageStatus / recallMessage 更新状态', () {
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: 'hi', messageId: 'm1'));
+      state.addMessage(
+          'bob', ChatMessage(sender: 'bob', content: 'hi', messageId: 'm1'));
       state.recallMessage('m1');
       expect(state.getMessages('bob').first.isRecalled, isTrue);
       state.updateMessageStatus('m1', 'delivered');
@@ -203,7 +231,8 @@ void main() {
       state.addMessage('bob',
           ChatMessage(sender: 'bob', content: 'existing', messageId: 'm1'));
       state.prependHistoryMessages('bob', [
-        ChatMessage(sender: 'bob', content: 'existing', messageId: 'm1'), // 重复，跳过
+        ChatMessage(
+            sender: 'bob', content: 'existing', messageId: 'm1'), // 重复，跳过
         ChatMessage(sender: 'bob', content: 'old', messageId: 'm2'),
       ]);
       final msgs = state.getMessages('bob');
@@ -215,8 +244,10 @@ void main() {
       final t1 = DateTime(2026, 1, 1, 10);
       final t2 = DateTime(2026, 1, 1, 9); // 更早
       state.prependHistoryMessages('bob', [
-        ChatMessage(sender: 'bob', content: 'later', messageId: 'a', timestamp: t1),
-        ChatMessage(sender: 'bob', content: 'earlier', messageId: 'b', timestamp: t2),
+        ChatMessage(
+            sender: 'bob', content: 'later', messageId: 'a', timestamp: t1),
+        ChatMessage(
+            sender: 'bob', content: 'earlier', messageId: 'b', timestamp: t2),
       ]);
       final msgs = state.getMessages('bob');
       expect(msgs.first.content, 'earlier');
@@ -278,8 +309,10 @@ void main() {
     test('系统消息会话仅在 服务器 有消息时出现', () {
       state.setLoggedIn('alice', false);
       expect(state.chatTargets.any((t) => t.key == '服务器'), isFalse);
-      state.addMessage('服务器',
-          ChatMessage(sender: '服务器', content: '公告', messageId: 's1', type: 'system'));
+      state.addMessage(
+          '服务器',
+          ChatMessage(
+              sender: '服务器', content: '公告', messageId: 's1', type: 'system'));
       expect(state.chatTargets.any((t) => t.key == '服务器'), isTrue);
     });
 

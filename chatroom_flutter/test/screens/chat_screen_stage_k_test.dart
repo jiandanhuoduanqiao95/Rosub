@@ -293,8 +293,7 @@ void main() {
       await tester.pump(const Duration(seconds: 3));
     });
 
-    testWidgets('退出登录前立即同步当前输入为草稿（防抖未触发也不丢失）',
-        (tester) async {
+    testWidgets('退出登录前立即同步当前输入为草稿（防抖未触发也不丢失）', (tester) async {
       final socket = buildService();
       state.setLoggedIn('alice', false);
       state.setFriends(['bob']);

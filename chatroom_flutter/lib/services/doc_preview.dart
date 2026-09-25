@@ -52,8 +52,7 @@ List<String> _readZipEntriesMatching(Archive archive, RegExp pattern) {
       archive.files.map((f) => f.name).where(pattern.hasMatch).toList()..sort();
   return [
     for (final name in names)
-      utf8.decode(
-          archive.files.where((f) => f.name == name).first.content,
+      utf8.decode(archive.files.where((f) => f.name == name).first.content,
           allowMalformed: true)
   ];
 }
@@ -154,8 +153,8 @@ String? _previewXlsx(String path) {
   var rowsShown = 0;
   for (final sheet in sheets) {
     if (rowsShown >= 50) break;
-    for (final row in RegExp(r'<row\b[^>]*>(.*?)</row>', dotAll: true)
-        .allMatches(sheet)) {
+    for (final row
+        in RegExp(r'<row\b[^>]*>(.*?)</row>', dotAll: true).allMatches(sheet)) {
       if (rowsShown >= 50) break;
       final cells = <String>[];
       for (final cell in RegExp(

@@ -52,6 +52,7 @@ class RawTextField extends StatefulWidget {
 class _RawTextFieldState extends State<RawTextField> {
   late final FocusNode _focusNode;
   final Object _imeOwner = Object();
+
   /// 阶段 N 补充（鼠标文字选择）：内容 RichText 的 key，用于
   /// 全局坐标 → 字符索引映射（TextPainter 测量）
   final GlobalKey _textKey = GlobalKey();
@@ -171,8 +172,7 @@ class _RawTextFieldState extends State<RawTextField> {
     if (box != null && box.attached) {
       final offset = box.localToGlobal(Offset.zero);
       final dpr = MediaQuery.of(context).devicePixelRatio;
-      ImeBridgeManager.instance.moveWindow(
-          (offset.dx * dpr).round(),
+      ImeBridgeManager.instance.moveWindow((offset.dx * dpr).round(),
           ((offset.dy + box.size.height + 2) * dpr).round());
     }
     ImeBridgeManager.instance.setActiveOwner(_imeOwner);
@@ -353,10 +353,7 @@ class _RawTextFieldState extends State<RawTextField> {
       textDirection: TextDirection.ltr,
       maxLines: 1,
     )..layout();
-    return tp
-        .getPositionForOffset(local)
-        .offset
-        .clamp(0, text.length);
+    return tp.getPositionForOffset(local).offset.clamp(0, text.length);
   }
 
   /// 光标/选区变化后同步到桥接 GTK entry（保证中文输入插入点正确）。
@@ -644,8 +641,7 @@ class _RawTextFieldState extends State<RawTextField> {
     var t = text.trim();
     if (t.isEmpty || t.contains('\n')) return null;
     if (t.startsWith('file://')) t = t.substring(7);
-    if (!RegExp(r'\.(png|jpe?g|gif)\s*$', caseSensitive: false)
-        .hasMatch(t)) {
+    if (!RegExp(r'\.(png|jpe?g|gif)\s*$', caseSensitive: false).hasMatch(t)) {
       return null;
     }
     if (!File(t).existsSync()) return null;

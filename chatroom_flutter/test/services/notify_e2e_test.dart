@@ -82,7 +82,6 @@ send_message(s, 'chat', msg, extra_headers={'to': to, 'message_id': '%d_%s' % (i
 time.sleep(2.0)
 ''';
 
-
 /// 写入 E2E 辅助脚本：确保 /tmp/opencode 目录存在
 /// （部分环境该目录缺失会导致 writeAsStringSync 抛 PathNotFoundException）
 void _writeE2eScript(File file, String content) {
@@ -123,16 +122,15 @@ void main() {
     AppConfig.serverPort = 8090;
   });
 
-  Future<Process> startPy(String user, String pw, String to, String seed,
-      String msg,
+  Future<Process> startPy(
+      String user, String pw, String to, String seed, String msg,
       {double delay = 1.2}) async {
     final root = Directory.current.parent;
     final script = File('/tmp/opencode/k_notify_py_sender.py');
     _writeE2eScript(script, pySender);
     return Process.start('${root.path}/.venv/bin/python',
         [script.path, user, pw, to, seed, msg, delay.toString()],
-        environment: {'CHATROOM_ROOT': root.path},
-        workingDirectory: root.path);
+        environment: {'CHATROOM_ROOT': root.path}, workingDirectory: root.path);
   }
 
   Future<SocketService> loginBob() async {
@@ -165,8 +163,7 @@ void main() {
     bob.disconnect();
   });
 
-  test('② 静音 alice 后 carol（未静音）第一条消息仍响铃；③ 解除静音后首条恢复响铃',
-      () async {
+  test('② 静音 alice 后 carol（未静音）第一条消息仍响铃；③ 解除静音后首条恢复响铃', () async {
     if (skipped) {
       markTestSkipped('缺少本地 Python 服务端环境，跳过 E2E 测试');
       return;
@@ -244,16 +241,15 @@ void main() {
     TaskbarNotifier.playSoundImpl = () => sounds.add('sound');
 
     // alice 在 bob 登录初始数据窗口期间（2000 条离线消息 → 窗口 >1s）发消息
-    final py = await startPy('alice', 'password123', 'bob', '6', '窗口内第一条',
-        delay: 0.1);
+    final py =
+        await startPy('alice', 'password123', 'bob', '6', '窗口内第一条', delay: 0.1);
     final bob = SocketService();
     expect(await bob.connect(), isTrue);
     expect(await bob.login('bob', 'password456'), isNull);
     await py.exitCode;
     await Future<void>.delayed(const Duration(milliseconds: 600));
 
-    expect(
-        state.getMessages('alice').any((m) => m.content == '窗口内第一条'), isTrue,
+    expect(state.getMessages('alice').any((m) => m.content == '窗口内第一条'), isTrue,
         reason: '初始数据窗口内到达的实时消息不应丢失');
     expect(sounds, isNotEmpty, reason: '窗口内到达的第一条消息应响铃');
 

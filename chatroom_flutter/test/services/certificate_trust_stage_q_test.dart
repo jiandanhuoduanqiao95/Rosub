@@ -64,7 +64,8 @@ class FakeCert implements X509Certificate {
   @override
   DateTime get startValidity => DateTime.fromMillisecondsSinceEpoch(0);
   @override
-  DateTime get endValidity => DateTime.fromMillisecondsSinceEpoch(4102444800000);
+  DateTime get endValidity =>
+      DateTime.fromMillisecondsSinceEpoch(4102444800000);
 }
 
 Uint8List bytesOf(String s) => Uint8List.fromList(s.codeUnits);
@@ -88,8 +89,8 @@ void main() {
 
   group('Q0-6 —— SHA-256 指纹计算（cert.der → 小写 hex 64 字符）', () {
     test('空 DER → SHA-256 空串标准向量', () {
-      expect(CertificateTrust.fingerprintOf(FakeCert(Uint8List(0))),
-          sha256Empty);
+      expect(
+          CertificateTrust.fingerprintOf(FakeCert(Uint8List(0))), sha256Empty);
     });
 
     test('DER 内容 "abc" → SHA-256 标准向量', () {
@@ -106,8 +107,7 @@ void main() {
   });
 
   group('Q0-6 —— 校验策略矩阵', () {
-    test('默认 enforceFingerprint=false → 恒接受（现状语义，局域网可用）',
-        () async {
+    test('默认 enforceFingerprint=false → 恒接受（现状语义，局域网可用）', () async {
       expect(CertificateTrust.enforceFingerprint, isFalse,
           reason: 'Q0-6 为可选加固，默认行为必须与现状一致');
       final ok = await CertificateTrust.validate(
@@ -115,8 +115,7 @@ void main() {
       expect(ok, isTrue);
     });
 
-    test('enforce=true + 指纹与 pinnedSha256 匹配 → 接受（confirm 不触发）',
-        () async {
+    test('enforce=true + 指纹与 pinnedSha256 匹配 → 接受（confirm 不触发）', () async {
       CertificateTrust.enforceFingerprint = true;
       CertificateTrust.pinnedSha256 = sha256Abc;
       var confirmCalls = 0;
@@ -143,8 +142,7 @@ void main() {
       String? shownHost;
       int? shownPort;
       String? shownFingerprint;
-      CertificateTrust.confirmUnknownFingerprint =
-          (cert, host, port) async {
+      CertificateTrust.confirmUnknownFingerprint = (cert, host, port) async {
         shownHost = host;
         shownPort = port;
         shownFingerprint = CertificateTrust.fingerprintOf(cert);
@@ -169,8 +167,7 @@ void main() {
       expect(ok, isFalse);
     });
 
-    test('enforce=false → confirm 钩子不触发（开关关闭即无任何打扰）',
-        () async {
+    test('enforce=false → confirm 钩子不触发（开关关闭即无任何打扰）', () async {
       var confirmCalls = 0;
       CertificateTrust.confirmUnknownFingerprint = (cert, host, port) async {
         confirmCalls++;

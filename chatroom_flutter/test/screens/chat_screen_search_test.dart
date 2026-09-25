@@ -62,7 +62,8 @@ void main() {
   setUp(resetState);
 
   group('H5 搜索接线', () {
-    testWidgets('私聊会话：搜索输入 → Enter → searchHistory(keyword, to)', (tester) async {
+    testWidgets('私聊会话：搜索输入 → Enter → searchHistory(keyword, to)',
+        (tester) async {
       final socket = buildService();
       state.setLoggedIn('alice', false);
       state.setFriends(['bob']);
@@ -129,17 +130,19 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pump();
 
-      verify(() => socket.searchHistory('flutter',
-          to: null, groupId: 1, limit: 50)).called(1);
+      verify(() =>
+              socket.searchHistory('flutter', to: null, groupId: 1, limit: 50))
+          .called(1);
       await tester.pump(const Duration(seconds: 3));
     });
 
     testWidgets('系统会话不显示搜索入口（只读会话）', (tester) async {
       final socket = buildService();
       state.setLoggedIn('alice', false);
-      state.addMessage('服务器',
-          ChatMessage(sender: '服务器', content: '公告', messageId: 's1',
-              type: 'system'));
+      state.addMessage(
+          '服务器',
+          ChatMessage(
+              sender: '服务器', content: '公告', messageId: 's1', type: 'system'));
       await pumpScreen(tester, socket);
 
       await tester.tap(find.text('系统消息'));
@@ -163,10 +166,17 @@ void main() {
       await tester.pumpAndSettle();
 
       // 模拟 search_response（真实响应由 SocketService._handleMessage 解析）
-      state.setSearchResults('bob', [
-        ChatMessage(sender: 'bob', content: 'flutter 教程', messageId: 's1',
-            isHistory: true, status: 'delivered'),
-      ], query: 'flutter');
+      state.setSearchResults(
+          'bob',
+          [
+            ChatMessage(
+                sender: 'bob',
+                content: 'flutter 教程',
+                messageId: 's1',
+                isHistory: true,
+                status: 'delivered'),
+          ],
+          query: 'flutter');
       await tester.pump();
 
       expect(find.text('搜索：flutter'), findsOneWidget);
@@ -179,17 +189,24 @@ void main() {
       final socket = buildService();
       state.setLoggedIn('alice', false);
       state.setFriends(['bob']);
-      state.addMessage('bob',
-          ChatMessage(sender: 'bob', content: '普通消息', messageId: 'm1'));
+      state.addMessage(
+          'bob', ChatMessage(sender: 'bob', content: '普通消息', messageId: 'm1'));
       await pumpScreen(tester, socket);
 
       await tester.tap(find.text('bob'));
       await tester.pumpAndSettle();
 
-      state.setSearchResults('bob', [
-        ChatMessage(sender: 'bob', content: '搜索结果', messageId: 's1',
-            isHistory: true, status: 'delivered'),
-      ], query: 'flutter');
+      state.setSearchResults(
+          'bob',
+          [
+            ChatMessage(
+                sender: 'bob',
+                content: '搜索结果',
+                messageId: 's1',
+                isHistory: true,
+                status: 'delivered'),
+          ],
+          query: 'flutter');
       await tester.pump();
       expect(find.text('搜索：flutter'), findsOneWidget);
 
@@ -210,10 +227,17 @@ void main() {
 
       await tester.tap(find.text('bob'));
       await tester.pumpAndSettle();
-      state.setSearchResults('bob', [
-        ChatMessage(sender: 'bob', content: '结果', messageId: 's1',
-            isHistory: true, status: 'delivered'),
-      ], query: 'flutter');
+      state.setSearchResults(
+          'bob',
+          [
+            ChatMessage(
+                sender: 'bob',
+                content: '结果',
+                messageId: 's1',
+                isHistory: true,
+                status: 'delivered'),
+          ],
+          query: 'flutter');
       await tester.pump();
       expect(find.text('搜索：flutter'), findsOneWidget);
 

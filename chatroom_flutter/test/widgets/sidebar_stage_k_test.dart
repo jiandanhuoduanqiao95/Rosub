@@ -170,8 +170,7 @@ void main() {
     testWidgets('静音群组会话显示静音标识', (tester) async {
       await tester.pumpWidget(wrap(buildSidebar(
         targets: const [
-          ChatTarget(
-              key: 'group_1', displayName: '开发组 (ID:1)', isGroup: true),
+          ChatTarget(key: 'group_1', displayName: '开发组 (ID:1)', isGroup: true),
         ],
         isMuted: (key) => key == 'group_1',
       )));

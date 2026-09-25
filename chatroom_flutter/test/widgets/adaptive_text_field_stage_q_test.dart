@@ -51,9 +51,7 @@ Widget host(Widget child) => MaterialApp(home: Scaffold(body: child));
 
 /// 平台模拟 helper（§21.1）：override 必须在 testWidgets body 内恢复——
 /// flutter_test 的 foundation 变量 invariant 检查先于 group tearDown 执行
-void testWidgetsOnPlatform(
-    String description,
-    TargetPlatform? platform,
+void testWidgetsOnPlatform(String description, TargetPlatform? platform,
     Future<void> Function(WidgetTester tester) body) {
   testWidgets(description, (tester) async {
     debugDefaultTargetPlatformOverride = platform;
@@ -67,8 +65,7 @@ void testWidgetsOnPlatform(
 
 String srcOf(String relPath) => File('lib/$relPath').readAsStringSync();
 
-int countOf(String source, String needle) =>
-    source.split(needle).length - 1;
+int countOf(String source, String needle) => source.split(needle).length - 1;
 
 const Set<TargetPlatform> nonLinuxPlatforms = {
   TargetPlatform.android,
@@ -86,8 +83,9 @@ void main() {
   });
 
   group('Q0-2 —— 适配层按平台选择（工厂契约）', () {
-    testWidgetsOnPlatform('Linux 模拟 → 渲染 RawTextField（GTK 桥接语义保留）',
-        TargetPlatform.linux, (tester) async {
+    testWidgetsOnPlatform(
+        'Linux 模拟 → 渲染 RawTextField（GTK 桥接语义保留）', TargetPlatform.linux,
+        (tester) async {
       await tester.pumpWidget(host(AdaptiveTextField(
         controller: TextEditingController(),
         key: const ValueKey('linux'),
@@ -99,7 +97,8 @@ void main() {
           reason: 'Linux 不走标准输入路径（现状语义不变）');
     });
 
-    testWidgetsOnPlatform('Android 模拟 → 渲染标准 TextField', TargetPlatform.android, (tester) async {
+    testWidgetsOnPlatform('Android 模拟 → 渲染标准 TextField', TargetPlatform.android,
+        (tester) async {
       await tester.pumpWidget(host(AdaptiveTextField(
         controller: TextEditingController(),
         key: const ValueKey('android'),
@@ -110,8 +109,8 @@ void main() {
           reason: '非 Linux 不注册 GTK 桥接监听（NAV 桥接路径仅 Linux）');
     });
 
-    testWidgetsOnPlatform('iOS/Windows/macOS 模拟 → 同样走标准输入路径',
-        TargetPlatform.iOS, (tester) async {
+    testWidgetsOnPlatform(
+        'iOS/Windows/macOS 模拟 → 同样走标准输入路径', TargetPlatform.iOS, (tester) async {
       for (final platform in {
         TargetPlatform.iOS,
         TargetPlatform.windows,
@@ -130,8 +129,9 @@ void main() {
       }
     });
 
-    testWidgetsOnPlatform('showChineseInput 仅 Linux 生效：非 Linux 传入不触发桥接路径',
-        TargetPlatform.android, (tester) async {
+    testWidgetsOnPlatform(
+        'showChineseInput 仅 Linux 生效：非 Linux 传入不触发桥接路径', TargetPlatform.android,
+        (tester) async {
       await tester.pumpWidget(host(AdaptiveTextField(
         controller: TextEditingController(),
         showChineseInput: true,
@@ -143,9 +143,10 @@ void main() {
       expect(find.byType(TextField), findsOneWidget);
     });
 
-    testWidgetsOnPlatform('Linux + showChineseInput → RawTextField 渲染且桥接注册安全'
-        '（FLUTTER_TEST 下 ensureStarted 为 no-op）', TargetPlatform.linux,
-        (tester) async {
+    testWidgetsOnPlatform(
+        'Linux + showChineseInput → RawTextField 渲染且桥接注册安全'
+        '（FLUTTER_TEST 下 ensureStarted 为 no-op）',
+        TargetPlatform.linux, (tester) async {
       await tester.pumpWidget(host(AdaptiveTextField(
         controller: TextEditingController(),
         showChineseInput: true,
@@ -157,7 +158,9 @@ void main() {
   });
 
   group('Q0-2 —— 非 Linux 标准输入语义（N5 ASCII 路径平台无关保留）', () {
-    testWidgetsOnPlatform('ASCII 输入同步到 controller（系统 IME 通道）', TargetPlatform.android, (tester) async {
+    testWidgetsOnPlatform(
+        'ASCII 输入同步到 controller（系统 IME 通道）', TargetPlatform.android,
+        (tester) async {
       final controller = TextEditingController();
       await tester.pumpWidget(host(AdaptiveTextField(controller: controller)));
       await tester.pump();
@@ -166,8 +169,9 @@ void main() {
       expect(controller.text, 'hello Q0');
     });
 
-    testWidgetsOnPlatform('回车提交触发 onSubmitted（TextInputAction.done）',
-        TargetPlatform.android, (tester) async {
+    testWidgetsOnPlatform(
+        '回车提交触发 onSubmitted（TextInputAction.done）', TargetPlatform.android,
+        (tester) async {
       final controller = TextEditingController();
       var submitted = '';
       await tester.pumpWidget(host(AdaptiveTextField(
@@ -184,7 +188,8 @@ void main() {
           reason: '标准输入路径的提交语义与 RawTextField.onSubmitted 对齐');
     });
 
-    testWidgetsOnPlatform('hintText 透传渲染', TargetPlatform.android, (tester) async {
+    testWidgetsOnPlatform('hintText 透传渲染', TargetPlatform.android,
+        (tester) async {
       await tester.pumpWidget(host(AdaptiveTextField(
         controller: TextEditingController(),
         hintText: '输入消息…',
@@ -193,7 +198,8 @@ void main() {
       expect(find.text('输入消息…'), findsOneWidget);
     });
 
-    testWidgetsOnPlatform('obscureText 透传（密码掩码）', TargetPlatform.android, (tester) async {
+    testWidgetsOnPlatform('obscureText 透传（密码掩码）', TargetPlatform.android,
+        (tester) async {
       await tester.pumpWidget(host(AdaptiveTextField(
         controller: TextEditingController(),
         obscureText: true,
@@ -204,8 +210,9 @@ void main() {
       expect(field.obscureText, isTrue);
     });
 
-    testWidgetsOnPlatform('focusNode 透传：tap 聚焦后 node.hasFocus 为真',
-        TargetPlatform.android, (tester) async {
+    testWidgetsOnPlatform(
+        'focusNode 透传：tap 聚焦后 node.hasFocus 为真', TargetPlatform.android,
+        (tester) async {
       final node = FocusNode();
       await tester.pumpWidget(host(AdaptiveTextField(
         controller: TextEditingController(),
@@ -219,19 +226,22 @@ void main() {
   });
 
   group('Q0-2 —— Linux 路径参数透传（RawTextField 语义不变）', () {
-    testWidgetsOnPlatform('focusNode 透传：tap 聚焦后 node.hasFocus 为真', TargetPlatform.linux, (tester) async {
+    testWidgetsOnPlatform(
+        'focusNode 透传：tap 聚焦后 node.hasFocus 为真', TargetPlatform.linux,
+        (tester) async {
       final node = FocusNode();
       final controller = TextEditingController();
-      await tester
-          .pumpWidget(host(AdaptiveTextField(controller: controller, focusNode: node)));
+      await tester.pumpWidget(
+          host(AdaptiveTextField(controller: controller, focusNode: node)));
       await tester.pump();
       final raw = tester.widget<RawTextField>(find.byType(RawTextField));
       expect(identical(raw.focusNode, node), isTrue,
           reason: '适配层不得重建 FocusNode（onKeyEvent 绑定依赖稳定 node）');
     });
 
-    testWidgetsOnPlatform('obscureText/hintText/showVisibilityToggle 全参透传',
-        TargetPlatform.linux, (tester) async {
+    testWidgetsOnPlatform(
+        'obscureText/hintText/showVisibilityToggle 全参透传', TargetPlatform.linux,
+        (tester) async {
       await tester.pumpWidget(host(AdaptiveTextField(
         controller: TextEditingController(),
         hintText: '密码',

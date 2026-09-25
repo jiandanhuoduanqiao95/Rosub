@@ -105,8 +105,7 @@ class _ImageAnnotationEditorState extends State<ImageAnnotationEditor> {
                     child: LayoutBuilder(
                       builder: (context, constraints) {
                         final imageSize = _image != null
-                            ? Size(
-                                _image!.width.toDouble(),
+                            ? Size(_image!.width.toDouble(),
                                 _image!.height.toDouble())
                             : const Size(400, 300);
                         var scale = 1.0;

@@ -40,7 +40,8 @@ void main() {
   group('M1 —— 群主标识与群组更新', () {
     test('setGroups 解析 owner，isGroupOwner 判定正确', () {
       state.setLoggedIn('alice', false);
-      state.setGroups([groupOf(1, '开发组', owner: 'alice'), groupOf(2, '设计组', owner: 'bob')]);
+      state.setGroups(
+          [groupOf(1, '开发组', owner: 'alice'), groupOf(2, '设计组', owner: 'bob')]);
       expect(state.isGroupOwner(1), isTrue, reason: 'alice 是开发组群主');
       expect(state.isGroupOwner(2), isFalse, reason: 'alice 不是设计组群主');
     });
@@ -126,7 +127,8 @@ void main() {
     test('invitations 缺省为空，setInvitations 覆盖', () {
       expect(state.invitations, isEmpty);
       state.setInvitations([
-        GroupInvite.fromJson(const {'group_id': 1, 'group_name': '开发组', 'from': 'alice'}),
+        GroupInvite.fromJson(
+            const {'group_id': 1, 'group_name': '开发组', 'from': 'alice'}),
       ]);
       expect(state.invitations.length, 1);
       expect(state.invitations.first.groupId, 1);
@@ -134,8 +136,10 @@ void main() {
 
     test('removeInvitation 接受/拒绝后移除', () {
       state.setInvitations([
-        GroupInvite.fromJson(const {'group_id': 1, 'group_name': '开发组', 'from': 'alice'}),
-        GroupInvite.fromJson(const {'group_id': 2, 'group_name': '设计组', 'from': 'bob'}),
+        GroupInvite.fromJson(
+            const {'group_id': 1, 'group_name': '开发组', 'from': 'alice'}),
+        GroupInvite.fromJson(
+            const {'group_id': 2, 'group_name': '设计组', 'from': 'bob'}),
       ]);
       state.removeInvitation(1);
       expect(state.invitations.map((i) => i.groupId), [2]);
