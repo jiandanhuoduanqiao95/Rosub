@@ -523,40 +523,15 @@ class _LoginScreenState extends State<LoginScreen> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const SizedBox(height: 24),
-        // Q1 五轮（问题5）：欢迎标语改为用户定稿文案（单句，徽标保留）
-        Column(
-          children: [
-            Container(
-              width: 52,
-              height: 52,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(16),
-                gradient: const LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [Color(0xFF3B82F6), Color(0xFF2563EB)],
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFF3B82F6).withValues(alpha: 0.35),
-                    blurRadius: 24,
-                    offset: const Offset(0, 6),
-                  ),
-                ],
-              ),
-              child: const Icon(Icons.forum_rounded,
-                  size: 28, color: Colors.white),
-            ),
-            const SizedBox(height: 14),
-            const Text(
-              '在这里，墙没有耳朵',
-              style: TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.bold,
-                color: Color(0xFFF1F5F9),
-              ),
-            ),
-          ],
+        // gc13（用户决策）：顶部徽标去除——应用图标已表达品牌，登录页
+        // 不再重复（旧渐变论坛徽标删除，标语保留）
+        const Text(
+          '在这里，墙没有耳朵',
+          style: TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.bold,
+            color: Color(0xFFF1F5F9),
+          ),
         ),
         const SizedBox(height: 24),
         _LoginModeToggle(
@@ -867,10 +842,9 @@ class _LoginScreenState extends State<LoginScreen> {
 
   /// 窄屏品牌区（紧凑单行）
   Widget _buildBrandHeader(BuildContext context, {bool compact = false}) {
+    // gc13：logo 图形去除（同标语块；应用图标已表达品牌）
     return Column(
       children: [
-        _brandMark(size: 56, radius: 18, iconSize: 32),
-        const SizedBox(height: 12),
         Text(t('appTitle'),
             style: const TextStyle(
                 fontSize: 24,
@@ -888,16 +862,13 @@ class _LoginScreenState extends State<LoginScreen> {
       {required double size,
       required double radius,
       required double iconSize}) {
+    // gc12：Rosub 品牌 logo（assets/rosub_login_logo.png，512 RGBA）——
+    // 替换占位渐变+论坛图标；阴影/圆角保留
     return Container(
       width: size,
       height: size,
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(radius),
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF3B82F6), Color(0xFF2563EB)],
-        ),
         boxShadow: [
           BoxShadow(
             color: const Color(0xFF3B82F6).withValues(alpha: 0.35),
@@ -906,7 +877,15 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ],
       ),
-      child: Icon(Icons.forum_rounded, size: iconSize, color: Colors.white),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(radius),
+        child: Image.asset(
+          'assets/rosub_login_logo.png',
+          width: size,
+          height: size,
+          fit: BoxFit.cover,
+        ),
+      ),
     );
   }
 

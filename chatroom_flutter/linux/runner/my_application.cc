@@ -58,6 +58,19 @@ void chatroom_set_urgency(int urgent) {
 // g_object_ref 保活，回调用静态指针 + FL_IS_METHOD_CHANNEL 防御检查。
 static FlMethodChannel* g_dnd_channel = nullptr;
 
+// gc13：读源文件字节写目标（g_file_copy 的简化替代；失败返回 error）
+static GError* g_file_copy_robust(const gchar* src_path, const gchar* dst_path) {
+  gchar* contents = nullptr;
+  gsize length = 0;
+  GError* err = nullptr;
+  if (!g_file_get_contents(src_path, &contents, &length, &err)) {
+    return err;
+  }
+  g_file_set_contents(dst_path, contents, static_cast<gssize>(length), &err);
+  g_free(contents);
+  return err;
+}
+
 static void drag_data_received_cb(GtkWidget* widget, GdkDragContext* context,
                                   gint x, gint y,
                                   GtkSelectionData* selection_data,
@@ -120,11 +133,69 @@ static void my_application_activate(GApplication* application) {
   if (use_header_bar) {
     GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
     gtk_widget_show(GTK_WIDGET(header_bar));
-    gtk_header_bar_set_title(header_bar, "chatroom_flutter");
+    gtk_header_bar_set_title(header_bar, "Rosub");
     gtk_header_bar_set_show_close_button(header_bar, TRUE);
     gtk_window_set_titlebar(window, GTK_WIDGET(header_bar));
   } else {
-    gtk_window_set_title(window, "chatroom_flutter");
+    gtk_window_set_title(window, "Rosub");
+    // gc12/gc13：Rosub 窗口/任务栏/启动器图标。三件事：
+    // ① 窗口图标：图标路径经 /proc/self/exe 推导（bundle 绝对路径，
+    //    无论从哪里启动都成立——相对路径在 dock/桌面启动时 CWD 不定
+    //    曾加载失败）；dev（flutter run）下无该文件静默跳过。
+    // ② hicolor 图标自安装：拷贝 256px 到
+    //    ~/.local/share/icons/hicolor/256x256/apps/rosub.png（幂等）。
+    // ③ desktop 条目自安装：Exec/Icon 写 bundle 绝对路径——启动器/
+    //    dock 固定图标场景（文件管理器双击 bundle 也可）。
+    {
+      gchar* exe_path = g_file_read_link("/proc/self/exe", nullptr);
+      if (exe_path != nullptr) {
+        gchar* bundle_dir = g_path_get_dirname(exe_path);
+        gchar* icon_path = g_build_filename(
+            bundle_dir, "data", "flutter_assets", "assets",
+            "rosub_icon.png", nullptr);
+
+        GError* icon_error = nullptr;
+        gtk_window_set_default_icon_from_file(icon_path, &icon_error);
+        if (icon_error != nullptr) g_error_free(icon_error);
+
+        const gchar* home = g_get_home_dir();
+        if (home != nullptr && g_file_test(icon_path, G_FILE_TEST_EXISTS)) {
+          gchar* icon_dir = g_build_filename(home, ".local", "share",
+              "icons", "hicolor", "256x256", "apps", nullptr);
+          gchar* icon_dst = g_build_filename(icon_dir, "rosub.png", nullptr);
+          gchar* apps_dir = g_build_filename(home, ".local", "share",
+              "applications", nullptr);
+          gchar* desktop_dst = g_build_filename(apps_dir, "rosub.desktop",
+              nullptr);
+          gchar* exe_quoted = g_shell_quote(exe_path);
+          // StartupWMClass 必须与窗口 WM_CLASS 一致（GTK 缺省取可执行
+          // 名）——GNOME dock 据此把窗口匹配到本 desktop 条目取图标，
+          // 缺失则回退通用图标（gc13 首版缺此条目即用户复测仍异常的
+          // 根因）
+          gchar* desktop_content = g_strdup_printf(
+              "[Desktop Entry]\nType=Application\nName=Rosub\n"
+              "Exec=%s\nIcon=%s\nTerminal=false\nCategories=Network;"
+              "InstantMessaging;\n"
+              "StartupWMClass=com.example.chatroom_flutter\n",
+              exe_quoted, icon_dst);
+          g_mkdir_with_parents(icon_dir, 0755);
+          g_mkdir_with_parents(apps_dir, 0755);
+          GError* cp_err = g_file_copy_robust(icon_path, icon_dst);
+          if (cp_err != nullptr) g_error_free(cp_err);
+          g_file_set_contents(desktop_dst, desktop_content, -1, nullptr);
+          g_free(desktop_content);
+          g_free(exe_quoted);
+          g_free(desktop_dst);
+          g_free(apps_dir);
+          g_free(icon_dst);
+          g_free(icon_dir);
+        }
+
+        g_free(icon_path);
+        g_free(bundle_dir);
+        g_free(exe_path);
+      }
+    }
   }
 
   gtk_window_set_default_size(window, 1280, 720);

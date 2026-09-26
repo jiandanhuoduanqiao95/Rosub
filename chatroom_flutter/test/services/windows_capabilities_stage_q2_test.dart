@@ -315,7 +315,7 @@ void main() {
       ));
       await tester.pump();
 
-      expect(find.text('聊天室 - alice'), findsOneWidget,
+      expect(find.text('Rosub - alice'), findsOneWidget,
           reason: 'Windows 模拟下 ChatScreen 正常挂载（综合冒烟）');
       expect(drop.listenCount, 1,
           reason:

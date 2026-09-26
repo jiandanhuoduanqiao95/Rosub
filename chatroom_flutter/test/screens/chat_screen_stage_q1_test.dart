@@ -355,7 +355,7 @@ void main() {
       state.setFriends(['bob']);
 
       await pumpChat(tester, socket);
-      expect(find.textContaining('聊天室'), findsNothing,
+      expect(find.textContaining('Rosub'), findsNothing,
           reason: '列表态标题字样移除（工具栏图标保留）');
       expect(find.byTooltip('退出'), findsOneWidget);
     });

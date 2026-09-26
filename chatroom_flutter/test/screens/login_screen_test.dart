@@ -84,7 +84,7 @@ void main() {
     await tester.binding.setSurfaceSize(testerSurfaceSize);
     await tester.pumpWidget(const ChatroomApp());
     await tester.pump();
-    expect(find.text('聊天室'), findsWidgets);
+    expect(find.text('Rosub'), findsWidgets);
     expect(find.text('登录'), findsWidgets);
     expect(find.text('没有账号？注册'), findsOneWidget);
   });

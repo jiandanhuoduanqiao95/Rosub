@@ -1,5 +1,6 @@
 package com.example.chatroom_flutter
 
+import android.graphics.drawable.Icon
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -51,8 +52,9 @@ class KeepAliveService : Service() {
             )
         }
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("聊天室在线中")
+            .setSmallIcon(R.drawable.ic_notification_white)
+            .setLargeIcon(Icon.createWithResource(this, R.mipmap.ic_launcher))
+            .setContentTitle("Rosub 在线中")
             .setContentText("退到后台仍在保持消息连接，及时接收新消息")
             .setOngoing(true)
             .setSilent(true)
@@ -73,7 +75,7 @@ class KeepAliveService : Service() {
     }
 
     companion object {
-        const val CHANNEL_ID = "chatroom_keepalive"
+        const val CHANNEL_ID = "chatroom_keepalive_v2"
         const val NOTIF_ID = 1001
 
         fun start(context: Context) {

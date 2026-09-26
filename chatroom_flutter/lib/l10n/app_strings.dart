@@ -12,7 +12,7 @@ import 'package:flutter/widgets.dart' show WidgetsBinding;
 import '../services/theme_settings.dart';
 
 const Map<String, String> _zh = {
-  'appTitle': '聊天室',
+  'appTitle': 'Rosub',
   'login': '登录',
   'register': '注册',
   'registerToCreate': '注册新账号',
@@ -34,7 +34,7 @@ const Map<String, String> _zh = {
 };
 
 const Map<String, String> _en = {
-  'appTitle': 'Chatroom',
+  'appTitle': 'Rosub',
   'login': 'Login',
   'register': 'Register',
   'registerToCreate': 'Create an account',

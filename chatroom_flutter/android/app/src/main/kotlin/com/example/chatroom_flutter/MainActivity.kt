@@ -306,7 +306,7 @@ class MainActivity : FlutterActivity() {
                 )
             }
             val notification = NotificationCompat.Builder(this, TRANSFER_CHANNEL_ID)
-                .setSmallIcon(R.mipmap.ic_launcher)
+                .setSmallIcon(R.drawable.ic_notification_white)
                 .setContentTitle(title)
                 .setContentText("$progress%")
                 .setProgress(100, progress.coerceIn(0, 100), false)
@@ -356,7 +356,7 @@ class MainActivity : FlutterActivity() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification_white)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
@@ -580,9 +580,9 @@ class MainActivity : FlutterActivity() {
     }
 
     companion object {
-        const val MESSAGE_CHANNEL_ID = "chatroom_messages"
+        const val MESSAGE_CHANNEL_ID = "chatroom_messages_v2"
         const val MESSAGE_NOTIF_ID = 2001
-        const val TRANSFER_CHANNEL_ID = "chatroom_transfer"
+        const val TRANSFER_CHANNEL_ID = "chatroom_transfer_v2"
         const val TRANSFER_NOTIF_ID = 2002
         const val REQ_POST_NOTIFICATIONS = 1001
         const val REQ_CALL_PERMISSIONS = 1002

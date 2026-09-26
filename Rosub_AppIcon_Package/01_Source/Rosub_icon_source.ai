@@ -1,0 +1,118 @@
+%!PS-Adobe-3.0 EPSF-3.0
+%%Creator: Rosub vector redraw
+%%Title: Rosub_icon_source.ai
+%%BoundingBox: 0 0 1024 1024
+%%LanguageLevel: 3
+%%EndComments
+1.3837838 -1.3837838 scale
+-120 -830 translate
+gsave
+newpath
+216 431 moveto
+207 498 224 584 256 635 curveto
+315 729 480 773 590 739 curveto
+732 701 778 572 791 411 curveto
+753 509 615 519 554 602 curveto
+430 533 312 450 216 431 curveto
+ closepath
+clip
+<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [250 200 650 740] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.68235 0.68235 1.00000] /C1 [0.16078 0.34510 0.92157] /N 1 >> /Extend [true true] >> shfill
+grestore
+gsave
+newpath
+224 475 moveto
+157 397 230 240 336 269 curveto
+420 291 458 399 431 575 curveto
+335 649 245 583 224 475 curveto
+ closepath
+clip
+<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [250 200 650 740] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.73725 0.90980 1.00000] /C1 [0.19216 0.47451 1.00000] /N 1 >> /Extend [true true] >> shfill
+grestore
+gsave
+newpath
+632 313 moveto
+761 256 839 363 773 440 curveto
+735 489 683 505 642 535 curveto
+672 450 657 374 632 313 curveto
+ closepath
+clip
+<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [250 200 650 740] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.59216 0.63922 1.00000] /C1 [0.14118 0.29020 0.91765] /N 1 >> /Extend [true true] >> shfill
+grestore
+gsave
+newpath
+323 547 moveto
+264 406 317 231 466 173 curveto
+634 96 673 228 686 398 curveto
+710 517 625 614 514 642 curveto
+ closepath
+clip
+<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [250 200 650 740] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.72941 0.86667 1.00000] /C1 [0.13333 0.34510 0.95686] /N 1 >> /Extend [true true] >> shfill
+grestore
+gsave
+newpath
+354 526 moveto
+365 372 484 270 583 267 curveto
+689 259 718 388 677 497 curveto
+645 581 518 640 432 635 curveto
+ closepath
+clip
+<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [250 200 650 740] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.25490 0.42745 0.99608] /C1 [0.02353 0.21961 0.77255] /N 1 >> /Extend [true true] >> shfill
+grestore
+gsave
+newpath
+327 508 moveto
+360 417 418 322 493 304 curveto
+552 290 594 331 607 381 curveto
+528 415 459 477 423 558 curveto
+ closepath
+clip
+<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [250 200 650 740] /Function << /FunctionType 2 /Domain [0 1] /C0 [1.00000 1.00000 1.00000] /C1 [0.60392 0.67059 1.00000] /N 1 >> /Extend [true true] >> shfill
+grestore
+gsave
+newpath
+370 530 moveto
+411 429 527 379 599 370 curveto
+690 357 698 445 681 507 curveto
+666 551 615 590 558 617 curveto
+498 590 437 555 370 530 curveto
+ closepath
+clip
+<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [250 200 650 740] /Function << /FunctionType 2 /Domain [0 1] /C0 [1.00000 1.00000 1.00000] /C1 [0.82353 0.82353 1.00000] /N 1 >> /Extend [true true] >> shfill
+grestore
+gsave
+newpath
+554 602 moveto
+615 519 753 509 791 411 curveto
+778 572 732 701 590 739 curveto
+602 690 583 639 554 602 curveto
+ closepath
+clip
+<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [250 200 650 740] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.49020 0.72549 1.00000] /C1 [0.03137 0.27059 0.85098] /N 1 >> /Extend [true true] >> shfill
+grestore
+gsave
+newpath
+216 431 moveto
+217 477 318 480 414 527 curveto
+527 581 593 644 590 739 curveto
+480 773 315 729 256 635 curveto
+224 584 207 498 216 431 curveto
+ closepath
+clip
+<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [250 200 650 740] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.78039 0.74118 1.00000] /C1 [0.21961 0.37647 0.96863] /N 1 >> /Extend [true true] >> shfill
+grestore
+gsave
+newpath
+234 456 moveto
+266 423 406 495 484 544 curveto
+551 587 600 655 590 739 curveto
+550 665 476 622 394 584 curveto
+307 548 258 503 234 456 curveto
+ closepath
+clip
+<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [250 200 650 740] /Function << /FunctionType 2 /Domain [0 1] /C0 [1.00000 1.00000 1.00000] /C1 [0.67451 0.71373 1.00000] /N 1 >> /Extend [true true] >> shfill
+grestore
+newpath 476 486 17 0 360 arc closepath .25 .40 .98 setrgbcolor fill
+newpath 529 486 17 0 360 arc closepath .25 .40 .98 setrgbcolor fill
+newpath 582 486 17 0 360 arc closepath .25 .40 .98 setrgbcolor fill
+showpage
+%%EOF

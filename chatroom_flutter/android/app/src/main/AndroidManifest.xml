@@ -24,7 +24,7 @@
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
 
     <application
-        android:label="聊天室"
+        android:label="Rosub"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

@@ -1,0 +1,15 @@
+{
+  "checks": [
+    "82 PNG files: dimensions, channel mode, 8-bit and sRGB ICC passed",
+    "04_Web_PWA/favicon.ico: all required embedded sizes passed",
+    "05_Desktop/rosub.ico: all required embedded sizes passed",
+    "ICNS: all required representations passed",
+    "Transparent master: alpha range 0..255 passed",
+    "iOS: all PNGs opaque RGB passed"
+  ],
+  "limitations": [
+    "No physical-device install test",
+    "Illustrator compatibility not application-tested",
+    "Vector redraw is a simplified reconstruction"
+  ]
+}

@@ -54,7 +54,7 @@ void main() {
       expect(settings.locale, AppLocale.zh, reason: '默认中文');
 
       await pumpApp(tester);
-      expect(find.text('聊天室'), findsWidgets);
+      expect(find.text('Rosub'), findsWidgets);
       expect(find.text('登录以继续'), findsOneWidget);
       expect(find.text('管理员模式'), findsOneWidget);
     });
@@ -64,7 +64,7 @@ void main() {
       settings.locale = AppLocale.en;
 
       await pumpApp(tester);
-      expect(find.text('Chatroom'), findsWidgets, reason: '品牌标题英文');
+      expect(find.text('Rosub'), findsWidgets, reason: '品牌标题英文');
       expect(find.text('Sign in to continue'), findsOneWidget);
       expect(find.text('Admin mode'), findsOneWidget);
       expect(find.text('登录以继续'), findsNothing);

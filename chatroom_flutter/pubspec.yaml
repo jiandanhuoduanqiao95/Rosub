@@ -68,3 +68,9 @@ flutter:
     - family: NotoColorEmoji
       fonts:
         - asset: assets/fonts/NotoColorEmoji.ttf
+
+  # Rosub 品牌（gc12）：登录页 logo 与窗口图标（Linux runner 经
+  # flutter_assets 路径加载 rosub_icon.png）
+  assets:
+    - assets/rosub_login_logo.png
+    - assets/rosub_icon.png

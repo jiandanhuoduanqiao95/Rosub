@@ -43,7 +43,7 @@ void main() {
       ));
       await tester.pump();
 
-      expect(find.text('聊天室 - alice'), findsOneWidget);
+      expect(find.text('Rosub - alice'), findsOneWidget);
       expect(find.byTooltip('退出'), findsOneWidget);
       // 非管理员不显示管理面板
       expect(find.byTooltip('管理面板'), findsNothing);
