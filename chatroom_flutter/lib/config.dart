@@ -59,7 +59,7 @@ class AppConfig {
   /// 递增，显示在登录页页脚并打印到启动日志——多客户端排查"谁在跑
   /// 旧构建"（旧构建同时呈现黑白表情 + media_kit non-platform thread
   /// ERROR）时一眼可辨。每次修订轮次更新此值。
-  static const String buildStamp = 'gc10';
+  static const String buildStamp = 'gc11';
 
   /// 彩色 emoji 字体栈（R-P26 硬化）：首选内置 COLRv1 字体，第二兜底
   /// 系统 Noto Color Emoji（CBDT 彩色位图，Ubuntu 默认安装、覆盖全部

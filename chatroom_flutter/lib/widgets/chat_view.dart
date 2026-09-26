@@ -754,11 +754,19 @@ class _ChatViewState extends State<ChatView> {
   /// 未加载时翻页加载 + 高亮 2s），条目尾部快捷取消按钮直接解除该条置顶。
   List<Widget> _buildNoticeBanners(BuildContext context) {
     final banners = <Widget>[];
-    // gc9：群通话进行中加入条目（置顶/公告之前，最显眼位置）
+    // gc9/gc11：群通话进行中加入条目（置顶/公告之前，最显眼位置）。
+    // marker 用 Material 矢量图标（📞 emoji 的颜色由平台 emoji 字体
+    // 决定——Windows Segoe UI Emoji 为红色，与 Linux/Android 灰黑不
+    // 一致；矢量图标颜色跟随横幅文字色，三端一致）
     if (widget.ongoingGroupCallLabel != null &&
         widget.onJoinOngoingCall != null) {
       banners.add(_NoticeBanner(
         marker: '📞',
+        markerIcon: Icon(
+          Icons.call_rounded,
+          size: 15,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
         text: widget.ongoingGroupCallLabel!,
         highlight: true,
         onTap: widget.onJoinOngoingCall,
@@ -996,6 +1004,9 @@ class _InputBarState extends State<_InputBar> {
 class _NoticeBanner extends StatelessWidget {
   final String marker;
   final String text;
+  final Widget? markerIcon; // gc11：矢量图标替代 emoji marker（emoji
+  // 颜色随平台字体各异——Windows Segoe UI Emoji 电话为红色与另两端
+  // 不一致；Material 图标跨端渲染一致）
   final VoidCallback? onTap; // 点击条目（置顶定位到原消息）
   final Widget? trailing; // 条目尾部控件（快捷取消置顶按钮）
   final bool highlight; // gc9：群通话加入条目高亮（品牌色更醒目）
@@ -1003,6 +1014,7 @@ class _NoticeBanner extends StatelessWidget {
   const _NoticeBanner({
     required this.marker,
     required this.text,
+    this.markerIcon,
     this.onTap,
     this.trailing,
     this.highlight = false,
@@ -1027,11 +1039,15 @@ class _NoticeBanner extends StatelessWidget {
       ),
       child: Row(
         children: [
+          if (markerIcon != null) ...[
+            markerIcon!,
+            const SizedBox(width: 6),
+          ],
           Expanded(
             child: InkWell(
               onTap: onTap,
               child: Text(
-                '$marker $text',
+                markerIcon == null ? '$marker $text' : text,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
