@@ -154,6 +154,23 @@ void main() {
         expect(svc.endReason, '对方无应答');
       });
     });
+
+    test('gc9：被叫来电振铃超时自动拒绝（发 call_reject + 超时未接听）', () {
+      fakeAsync((async) {
+        final h = _Harness();
+        final svc = h.build();
+        svc.handleSignal(
+            'call_invite',
+            {'from': 'bob', 'call_id': 'call-9', 'call_type': 'video'},
+            Uint8List(0));
+        expect(svc.phase, CallPhase.ringing);
+        async.elapse(
+            CallService.incomingRingTimeout + const Duration(seconds: 1));
+        expect(svc.phase, CallPhase.ended);
+        expect(svc.endReason, '超时未接听');
+        expect(h.sent('call_reject'), isTrue, reason: '自动拒绝发拒绝信令让主叫知晓');
+      });
+    });
   });
 
   group('来电全流程', () {

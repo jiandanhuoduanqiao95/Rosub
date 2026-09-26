@@ -136,12 +136,14 @@ class _FakeEngine implements CallEngine {
 
 AppState get state => AppState.instance;
 
+_FakeSignaling? _pumpedSignaling;
+
 Future<CallService> _pumpGroupChat(
     WidgetTester tester, MockSocketService socket) async {
+  final signaling = _FakeSignaling();
+  _pumpedSignaling = signaling;
   final svc = CallService(
-      signaling: _FakeSignaling(),
-      engine: _FakeEngine(),
-      selfUsername: () => 'alice');
+      signaling: signaling, engine: _FakeEngine(), selfUsername: () => 'alice');
   when(() => socket.callService).thenReturn(svc);
   when(() => socket.fetchGroupAnnouncements(any())).thenAnswer((_) async {});
   state
@@ -171,6 +173,51 @@ void main() {
     expect(find.text('发起语音群通话'), findsOneWidget);
     expect(find.text('发起视频群通话'), findsOneWidget);
     expect(find.text('语音通话'), findsNothing, reason: '群会话不再复用一对一弹层');
+  });
+
+  testWidgets('gc9：群会话页"通话进行中"加入横幅——注册表驱动显示，点击加入', (tester) async {
+    final socket = MockSocketService();
+    final svc = await _pumpGroupChat(tester, socket);
+    svc.knownGroupCalls[7] = const GroupCallRoomInfo(
+      groupId: 7,
+      groupName: '研发群',
+      callId: 'room-x',
+      callType: CallType.video,
+      participants: ['bob', 'carol'],
+    );
+    // 直读 callService 的横幅在下次 build 生效——AppState 触发重建
+    // （Mock 上 onCallPhaseChanged 字段存不住，ChatScreen 回调未挂）
+    state.setConnectionStatus(ConnectionStatus.connected);
+    await tester.pump();
+    // 横幅文本带 📞 marker 前缀（$marker $text 拼接），用 textContaining
+    expect(find.textContaining('群通话进行中（2人）'), findsOneWidget);
+
+    await tester.tap(find.textContaining('群通话进行中（2人）'));
+    await tester.pump();
+    expect(_pumpedSignaling!.sends, contains('group_call_join'),
+        reason: '点击横幅即请求加入');
+  });
+
+  testWidgets('gc9：自己在该群通话中时不显示加入横幅', (tester) async {
+    final socket = MockSocketService();
+    final svc = await _pumpGroupChat(tester, socket);
+    svc.knownGroupCalls[7] = const GroupCallRoomInfo(
+      groupId: 7,
+      groupName: '研发群',
+      callId: 'room-x',
+      callType: CallType.audio,
+      participants: ['alice', 'bob'],
+    );
+    await svc.startGroupCall(7, '研发群', CallType.audio);
+    svc.notifyListeners();
+    await tester.pump();
+    expect(find.textContaining('群通话进行中'), findsNothing,
+        reason: '自己已在通话中（主叫）不显示加入横幅');
+    // 收尾：取消 → ended（CallScreen 经 _onPhaseChanged 自动 pop 卸载，
+    // ticker 取消）→ 推进 2s endedTimer 防 pending
+    svc.cancelOutgoing();
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pumpAndSettle();
   });
 
   testWidgets('群会话有进行中房间：弹层提供加入入口，点击后 joinGroupRoom', (tester) async {

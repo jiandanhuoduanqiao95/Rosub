@@ -715,5 +715,75 @@ void main() {
       svc.rejectIncoming();
       expect(h.sound.calls, ['ringtone', 'stop'], reason: '未接通拒接只停铃');
     });
+
+    test('gc9：挂断退出后注册表保持，可经 joinGroupRoom 重新进入', () async {
+      final h = _Harness();
+      final svc = h.build();
+      await svc.startGroupCall(7, '研发群', CallType.video);
+      final roomId = h.last('group_call_invite').callId;
+      // bob 加入 → 主叫 active（bob 发 offer，alice answer）
+      svc.handleSignal(
+          'group_call_joined',
+          _header('bob', roomId,
+              groupId: 7, participants: 'alice,bob', callType: 'video'),
+          Uint8List(0));
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.phase, CallPhase.connecting);
+      svc.handleSignal('call_offer', _header('bob', roomId),
+          Uint8List.fromList(utf8.encode('{"sdp":"o-bob","type":"offer"}')));
+      await Future<void>.delayed(Duration.zero);
+      h.listener!.onPeerConnectionState('bob', 'connected');
+      expect(svc.phase, CallPhase.active);
+
+      // alice 挂断退出：注册表保持（房间存续，重进入口）
+      svc.hangup();
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.phase, CallPhase.ended);
+      expect(svc.knownGroupCalls[7], isNotNull, reason: '个人挂断房间存续，注册表保持（重进入口）');
+
+      // 收到自己的 left 回显（ended=0，participants 不含自己）——
+      // 注册表保持且参与者刷新（真实环境的挂断退出链路）
+      svc.handleSignal(
+          'group_call_left',
+          _header('alice', roomId,
+              groupId: 7, participants: 'bob', ended: '0', reason: 'hangup'),
+          Uint8List(0));
+      expect(svc.knownGroupCalls[7], isNotNull);
+      expect(svc.knownGroupCalls[7]!.participants, ['bob']);
+
+      // 重新进入：joinGroupRoom → join → joined[self] → 逐对 offer
+      final ok = await svc.joinGroupRoom(7);
+      expect(ok, isTrue);
+      expect(h.sent('group_call_join'), isTrue);
+      svc.handleSignal(
+          'group_call_joined',
+          _header('alice', roomId,
+              groupId: 7, participants: 'alice,bob', callType: 'video'),
+          Uint8List(0));
+      await Future<void>.delayed(Duration.zero);
+      verify(() => h.engine.createPeerSession('bob')).called(2);
+      expect(h.all('call_offer').map((o) => o.to), contains('bob'));
+      // 注册表参与者随 joined 刷新
+      expect(
+          svc.knownGroupCalls[7]!.participants, containsAll(['alice', 'bob']));
+    });
+
+    test('gc9：来电振铃超时自动拒绝（发 leave + 超时未接听）', () {
+      fakeAsync((async) {
+        final h = _Harness();
+        final svc = h.build();
+        svc.handleSignal(
+            'group_call_invite',
+            _header('bob', 'room-1',
+                groupId: 7, callType: 'video', groupName: '研发群'),
+            Uint8List(0));
+        expect(svc.phase, CallPhase.ringing);
+        async.elapse(
+            CallService.incomingRingTimeout + const Duration(seconds: 1));
+        expect(svc.phase, CallPhase.ended);
+        expect(svc.endReason, '超时未接听');
+        expect(h.sent('group_call_leave'), isTrue, reason: '自动拒绝发离开信令');
+      });
+    });
   });
 }

@@ -73,6 +73,11 @@ class ChatView extends StatefulWidget {
 
   // ---- 阶段 O —— 群组与消息增强 ----
 
+  // gc9：群通话进行中横幅（非空时消息区上方显示"点击加入"条目——
+  // knownGroupCalls 注册表驱动，挂断退出/中途加入的显眼入口）
+  final String? ongoingGroupCallLabel;
+  final VoidCallback? onJoinOngoingCall;
+
   // 阶段 O1：群公告横幅（非空时显示；数据源 Group.announcement——最新一条，
   // 兼容单条传参；多条公告经 announcements 参数传入）
   final String? announcement;
@@ -143,6 +148,8 @@ class ChatView extends StatefulWidget {
     required this.messages,
     required this.username,
     required this.inputCtrl,
+    this.ongoingGroupCallLabel,
+    this.onJoinOngoingCall,
     this.canSend = true,
     required this.onSend,
     required this.onSendFile,
@@ -747,6 +754,16 @@ class _ChatViewState extends State<ChatView> {
   /// 未加载时翻页加载 + 高亮 2s），条目尾部快捷取消按钮直接解除该条置顶。
   List<Widget> _buildNoticeBanners(BuildContext context) {
     final banners = <Widget>[];
+    // gc9：群通话进行中加入条目（置顶/公告之前，最显眼位置）
+    if (widget.ongoingGroupCallLabel != null &&
+        widget.onJoinOngoingCall != null) {
+      banners.add(_NoticeBanner(
+        marker: '📞',
+        text: widget.ongoingGroupCallLabel!,
+        highlight: true,
+        onTap: widget.onJoinOngoingCall,
+      ));
+    }
     // R-O12：announcementItems 提供时横幅带 ✕ 删除按钮（仅群主）
     final hasDelete = widget.onDeleteAnnouncement != null;
     if (widget.announcementItems != null) {
@@ -981,12 +998,14 @@ class _NoticeBanner extends StatelessWidget {
   final String text;
   final VoidCallback? onTap; // 点击条目（置顶定位到原消息）
   final Widget? trailing; // 条目尾部控件（快捷取消置顶按钮）
+  final bool highlight; // gc9：群通话加入条目高亮（品牌色更醒目）
 
   const _NoticeBanner({
     required this.marker,
     required this.text,
     this.onTap,
     this.trailing,
+    this.highlight = false,
   });
 
   @override
@@ -995,10 +1014,12 @@ class _NoticeBanner extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       decoration: BoxDecoration(
-        color: Theme.of(context)
-            .colorScheme
-            .primaryContainer
-            .withValues(alpha: 0.45),
+        color: highlight
+            ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.18)
+            : Theme.of(context)
+                .colorScheme
+                .primaryContainer
+                .withValues(alpha: 0.45),
         border: Border(
           bottom:
               BorderSide(color: Theme.of(context).colorScheme.outlineVariant),

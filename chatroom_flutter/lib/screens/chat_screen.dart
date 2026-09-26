@@ -1289,6 +1289,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _callSnapshotActiveSince = svc.activeSince;
     _callSnapshotEndReason = svc.endReason;
     _callSnapshotMinimized = svc.minimized;
+    if (mounted) setState(() {});
     if (!svc.minimized && svc.phase != CallPhase.idle && !_callRouteOpen) {
       _callRouteOpen = true;
       Navigator.of(context, rootNavigator: true)
@@ -1743,10 +1744,34 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // Q1 真机反馈 #3：compact 聊天态隐藏 ChatView 自带标题栏
     // （标题/搜索/导出移至 AppBar），搜索输入行由 AppBar 入口受控
     final compactChat = isCompactLayout(context) && _inCompactChat;
+    // gc9：群会话"通话进行中"横幅（注册表快照驱动；自己在该通话中不显示）
+    String? ongoingCallLabel;
+    VoidCallback? onJoinOngoingCall;
+    final current = _state.currentChat;
+    if (current != null && current.startsWith('group_')) {
+      // try 包裹：部分 Mock 测试未 stub callService getter（返回 null
+      // 强转抛 TypeError）——横幅是纯增益组件，取不到即不显示
+      try {
+        final callSvc = widget.socketService.callService;
+        final gid = int.tryParse(current.substring('group_'.length));
+        final info = gid == null ? null : callSvc.knownGroupCalls[gid];
+        final inThisCall = callSvc.isGroupCall &&
+            callSvc.groupId == gid &&
+            (callSvc.phase == CallPhase.connecting ||
+                callSvc.phase == CallPhase.active ||
+                callSvc.phase == CallPhase.calling);
+        if (info != null && !inThisCall && gid != null) {
+          ongoingCallLabel = '群通话进行中（${info.participants.length}人）· 点击加入';
+          onJoinOngoingCall = () => _joinGroupCall(gid);
+        }
+      } catch (_) {}
+    }
     return _state.currentChat != null
         ? ChatView(
             chatKey: _state.currentChat!,
             chatTitle: _state.displayNameForChat(_state.currentChat!),
+            ongoingGroupCallLabel: ongoingCallLabel,
+            onJoinOngoingCall: onJoinOngoingCall,
             messages: _state.isSearchMode(_state.currentChat!)
                 ? _state.searchResults(_state.currentChat!)
                 : _state.getMessages(_state.currentChat!),

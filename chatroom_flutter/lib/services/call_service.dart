@@ -141,6 +141,10 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   static const ringTimeout = Duration(seconds: 45);
   static const endedDisplayDuration = Duration(seconds: 2);
 
+  /// gc9：来电振铃超时自动拒绝（早于服务端 60s 过期，被叫主动发拒绝
+  /// 信令让主叫即刻知晓）
+  static const incomingRingTimeout = Duration(seconds: 30);
+
   final CallSignaling _signaling;
   final CallEngine _engine;
   final String? Function() _selfUsername;
@@ -213,7 +217,24 @@ class CallService extends ChangeNotifier implements CallEngineListener {
 
   Timer? _ringTimer;
   Timer? _endedTimer;
+  Timer? _incomingRingTimer;
   bool _reachedConnecting = false;
+
+  /// gc9：来电振铃超时自动拒绝（被叫侧本地定时器；发拒绝信令让主叫
+  /// 即刻知晓，早于服务端 60s 过期）
+  void _startIncomingRingTimer() {
+    _incomingRingTimer?.cancel();
+    _incomingRingTimer = Timer(incomingRingTimeout, () {
+      if (_phase != CallPhase.ringing) return;
+      _trace('incoming ring timeout, auto reject');
+      if (_isGroup) {
+        _safeSendGroup('group_call_leave');
+      } else if (_peer != null && _callId != null) {
+        _safeSend('call_reject', _peer!, _callId!);
+      }
+      _teardown('超时未接听');
+    });
+  }
 
   /// gc8：来电铃声开始（ Android 原生 looping / 桌面 PlatformCallSound
   /// 内部 Timer 重播）
@@ -401,6 +422,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     final id = _callId!;
     final peer = _peer!;
     _ringTimer?.cancel();
+    _incomingRingTimer?.cancel();
     _reachedConnecting = true;
     _stopRingtone();
     _setPhase(CallPhase.connecting);
@@ -437,6 +459,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     final id = _callId!;
     final gid = _groupId!;
     _ringTimer?.cancel();
+    _incomingRingTimer?.cancel();
     _reachedConnecting = true;
     _stopRingtone();
     _setPhase(CallPhase.connecting);
@@ -464,10 +487,15 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     }
   }
 
-  /// 中途加入进行中的群通话（knownGroupCalls 注册表驱动；占线/无房间拒绝）
+  /// 中途加入进行中的群通话（knownGroupCalls 注册表驱动；占线/无房间
+  /// 拒绝）。gc9：ended 展示态允许立即重进（用户挂断退出后马上点加入
+  /// 不必等 2s 收尾；_endedTimer 由 phase guard 保证不误清新通话）
   Future<bool> joinGroupRoom(int groupId) async {
     final info = knownGroupCalls[groupId];
-    if (info == null || isBusy) return false;
+    final busy = isBusy && _phase != CallPhase.ended;
+    if (info == null || busy) return false;
+    _endedTimer?.cancel();
+    _endedTimer = null;
     _isGroup = true;
     _groupId = groupId;
     _groupName = info.groupName;
@@ -564,6 +592,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
         _trace('incoming call_invite from=$from id=$id type=$_type');
         _setPhase(CallPhase.ringing);
         _startRingtone();
+        _startIncomingRingTimer();
         break;
       case 'call_accept':
         if (_isGroup) break;
@@ -798,6 +827,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     _trace('group invite from=$from room=$id group=$gid type=$_type');
     _setPhase(CallPhase.ringing);
     _startRingtone();
+    _startIncomingRingTimer();
   }
 
   void _handleGroupJoined(Map<String, dynamic> header) {
@@ -1163,6 +1193,8 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     _trace('teardown: $reason (phase=$_phase)');
     _ringTimer?.cancel();
     _ringTimer = null;
+    _incomingRingTimer?.cancel();
+    _incomingRingTimer = null;
     _stopRingtone();
     // 曾接通的通话结束播挂断音（ringing 未接通阶段只停铃）
     if (_reachedConnecting) unawaited(_callSound.playHangup());
