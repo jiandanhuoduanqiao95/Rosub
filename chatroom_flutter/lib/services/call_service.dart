@@ -226,7 +226,6 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     _incomingRingTimer?.cancel();
     _incomingRingTimer = Timer(incomingRingTimeout, () {
       if (_phase != CallPhase.ringing) return;
-      _trace('incoming ring timeout, auto reject');
       if (_isGroup) {
         _safeSendGroup('group_call_leave');
       } else if (_peer != null && _callId != null) {
@@ -253,13 +252,6 @@ class CallService extends ChangeNotifier implements CallEngineListener {
 
   String _genCallId() =>
       '${DateTime.now().millisecondsSinceEpoch}_${Random().nextInt(999999)}';
-
-  /// R1 真机排障（r1s5）：接通路径步骤追踪——Android 闪退发生在
-  /// getUserMedia/SDP 应用时刻且无 Java 异常时的唯一观测手段，
-  /// Linux 控制台与 adb logcat（-s flutter）均可见。问题定位后移除。
-  void _trace(String msg) {
-    debugPrint('[call-trace] $msg');
-  }
 
   void _setPhase(CallPhase phase) {
     _phase = phase;
@@ -358,7 +350,6 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     _remoteDescSet = false;
     _pendingCandidates.clear();
     _resetToggles(type);
-    _trace('startCall type=$type peer=$peer id=$_callId');
     _setPhase(CallPhase.calling);
     try {
       await _signaling.sendCall('call_invite', peer, _callId!,
@@ -394,7 +385,6 @@ class CallService extends ChangeNotifier implements CallEngineListener {
       if (_self != null) _self!,
     });
     _resetToggles(type);
-    _trace('startGroupCall group=$groupId type=$type room=$_callId');
     _setPhase(CallPhase.calling);
     try {
       await _signaling.sendGroupCall('group_call_invite', groupId, _callId!,
@@ -426,26 +416,20 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     _reachedConnecting = true;
     _stopRingtone();
     _setPhase(CallPhase.connecting);
-    _trace('acceptIncoming id=$id');
     // 引擎就绪门：Android 运行时权限弹窗下 open 可能耗时数秒，
     // offer/ICE 先到时须等待（未就绪即处理会打到 null PeerConnection）
     _calleeMediaReady = () async {
       try {
-        _trace('callee engine.open(video=${_type == CallType.video}) start');
         await _engine.open(video: _type == CallType.video);
         await _engine.setSpeakerphoneOn(speakerOn);
-        _trace('callee engine.open done');
       } catch (e) {
-        _trace('callee engine.open FAILED: $e');
         await _safeSend('call_hangup', peer, id);
         _teardown('无法访问麦克风或摄像头');
       }
     }();
     try {
       await _signaling.sendCall('call_accept', peer, id);
-      _trace('call_accept sent');
     } catch (e) {
-      _trace('call_accept send FAILED: $e');
       _teardown('接听发送失败');
       return;
     }
@@ -463,25 +447,18 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     _reachedConnecting = true;
     _stopRingtone();
     _setPhase(CallPhase.connecting);
-    _trace('group join room=$id');
     _calleeMediaReady = () async {
       try {
-        _trace(
-            'callee engine.ensureMedia(video=${_type == CallType.video}) start');
         await _engine.ensureMedia(video: _type == CallType.video);
         await _engine.setSpeakerphoneOn(speakerOn);
-        _trace('callee engine.ensureMedia done');
       } catch (e) {
-        _trace('callee engine.ensureMedia FAILED: $e');
         await _safeSendGroup('group_call_leave');
         _teardown('无法访问麦克风或摄像头');
       }
     }();
     try {
       await _signaling.sendGroupCall('group_call_join', gid, id);
-      _trace('group_call_join sent');
     } catch (e) {
-      _trace('group_call_join send FAILED: $e');
       _teardown('接听发送失败');
       return;
     }
@@ -506,7 +483,6 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     activeSince = null;
     _resetGroupSessionState({...info.participants, if (_self != null) _self!});
     _resetToggles(info.callType);
-    _trace('joinGroupRoom group=$groupId room=${info.callId}');
     await _beginGroupJoin();
     return true;
   }
@@ -589,7 +565,6 @@ class CallService extends ChangeNotifier implements CallEngineListener {
         _remoteDescSet = false;
         _pendingCandidates.clear();
         _resetToggles(_type!);
-        _trace('incoming call_invite from=$from id=$id type=$_type');
         _setPhase(CallPhase.ringing);
         _startRingtone();
         _startIncomingRingTimer();
@@ -695,19 +670,13 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     final peer = _peer!;
     _reachedConnecting = true;
     _setPhase(CallPhase.connecting);
-    _trace('caller media start (accepted by peer)');
     try {
-      _trace('caller engine.open(video=${_type == CallType.video}) start');
       await _engine.open(video: _type == CallType.video);
       await _engine.setSpeakerphoneOn(speakerOn);
-      _trace('caller engine.open done');
       final offer = await _engine.createOffer();
-      _trace('caller offer created');
       await _signaling.sendCall('call_offer', peer, id,
           body: jsonEncode(offer));
-      _trace('caller offer sent');
     } catch (e) {
-      _trace('caller media FAILED: $e');
       await _safeSend('call_hangup', peer, id);
       _teardown('无法建立通话');
     }
@@ -717,19 +686,15 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     final id = _callId!;
     final peer = _peer!;
     try {
-      _trace('callee offer received, waiting media');
       await (_calleeMediaReady ?? Future<void>.value());
       if (_phase != CallPhase.connecting) return;
       final offer = jsonDecode(utf8.decode(body)) as Map<String, dynamic>;
       await _engine.setRemoteOffer(offer);
-      _trace('callee setRemoteOffer done');
       final answer = await _engine.createAnswer();
       await _signaling.sendCall('call_answer', peer, id,
           body: jsonEncode(answer));
-      _trace('callee answer sent');
       await _flushCandidates();
     } catch (e) {
-      _trace('callee handleOffer FAILED: $e');
       await _safeSend('call_hangup', peer, id);
       _teardown('无法建立通话');
     }
@@ -739,12 +704,10 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     try {
       final answer = jsonDecode(utf8.decode(body)) as Map<String, dynamic>;
       await _engine.setRemoteAnswer(answer);
-      _trace('caller setRemoteAnswer done');
       await _flushCandidates();
       activeSince = DateTime.now();
       _setPhase(CallPhase.active);
     } catch (e) {
-      _trace('caller handleAnswer FAILED: $e');
       _teardown('无法建立通话');
     }
   }
@@ -824,7 +787,6 @@ class CallService extends ChangeNotifier implements CallEngineListener {
         participants: [from],
         ended: false,
         callType: _type);
-    _trace('group invite from=$from room=$id group=$gid type=$_type');
     _setPhase(CallPhase.ringing);
     _startRingtone();
     _startIncomingRingTimer();
@@ -883,13 +845,9 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   Future<void> _prepareGroupMedia() async {
     _reachedConnecting = true;
     try {
-      _trace(
-          'caller engine.ensureMedia(video=${_type == CallType.video}) start');
       await _engine.ensureMedia(video: _type == CallType.video);
       await _engine.setSpeakerphoneOn(speakerOn);
-      _trace('caller engine.ensureMedia done');
     } catch (e) {
-      _trace('caller engine.ensureMedia FAILED: $e');
       await _safeSendGroup('group_call_leave');
       _teardown('无法访问麦克风或摄像头');
     }
@@ -897,15 +855,12 @@ class CallService extends ChangeNotifier implements CallEngineListener {
 
   Future<void> _startGroupOffers() async {
     try {
-      _trace(
-          'group joined(self), creating offers to ${remotePeers.length} peers');
       await (_calleeMediaReady ?? Future<void>.value());
       if (_phase != CallPhase.connecting || !_isGroup) return;
       // R2 gc2 真机排障加固：就绪门通过后终局校验本地轨道（Windows
       // Release 实测发出过无 m-line 的 142 字节空 offer 且零 ICE——
       // 无论媒体门被何种路径绕过，都不再发出空壳协商）
       if (!_engine.hasLocalMedia) {
-        _trace('group offers aborted: no local media tracks');
         await _safeSendGroup('group_call_leave');
         _teardown('无法访问麦克风或摄像头');
         return;
@@ -915,7 +870,6 @@ class CallService extends ChangeNotifier implements CallEngineListener {
       }
       notifyListeners();
     } catch (e) {
-      _trace('group offers FAILED: $e');
       await _safeSendGroup('group_call_leave');
       _teardown('无法建立通话');
     }
@@ -933,7 +887,6 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     final offer = await session.createOffer();
     await _signaling.sendCall('call_offer', peerId, _callId!,
         body: jsonEncode(offer));
-    _trace('group offer -> $peerId');
   }
 
   Future<void> _handleGroupOffer(
@@ -947,7 +900,6 @@ class CallService extends ChangeNotifier implements CallEngineListener {
       return;
     }
     try {
-      _trace('group offer from=$from, waiting media');
       await (_calleeMediaReady ?? Future<void>.value());
       if (_phase != CallPhase.connecting && _phase != CallPhase.active) return;
       final offer = jsonDecode(utf8.decode(body)) as Map<String, dynamic>;
@@ -966,11 +918,9 @@ class CallService extends ChangeNotifier implements CallEngineListener {
           body: jsonEncode(answer));
       state.remoteDescSet = true;
       await _flushPeerCandidates(state);
-      _trace('group answer -> $from');
       notifyListeners();
     } catch (e) {
       // 单条 mesh 边失败不拖垮整场群通话（其余边照常协商）
-      _trace('group handleOffer from=$from FAILED: $e');
     }
   }
 
@@ -986,11 +936,8 @@ class CallService extends ChangeNotifier implements CallEngineListener {
       await state!.session!.setRemoteAnswer(answer);
       state.remoteDescSet = true;
       await _flushPeerCandidates(state);
-      _trace('group answer from=$from');
       notifyListeners();
-    } catch (e) {
-      _trace('group handleAnswer from=$from FAILED: $e');
-    }
+    } catch (_) {}
   }
 
   Future<void> _handleGroupCandidate(
@@ -1102,7 +1049,6 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   @override
   void onConnectionState(String state) {
     if (_isGroup) return;
-    _trace('connectionState=$state phase=$_phase');
     // ICE 连通：被叫（无 answer 回执驱动）据此从接通中转通话中
     if (state == 'connected' && _phase == CallPhase.connecting) {
       activeSince ??= DateTime.now();
@@ -1137,7 +1083,6 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   @override
   void onPeerConnectionState(String peerId, String state) {
     if (!_isGroup) return;
-    _trace('peer=$peerId connectionState=$state phase=$_phase');
     if (state == 'connected') {
       if (_phase == CallPhase.connecting) {
         activeSince ??= DateTime.now();
@@ -1190,7 +1135,6 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   }
 
   void _teardown(String reason) {
-    _trace('teardown: $reason (phase=$_phase)');
     _ringTimer?.cancel();
     _ringTimer = null;
     _incomingRingTimer?.cancel();

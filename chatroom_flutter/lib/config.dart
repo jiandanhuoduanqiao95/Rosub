@@ -55,11 +55,10 @@ class AppConfig {
   /// 且 ≤ 此值的文件请求自动接受并内联展示（参考微信）。
   static const int autoAcceptImageMaxSize = 5 * 1024 * 1024;
 
-  /// 构建标识（R-P27，2026-09-05 用户复测"表情黑白"轮换出现）：随修订
-  /// 递增，显示在登录页页脚并打印到启动日志——多客户端排查"谁在跑
-  /// 旧构建"（旧构建同时呈现黑白表情 + media_kit non-platform thread
-  /// ERROR）时一眼可辨。每次修订轮次更新此值。
-  static const String buildStamp = 'gc17';
+  /// 构建标识（R-P27 引入）：显示在登录页页脚并打印到启动日志——
+  /// 多客户端排查"谁在跑旧构建"时一眼可辨。正式发版使用语义版本号
+  /// （1.0.0 → 1.0.1 → …）；修订期轮次亦可沿用 gc 系列编号。
+  static const String buildStamp = '1.0.0';
 
   /// 彩色 emoji 字体栈（R-P26 硬化）：首选内置 COLRv1 字体，第二兜底
   /// 系统 Noto Color Emoji（CBDT 彩色位图，Ubuntu 默认安装、覆盖全部

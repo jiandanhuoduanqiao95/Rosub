@@ -6,12 +6,9 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:logger/logger.dart';
 import 'package:media_kit/media_kit.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart'
-    show NativeLogsListener, WebRTC;
+import 'package:flutter_webrtc/flutter_webrtc.dart' show WebRTC;
 
-import 'dev/webrtc_spike.dart';
 import 'screens/login_screen.dart';
 import 'services/app_paths.dart';
 import 'services/focus_tracker.dart';
@@ -29,24 +26,6 @@ import 'config.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // 阶段 R1 Spike：环境变量门控的平台可用性验证（不进正常应用流程）
-  if (const bool.fromEnvironment('dart.vm.product') == false &&
-      Platform.environment['CHATROOM_WEBRTC_SPIKE'] == '1') {
-    runApp(const WebrtcSpikeApp());
-    return;
-  }
-  if (const bool.fromEnvironment('dart.vm.product') == false &&
-      Platform.environment['CHATROOM_WEBRTC_SPIKE'] == 'localvideo') {
-    runApp(const WebrtcLocalVideoApp());
-    return;
-  }
-  // Q2-J 缺陷 #2（Windows 远端视频黑屏）诊断：无 UI 受话端（q2call 模式，
-  // 见 webrtc_spike.dart 注释）
-  if (const bool.fromEnvironment('dart.vm.product') == false &&
-      Platform.environment['CHATROOM_WEBRTC_SPIKE'] == 'q2call') {
-    runApp(const Q2CallDiagApp());
-    return;
-  }
   // R-P27（用户复测"表情黑白"轮换出现）：构建标识打印到启动日志——
   // 多客户端排查"谁在跑旧构建"时与登录页页脚互为印证；旧构建同时呈现
   // 黑白表情 + media_kit non-platform thread ERROR
@@ -67,20 +46,13 @@ void main() async {
   // R1 真机六轮（r1s8→r1s9 修正生效顺序）：vivo OriginOS 上默认
   // VOICE_COMMUNICATION 音频源 + 硬件 AEC/NS 采到纯底噪（REC level 0——
   // 电脑端听不到手机的根因）。bypassVoiceProcessing 改用 MIC 源并关闭
-  // 硬件语音处理（软件 APM 兜底）。r1s8 未生效原因：必须先于任何
-  // WebRTC.invokeMethod（setLogger 会先触发无参 initialize 并置位
-  // initialized 标志，后续带参 initialize 被跳过）。
+  // 硬件语音处理（软件 APM 兜底）。必须先于任何 WebRTC.invokeMethod
+  // 调用（否则无参 initialize 先行并置位 initialized 标志，带参初始化
+  // 被跳过——r1s8 教训）。
   if (Platform.isAndroid) {
     try {
       await WebRTC.initialize(options: {'bypassVoiceProcessing': true});
     } catch (_) {}
-  }
-  // R1 真机排障（r1s6，定位后移除）：转发 libwebrtc 原生日志到控制台/
-  // logcat——默认 LS_NONE 会吞掉 native 层 FATAL CHECK 文本（Android
-  // network_thread SIGABRT 的唯一现场证据）；info 级覆盖全部 fatal/error
-  if (Platform.isAndroid || Platform.isLinux) {
-    NativeLogsListener.instance
-        .setLogger(Logger(printer: SimplePrinter(printTime: false)), 'info');
   }
   // R-P11（贴纸添加无反应修复）：生产入口注入贴纸落盘目录
   // （未 init 时 addSticker/stickerBytes 静默返回 null——根因）。

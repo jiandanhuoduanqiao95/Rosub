@@ -113,13 +113,16 @@ void main() {
     });
   });
 
-  group('Q2-5 —— 构建标识递增（R-P27 多端排障口诀）', () {
-    test("buildStamp = 'q2rN' / 'gcN'（轮次标识，随轮次递增）", () {
+  group('Q2-5 —— 构建标识（R-P27 多端排障口诀）', () {
+    test('buildStamp 为语义版本号或 gc 轮次号（随发版/轮次递增）', () {
       final src = srcOf('lib/config.dart');
-      expect(RegExp("buildStamp = '(q2r\\d+|gc\\d+)'").hasMatch(src), isTrue,
-          reason: '§36.1：每端构建后核对登录页"构建"标识与所测服务端代码轮次一致'
-              '（q2r1 起递增；阶段 R2 群通话起换 gc 系列，gc1 起递增，'
-              '勿回退旧轮次——多端排障先看构建标识）');
+      expect(
+          RegExp("buildStamp = '(\\d+\\.\\d+\\.\\d+|q2r\\d+|gc\\d+)'")
+              .hasMatch(src),
+          isTrue,
+          reason: '§36.1：每端构建后核对登录页"构建"标识与所测服务端版本一致'
+              '（正式发行起用语义版本号 1.0.0 起递增；历史修订期为 '
+              'q2rN/gcN 轮次号——多端排障先看构建标识）');
     });
   });
 }

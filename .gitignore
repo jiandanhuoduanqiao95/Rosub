@@ -54,3 +54,6 @@ project_files.txt
 third_party/flutter_webrtc/third_party/downloads/
 third_party/flutter_webrtc/third_party/libwebrtc/
 third_party/flutter_webrtc/.dart_tool/
+
+# 发行产物目录
+dist/

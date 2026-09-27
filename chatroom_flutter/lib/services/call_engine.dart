@@ -128,7 +128,6 @@ class WebRtcCallEngine implements CallEngine {
     await _acquireMedia(video: video);
     final pc = await createPeerConnection(_iceServers);
     _pc = pc;
-    debugPrint('[call-trace] engine.peerConnection created');
     // gc4：addTrack 必须 await——fire-and-forget 与 createOffer 竞态时
     // 视频轨道的原生注册未完成，offer 会缺失视频 m-line（群会话实测，
     // 1:1 同型隐患一并封死）
@@ -153,14 +152,11 @@ class WebRtcCallEngine implements CallEngine {
   /// 共用；不含任何 PeerConnection）
   Future<void> _acquireMedia({required bool video}) async {
     _hasVideo = video;
-    debugPrint('[call-trace] engine.getUserMedia(video=$video) start');
     _local = await navigator.mediaDevices.getUserMedia(
       {'audio': true, 'video': video},
     );
     final audioCount = _local!.getAudioTracks().length;
     final videoCount = _local!.getVideoTracks().length;
-    debugPrint('[call-trace] engine.getUserMedia done '
-        'audio=$audioCount video=$videoCount');
     // R2 gc2 真机排障加固：Windows Release 上曾出现 getUserMedia 不抛错
     // 但流内零轨道（142 字节空 offer 的根源）——静默空流会让整场通话
     // 无声无息协商出无媒体的空壳。此处显式判死并抛错，由上层转为
@@ -199,7 +195,6 @@ class WebRtcCallEngine implements CallEngine {
     final pc = await createPeerConnection(_iceServers);
     final session = _WebRtcPeerSession(peerId, pc, _listener, _local);
     _peers[peerId] = session;
-    debugPrint('[call-trace] engine.peerSession[$peerId] created');
     return session;
   }
 
@@ -319,7 +314,6 @@ class WebRtcCallEngine implements CallEngine {
       }
     }
     final out = <String>[];
-    var injected = false;
     for (var line in lines) {
       final t = line.trim();
       final attr = RegExp(r'^a=(rtpmap|fmtp|rtcp-fb):(\d+)').firstMatch(t);
@@ -329,11 +323,8 @@ class WebRtcCallEngine implements CallEngine {
         final pts = parts.sublist(3).where((p) => !drop.contains(p)).toList();
         if (pts.isEmpty) {
           if (vp8Pt.isEmpty) {
-            debugPrint('[call-trace] sdp WARN: video m-line would be empty '
-                'and no free PT for VP8 injection, raw=$t');
             continue;
           }
-          injected = true;
           final rebuilt = [
             ...parts.sublist(0, 3),
             vp8Pt,
@@ -358,10 +349,6 @@ class WebRtcCallEngine implements CallEngine {
         continue;
       }
       out.add(line);
-    }
-    if (injected) {
-      debugPrint('[call-trace] sdp: video m-line had only H264/H265, '
-          'injected VP8 pt=$vp8Pt rtx=$rtxPt');
     }
     return out.join('\n');
   }
@@ -392,7 +379,6 @@ class WebRtcCallEngine implements CallEngine {
     final clean = sanitizeDesktopSdp(desc.sdp ?? '');
     await _pc!.setLocalDescription(
         RTCSessionDescription(clean, desc.type ?? 'offer'));
-    debugPrint('[call-trace] offer codec=${primaryVideoCodec(clean)}');
     return {'sdp': clean, 'type': desc.type ?? 'offer'};
   }
 
@@ -410,7 +396,6 @@ class WebRtcCallEngine implements CallEngine {
     final clean = sanitizeDesktopSdp(desc.sdp ?? '');
     await _pc!.setLocalDescription(
         RTCSessionDescription(clean, desc.type ?? 'answer'));
-    debugPrint('[call-trace] answer codec=${primaryVideoCodec(clean)}');
     return {'sdp': clean, 'type': desc.type ?? 'answer'};
   }
 
@@ -479,7 +464,6 @@ class WebRtcCallEngine implements CallEngine {
       final devices = await navigator.mediaDevices.enumerateDevices();
       return devices.where((d) => d.kind == 'videoinput').length;
     } catch (e) {
-      debugPrint('[call-trace] enumerateDevices FAILED: $e');
       return 0;
     }
   }
@@ -492,9 +476,7 @@ class WebRtcCallEngine implements CallEngine {
         // 移动端：facing 前后置翻转（多后置镜头由系统聚合）。桌面原生子
         // 路径忽略 deviceId（仅 web 支持），多摄切换 UI 键在桌面不显示。
         await Helper.switchCamera(track);
-      } catch (e) {
-        debugPrint('[call-trace] switchCamera(${track.kind}) FAILED: $e');
-      }
+      } catch (_) {}
     }
   }
 
@@ -599,8 +581,6 @@ class _WebRtcPeerSession implements CallPeerSession {
     };
     pc.onTrack = (event) {
       // R2 gc3 排障仪器化：streams=0 说明远端流映射缺失（渲染挂不上）
-      debugPrint('[call-trace] peer[$peerId] onTrack kind=${event.track.kind} '
-          'streams=${event.streams.length} renderer=${_renderer != null}');
       if (event.streams.isEmpty) return;
       _remote = event.streams.first;
       _renderer?.srcObject = _remote;
@@ -624,16 +604,10 @@ class _WebRtcPeerSession implements CallPeerSession {
 
   Future<void> _addLocalTracks(MediaStream? local) async {
     final tracks = local?.getTracks() ?? const <MediaStreamTrack>[];
-    debugPrint('[call-trace] peer[$peerId] addTracks '
-        'audio=${tracks.where((t) => t.kind == 'audio').length} '
-        'video=${tracks.where((t) => t.kind == 'video').length}');
     for (final track in tracks) {
       try {
         await _pc.addTrack(track, local!);
-      } catch (e) {
-        debugPrint('[call-trace] peer[$peerId] addTrack(${track.kind}) '
-            'FAILED: $e');
-      }
+      } catch (_) {}
     }
   }
 
@@ -644,18 +618,9 @@ class _WebRtcPeerSession implements CallPeerSession {
   Future<Map<String, Object?>> createOffer() async {
     await _tracksReady;
     final desc = await _pc.createOffer(WebRtcCallEngine._sdpConstraints);
-    for (final line in (desc.sdp ?? '').split('\n')) {
-      final t = line.trim();
-      if (t.startsWith('m=')) {
-        debugPrint(
-            '[call-trace] peer[$peerId] raw ${t.split(' ').take(4).join(' ')}');
-      }
-    }
     final clean = WebRtcCallEngine.sanitizeDesktopSdp(desc.sdp ?? '');
     await _pc.setLocalDescription(
         RTCSessionDescription(clean, desc.type ?? 'offer'));
-    debugPrint('[call-trace] peer[$peerId] offer '
-        'codec=${WebRtcCallEngine.primaryVideoCodec(clean)}');
     return {'sdp': clean, 'type': desc.type ?? 'offer'};
   }
 
@@ -674,8 +639,6 @@ class _WebRtcPeerSession implements CallPeerSession {
     final clean = WebRtcCallEngine.sanitizeDesktopSdp(desc.sdp ?? '');
     await _pc.setLocalDescription(
         RTCSessionDescription(clean, desc.type ?? 'answer'));
-    debugPrint('[call-trace] peer[$peerId] answer '
-        'codec=${WebRtcCallEngine.primaryVideoCodec(clean)}');
     return {'sdp': clean, 'type': desc.type ?? 'answer'};
   }
 
@@ -701,8 +664,6 @@ class _WebRtcPeerSession implements CallPeerSession {
     _renderer = renderer;
     if (renderer != null && _remote != null) {
       renderer.srcObject = _remote;
-      debugPrint('[call-trace] peer[$peerId] attachRenderer '
-          'remoteStream=${_remote!.id}');
     }
   }
 

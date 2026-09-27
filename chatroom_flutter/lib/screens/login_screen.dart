@@ -727,7 +727,7 @@ class _LoginScreenState extends State<LoginScreen> {
         const SizedBox(height: 14),
         Center(
           child: Text(
-            '构建 ${AppConfig.buildStamp}',
+            'v${AppConfig.buildStamp}',
             style: TextStyle(
               fontSize: 10,
               color: Colors.white.withValues(alpha: 0.35),
@@ -1063,7 +1063,7 @@ class _LoginScreenState extends State<LoginScreen> {
           // 黑白表情 + media_kit non-platform thread ERROR）时一眼可辨
           const SizedBox(height: 4),
           Text(
-            '构建 ${AppConfig.buildStamp}',
+            'v${AppConfig.buildStamp}',
             style: TextStyle(
               fontSize: 10,
               color: Colors.white.withValues(alpha: 0.35),
