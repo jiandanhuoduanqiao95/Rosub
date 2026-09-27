@@ -1,6 +1,5 @@
 package com.example.chatroom_flutter
 
-import android.graphics.drawable.Icon
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -25,6 +24,12 @@ import androidx.core.app.NotificationCompat
  * 前台使用期间服务不运行（零通知）；退后台由 Dart 生命周期启动
  * （paused），回前台立即停止（resumed）——通知只在后台期间存在。
  * IMPORTANCE_MIN + 静默：无提示音/无横幅/无角标，收起在通知栏底部。
+ *
+ * 图标（gc17 用户决策）：只设 smallIcon 白色单色气泡、**不设
+ * largeIcon**——vivo OriginOS 通知卡片左侧恒渲染应用图标（品牌已
+ * 可见），设大图标只会引出模板右侧的应用徽标重复；若将来确需
+ * largeIcon，必须走 Icon.createWithResource（BitmapFactory.decode-
+ * Resource 对 anydpi-v26 自适应图标 XML 静默返回 null，见 gc16）。
  */
 class KeepAliveService : Service() {
 
@@ -53,7 +58,6 @@ class KeepAliveService : Service() {
         }
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification_white)
-            .setLargeIcon(Icon.createWithResource(this, R.mipmap.ic_launcher))
             .setContentTitle("Rosub 在线中")
             .setContentText("退到后台仍在保持消息连接，及时接收新消息")
             .setOngoing(true)
