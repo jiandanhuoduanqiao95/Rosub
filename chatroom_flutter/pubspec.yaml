@@ -1,7 +1,7 @@
 name: chatroom_flutter
 description: "聊天室 Flutter 桌面客户端 —— Windows / Linux / Android 三端统一"
 publish_to: 'none'
-version: 1.0.0
+version: 1.0.1
 
 environment:
   sdk: ^3.0.0

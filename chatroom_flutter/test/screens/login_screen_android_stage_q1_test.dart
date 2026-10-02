@@ -84,8 +84,8 @@ void main() {
       await pumpLogin(tester);
 
       expect(find.text('私有化部署的即时通讯'), findsNothing, reason: '品牌介绍删除');
-      expect(find.text('在这里，墙没有耳朵'), findsOneWidget,
-          reason: 'Q1 五轮问题5：欢迎标语（用户定稿文案）');
+      expect(find.text('在这里，墙没有耳朵'), findsNothing,
+          reason: 'v1.0.1 用户决策：欢迎标语删除');
       expect(find.textContaining('已记录的用户'), findsNothing,
           reason: 'Q1 三轮：磁贴上方说明小字删除');
       expect(find.byKey(const ValueKey('login_mode_segment')), findsOneWidget,

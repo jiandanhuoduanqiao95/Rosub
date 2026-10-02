@@ -58,7 +58,7 @@ class AppConfig {
   /// 构建标识（R-P27 引入）：显示在登录页页脚并打印到启动日志——
   /// 多客户端排查"谁在跑旧构建"时一眼可辨。正式发版使用语义版本号
   /// （1.0.0 → 1.0.1 → …）；修订期轮次亦可沿用 gc 系列编号。
-  static const String buildStamp = '1.0.0';
+  static const String buildStamp = '1.0.1';
 
   /// 彩色 emoji 字体栈（R-P26 硬化）：首选内置 COLRv1 字体，第二兜底
   /// 系统 Noto Color Emoji（CBDT 彩色位图，Ubuntu 默认安装、覆盖全部

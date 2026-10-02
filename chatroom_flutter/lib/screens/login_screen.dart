@@ -514,25 +514,14 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  /// Android 表单本体（全屏、无卡片容器）：欢迎标语 + 动画滑块式
-  /// 登录/注册切换 + 方形账号磁贴（点击回填/长按出叉删除/侧滑取消
-  /// 编辑态）+ 不记录勾选 + 自动填充 + 大按钮（Q1 四轮问题1 增标语）
+  /// Android 表单本体（全屏、无卡片容器）：动画滑块式登录/注册切换 +
+  /// 方形账号磁贴（点击回填/长按出叉删除/侧滑取消编辑态）+ 不记录勾选 +
+  /// 自动填充 + 大按钮
   Widget _buildAndroidForm(BuildContext context) {
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const SizedBox(height: 24),
-        // gc13（用户决策）：顶部徽标去除——应用图标已表达品牌，登录页
-        // 不再重复（旧渐变论坛徽标删除，标语保留）
-        const Text(
-          '在这里，墙没有耳朵',
-          style: TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.bold,
-            color: Color(0xFFF1F5F9),
-          ),
-        ),
         const SizedBox(height: 24),
         _LoginModeToggle(
           key: const ValueKey('login_mode_segment'),
