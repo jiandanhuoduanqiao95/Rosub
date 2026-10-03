@@ -16,6 +16,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../platform/android_system.dart';
 import '../platform/capabilities.dart';
 import '../services/call_service.dart';
+import '../widgets/app_feedback.dart';
 
 class CallScreen extends StatefulWidget {
   const CallScreen({super.key, required this.callService});
@@ -42,6 +43,9 @@ class _CallScreenState extends State<CallScreen> {
 
   /// 自动返回已执行标志（防 idle 通知重复 pop / 返回链递归）
   bool _autoPopped = false;
+
+  /// opt1 P7：音量提示每进程只出一次（static 跨通话实例存活）
+  static bool _volumeHintShown = false;
 
   CallService get _svc => widget.callService;
 
@@ -237,6 +241,16 @@ class _CallScreenState extends State<CallScreen> {
         phase == CallPhase.connecting || phase == CallPhase.active;
     final showControls = showStage;
     final topInset = MediaQuery.paddingOf(context).top;
+    // opt1 P7：无听筒设备（平板）接通即提示一次——通话音量（STREAM_
+    // VOICE_CALL 滑条）独立于媒体音量且从未被调过默认偏低，是"声音
+    // 小"听感首因；每进程只提示一次，给用户自助手段
+    if (showStage && _svc.noEarpieceDevice && !_volumeHintShown) {
+      _volumeHintShown = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        showNoticeBar(context, '如听感音量小，请按音量上键调高通话音量');
+      });
+    }
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {

@@ -109,11 +109,20 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       // 统一；Q1 八轮起提示音为打包内置资源，原生侧自取）
       await AndroidSystem.setupMessageChannel();
       if (!mounted) return;
+      // opt1 P6：通话通知渠道（FGS 之外删除重建，DEFAULT 才在 vivo
+      // 通知中心展示卡片）
+      await AndroidSystem.setupCallChannel();
+      if (!mounted) return;
       await AndroidSystem.requestNotificationPermission();
       if (!mounted) return;
       await maybeShowBatteryOptimizationGuide(context);
       if (!mounted) return;
       await _maybeShowLastCrashDialog();
+      // opt1 P7：无听筒设备预取（平板）——语音通话默认外放 + 接通提示
+      try {
+        widget.socketService.callService.noEarpieceDevice =
+            !await AndroidSystem.hasEarpiece();
+      } catch (_) {}
     });
     // 阶段 O1 修订（2026-08-31 多公告并存）：进入聊天页时对当前会话
     // （重连恢复场景）拉取群公告历史
@@ -132,6 +141,39 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       unawaited(AndroidSystem.startKeepAlive());
     } else if (state == AppLifecycleState.resumed) {
       unawaited(AndroidSystem.stopKeepAlive());
+      // opt1 P6：用户可能刚点了通知栏"通话中"通知——拉取回通话意图
+      unawaited(_handleOpenCallIntent());
+    }
+  }
+
+  /// opt1 P6：通话通知点击 → 回到通话界面。MainActivity 经通知
+  /// contentIntent（extra open_call=1）置位标志，此处拉取后 restore
+  /// （notifyListeners → onCallPhaseChanged → _onCallChanged push，
+  /// pop 职责契约不动）；通话已结束（冷启动残留标志）则忽略——
+  /// 不承诺恢复已死的媒体会话。
+  Future<void> _handleOpenCallIntent() async {
+    final pending = await AndroidSystem.consumeOpenCallIntent();
+    if (!pending || !mounted) return;
+    try {
+      final svc = widget.socketService.callService;
+      if (svc.isInLiveCall && svc.minimized) {
+        svc.restore();
+      }
+    } catch (_) {
+      // Mock 测试未 stub callService getter——纯增益通道静默降级
+    }
+  }
+
+  /// opt1 P5：通话进行中启动 microphone|camera 型前台服务（Android 14+
+  /// 熄屏/后台采集媒体的类型要求），结束停止。与消息 KeepAliveService
+  /// 并存（渠道不同、生命周期不同），消息保活门控不受影响。
+  void _syncCallForegroundService(CallService svc) {
+    if (effectiveTargetPlatform() != TargetPlatform.android) return;
+    if (svc.isInLiveCall) {
+      unawaited(
+          AndroidSystem.startCallForeground(video: svc.type == CallType.video));
+    } else {
+      unawaited(AndroidSystem.stopCallForeground());
     }
   }
 
@@ -144,6 +186,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // 启动后残留）；未启动时 stopService 为无害 no-op
     if (effectiveTargetPlatform() == TargetPlatform.android) {
       unawaited(AndroidSystem.stopKeepAlive());
+      // opt1 P5：通话 FGS 双保险撤除（正常路径经 _onCallChanged 已停）
+      unawaited(AndroidSystem.stopCallForeground());
     }
     PlatformCapabilities.fileDrop.setOnFilesDropped(null);
     _draftDebounce?.cancel();
@@ -1191,66 +1235,70 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 ? _buildCompactChatActions()
                 : _buildToolbarActions(),
           ),
+          // opt1 P3：targetSdk 35+ 强制 edge-to-edge，窗口延伸到系统
+          // 任务栏（平板 Dock/手机手势条）之下——主体内容统一消费底部
+          // inset；通话悬浮条留在 SafeArea 外（clamp 依赖全屏 padding 坐标）
           body: Stack(
             children: [
-              Column(
-                children: [
-                  // === 重连中横幅 ===
-                  if (_state.connectionStatus == ConnectionStatus.reconnecting)
-                    Material(
-                      color: Theme.of(context).colorScheme.errorContainer,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 10),
-                        child: Row(
-                          children: [
-                            const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Text(
-                                '连接断开，正在重连…'
-                                '（第 ${_state.reconnectAttempts} 次）',
-                                style: TextStyle(
-                                    color: Theme.of(context)
-                                        .colorScheme
-                                        .onErrorContainer),
+              SafeArea(
+                top: false,
+                child: Column(
+                  children: [
+                    // === 重连中横幅 ===
+                    if (_state.connectionStatus ==
+                        ConnectionStatus.reconnecting)
+                      Material(
+                        color: Theme.of(context).colorScheme.errorContainer,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 10),
+                          child: Row(
+                            children: [
+                              const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
                               ),
-                            ),
-                            TextButton(
-                              onPressed: _logout,
-                              child: const Text('退出'),
-                            ),
-                          ],
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  '连接断开，正在重连…'
+                                  '（第 ${_state.reconnectAttempts} 次）',
+                                  style: TextStyle(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .onErrorContainer),
+                                ),
+                              ),
+                              TextButton(
+                                onPressed: _logout,
+                                child: const Text('退出'),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
+                    // Q1 七轮（问题1）：全局传输指示条——任何界面（列表态/
+                    // 聊天态/宽屏）恒可见，点击跳转到传输所属会话
+                    if (_state.activeTransfers.isNotEmpty)
+                      _TransferBanner(
+                        transfers: _state.activeTransfers,
+                        filenameOf: (id) => _state.messageById(id)?.filename,
+                        onTapTransfer: _jumpToTransferChat,
+                      ),
+                    Expanded(
+                      child: compact ? _buildCompactBody() : _buildWideBody(),
                     ),
-                  // Q1 七轮（问题1）：全局传输指示条——任何界面（列表态/
-                  // 聊天态/宽屏）恒可见，点击跳转到传输所属会话
-                  if (_state.activeTransfers.isNotEmpty)
-                    _TransferBanner(
-                      transfers: _state.activeTransfers,
-                      filenameOf: (id) => _state.messageById(id)?.filename,
-                      onTapTransfer: _jumpToTransferChat,
-                    ),
-                  Expanded(
-                    child: compact ? _buildCompactBody() : _buildWideBody(),
-                  ),
-                ],
+                  ],
+                ),
               ),
               // R1 真机十轮：最小化通话的悬浮返回条（微信式，通话中恒显示，
               // 点击恢复通话界面；ended 期间显示结束原因，idle 自动消失）
+              // opt1：可拖动 + 两态（胶囊 ⇄ 圆点）+ 默认位底部避开头部功能行
               if (_callSnapshotMinimized &&
                   _callSnapshotPhase != CallPhase.idle)
-                Positioned(
-                  top: 8,
-                  left: 0,
-                  right: 0,
-                  child: Center(child: _buildCallMinimizePill()),
-                ),
+                _buildCallPillLayer(),
             ],
           ),
         );
@@ -1289,6 +1337,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _callSnapshotActiveSince = svc.activeSince;
     _callSnapshotEndReason = svc.endReason;
     _callSnapshotMinimized = svc.minimized;
+    _syncCallForegroundService(svc);
+    if (svc.phase == CallPhase.idle) {
+      _callPillPos = null;
+      _callPillCollapsed = false;
+    }
     if (mounted) setState(() {});
     if (!svc.minimized && svc.phase != CallPhase.idle && !_callRouteOpen) {
       _callRouteOpen = true;
@@ -1310,8 +1363,67 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   String? _callSnapshotEndReason;
   bool _callSnapshotMinimized = false;
 
+  // opt1：悬浮条拖动位置（null = 默认位左下角，避开列表头部功能行）
+  // 与两态开关（false = 胶囊展开态，true = 圆点收起态）
+  Offset? _callPillPos;
+  bool _callPillCollapsed = false;
+  final GlobalKey _callPillKey = GlobalKey();
+
+  /// opt1：最小化通话悬浮条容器层——可拖动、clamp 在屏幕内。
+  /// 定位坐标系 = Scaffold body（Stack）自身：外层 Positioned.fill +
+  /// LayoutBuilder 取 body 实际宽高（opt1 真机修订：此前用
+  /// MediaQuery.sizeOf 的屏幕坐标套进 body 相对的 Positioned，整体被
+  /// AppBar 高度下推，默认位落进系统手势导航区，拖动误触"回桌面"）
+  Widget _buildCallPillLayer() {
+    return Positioned.fill(
+      child: LayoutBuilder(builder: (context, constraints) {
+        final w = constraints.maxWidth;
+        final h = constraints.maxHeight;
+        final bottomInset = MediaQuery.paddingOf(context).bottom;
+        final fallback = Offset(16, h - bottomInset - 120);
+        final pos = _clampCallPill(_callPillPos ?? fallback, w, h, bottomInset);
+        return Stack(
+          children: [
+            Positioned(
+              left: pos.dx,
+              top: pos.dy,
+              child: GestureDetector(
+                onPanUpdate: (details) => setState(() {
+                  _callPillPos = _clampCallPill(
+                      (_callPillPos ?? fallback) + details.delta, w, h,
+                      bottomInset,
+                      measure: true);
+                }),
+                child: _callPillCollapsed
+                    ? _buildCallPillDot()
+                    : _buildCallMinimizePill(),
+              ),
+            ),
+          ],
+        );
+      }),
+    );
+  }
+
+  Offset _clampCallPill(Offset o, double w, double h, double bottomInset,
+      {bool measure = false}) {
+    final Size size;
+    if (_callPillCollapsed) {
+      size = const Size(44, 44);
+    } else if (measure) {
+      // 仅交互回调可读实测尺寸；render tree 未定型时回退估算
+      size = _callPillKey.currentContext?.size ?? const Size(200, 36);
+    } else {
+      size = const Size(200, 36);
+    }
+    final maxX = (w - size.width - 8).clamp(8.0, double.infinity);
+    final maxY =
+        (h - size.height - bottomInset - 8).clamp(8.0, double.infinity);
+    return Offset(o.dx.clamp(8.0, maxX), o.dy.clamp(8.0, maxY));
+  }
+
   /// R1 真机十轮：最小化通话的悬浮返回条（微信式）——通话中恒显示，
-  /// 点击恢复通话界面
+  /// 点击恢复通话界面；opt1 右端新增收缩钮（缩为圆点态）
   Widget _buildCallMinimizePill() {
     final label = switch (_callSnapshotPhase) {
       CallPhase.calling => '正在呼叫…',
@@ -1320,13 +1432,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _ => '通话中 ${_callDurationText(_callSnapshotActiveSince)}',
     };
     return Material(
+      key: _callPillKey,
       color: Colors.black87,
       borderRadius: BorderRadius.circular(24),
       child: InkWell(
         borderRadius: BorderRadius.circular(24),
         onTap: () => _callSnapshotSvc?.restore(),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          padding: const EdgeInsets.fromLTRB(14, 8, 4, 8),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1338,11 +1451,48 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 size: 18,
               ),
               const SizedBox(width: 6),
-              Text(
-                '${_callSnapshotPeer ?? ''} $label',
-                style: const TextStyle(color: Colors.white, fontSize: 13),
+              Flexible(
+                child: Text(
+                  '${_callSnapshotPeer ?? ''} $label',
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                ),
+              ),
+              const SizedBox(width: 2),
+              IconButton(
+                key: const Key('call_pill_collapse'),
+                tooltip: '收起',
+                icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 18),
+                color: Colors.white70,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                onPressed: () => setState(() => _callPillCollapsed = true),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// opt1：悬浮条收起态——小圆点，点击重新展开为胶囊
+  Widget _buildCallPillDot() {
+    final ended = _callSnapshotPhase == CallPhase.ended;
+    return Material(
+      key: _callPillKey,
+      color: Colors.black87,
+      shape: const CircleBorder(),
+      child: InkWell(
+        key: const Key('call_pill_dot'),
+        customBorder: const CircleBorder(),
+        onTap: () => setState(() => _callPillCollapsed = false),
+        child: SizedBox(
+          width: 44,
+          height: 44,
+          child: Icon(
+            ended ? Icons.call_end_rounded : Icons.phone_in_talk_rounded,
+            color: Colors.white,
+            size: 22,
           ),
         ),
       ),

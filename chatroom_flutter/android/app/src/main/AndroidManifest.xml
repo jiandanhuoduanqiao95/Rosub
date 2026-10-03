@@ -14,6 +14,10 @@
          前台服务是后台收消息的唯一可靠机制（通知仅后台期间存在） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <!-- opt1 P5：通话专属前台服务（Android 14+ 后台采集麦克风/摄像头必须
+         microphone|camera 型 FGS，specialUse 型不豁免媒体采集） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"/>
     <!-- 阶段 R1：音视频通话（语音=麦克风；视频追加摄像头；音频路由调整） -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.CAMERA"/>
@@ -71,6 +75,16 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="persistent_chat_connection"/>
         </service>
+        <!-- opt1 P5/P6：通话专属前台服务——熄屏/退后台期间保住 WebRTC
+             媒体采集（Android 14+ 要求 FGS 类型与实际采集匹配）；通知
+             "通话中"带 contentIntent 打开 MainActivity（extra open_call=1，
+             Dart 侧恢复通话界面）。与消息 KeepAliveService 并存（渠道
+             不同），消息保活生命周期门控不受影响 -->
+        <service
+            android:name=".CallForegroundService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="microphone|camera"/>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

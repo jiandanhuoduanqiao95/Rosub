@@ -478,6 +478,14 @@ class SocketService implements CallSignaling {
     if (_intentionalDisconnect) return;
     if (_reconnecting) return;
     if (_savedUsername == null || _savedPassword == null) return;
+    // opt1 P5：通话进行中跳过回前台探测——探测失败会拆 socket 连带
+    // teardown 进行中的通话；媒体走 P2P 直连不依赖信令通道，熄屏/
+    // 后台后回前台一次就把通话判死是 P5 熄屏断流根因之一。socket 若
+    // 真死，通话结束后的 resumed/心跳看门狗仍会恢复重连。
+    if (callService.isInLiveCall) {
+      state.log('通话进行中，跳过回前台连接探测');
+      return;
+    }
     if (_socket == null) {
       _onConnectionLost();
       return;
@@ -528,7 +536,15 @@ class SocketService implements CallSignaling {
     _stopKeepalive();
     _running = false;
     _receivingFile = false;
-    callService.handleDisconnected();
+    // opt1 P5：通话进行中不拆场——handleDisconnected 会 teardown 通话，
+    // 而媒体是 P2P 直连不依赖信令通道（网络切换/断线时音视频继续）。
+    // socket 走既有重连链路恢复信令；用户手动挂断仍走本地 teardown。
+    // disconnect()（用户退出）不受此豁免影响，照常拆场。
+    if (!callService.isInLiveCall) {
+      callService.handleDisconnected();
+    } else {
+      state.log('连接断开但通话进行中，媒体继续（信令经重连恢复）');
+    }
     _closeTransferSocket();
     try {
       _reader?.close();

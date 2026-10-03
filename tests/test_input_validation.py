@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 注意：validation.py 尚未创建，导入时会失败。
 # 这是 TDD 预期的——先写测试，测试失败后实现功能使测试通过。
-from validation import validate_username, validate_password
+from validation import validate_username, validate_password, validate_password_strict
 
 
 # ============================================================
@@ -325,6 +325,73 @@ class TestValidationIntegration:
         assert len(result) == 2
         assert isinstance(result[0], bool)
         assert isinstance(result[1], str)
+
+
+# ============================================================
+# opt1 严格密码规则（注册/修改密码；登录保持宽松兼容存量口令）
+# ============================================================
+class TestStrictPasswordValidation:
+    """【VL-20】validate_password_strict：6-32 位可见 ASCII"""
+
+    def test_valid_strict_passwords(self):
+        valid_passwords = [
+            "123456",      # 恰好 6 字符
+            "a" * 32,      # 恰好 32 字符
+            "P@ssw0rd!",
+            "abc-DEF_123",
+            "~!@#$%^&*()",
+        ]
+        for pw in valid_passwords:
+            valid, error = validate_password_strict(pw)
+            assert valid is True, f"'{pw[:10]}...' 应该合法，但返回错误: {error}"
+
+    def test_chinese_password_rejected(self):
+        for pw in ["中文密码密码", "pass中文", "密码123456"]:
+            valid, error = validate_password_strict(pw)
+            assert valid is False
+            assert "半角符号" in error
+
+    def test_fullwidth_and_emoji_rejected(self):
+        for pw in ["１２３４５６", "pass😀", "ｐａｓｓword"]:
+            valid, error = validate_password_strict(pw)
+            assert valid is False
+
+    def test_space_rejected(self):
+        for pw in ["pass word", " passwo", "password "]:
+            valid, error = validate_password_strict(pw)
+            assert valid is False
+
+    def test_length_boundary(self):
+        valid, _ = validate_password_strict("a" * 5)
+        assert valid is False
+        valid, _ = validate_password_strict("a" * 33)
+        assert valid is False
+        valid, _ = validate_password_strict("a" * 6)
+        assert valid is True
+        valid, _ = validate_password_strict("a" * 32)
+        assert valid is True
+
+    def test_empty_password(self):
+        valid, error = validate_password_strict("")
+        assert valid is False
+        assert "不能为空" in error
+
+    def test_error_messages_are_chinese(self):
+        _, error = validate_password_strict("中文密码密码")
+        assert error == "密码仅支持字母、数字和半角符号（不含空格与中文）"
+        _, error = validate_password_strict("abc")
+        assert error == "密码长度需为 6-32 个字符"
+        _, error = validate_password_strict("")
+        assert error == "密码不能为空"
+
+    def test_login_rule_unchanged_loose(self):
+        """宽松规则保持原语义：中文密码合法（存量用户可登录）"""
+        valid, _ = validate_password("中文密码密码")
+        assert valid is True
+        valid, _ = validate_password("a" * 128)
+        assert valid is True
+        valid, _ = validate_password_strict("a" * 128)
+        assert valid is False
 
 
 # ============================================================

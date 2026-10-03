@@ -12,7 +12,7 @@ from protocol import (send_message, recv_message, recv_header_only, recv_body,
                       send_message_header_only, recvall, _ForwardError)
 from server.server_group_handler import GroupHandler
 from server.server_admin_handler import AdminHandler
-from validation import validate_password
+from validation import validate_password, validate_password_strict
 from config import config
 
 # 撤回时限（分钟）
@@ -1741,7 +1741,7 @@ class MessageHandler:
                 elif msg_type == "change_password":
                     old_password = header.get("old_password") or ""
                     new_password = header.get("new_password") or ""
-                    valid, error = validate_password(new_password)
+                    valid, error = validate_password_strict(new_password)
                     if not valid:
                         self.server.guarded_send(ssock, "error", error)
                         logging.warning(f"修改密码失败: 用户 {username} 新密码格式不合法: {error}")

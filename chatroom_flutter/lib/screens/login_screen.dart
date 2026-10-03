@@ -138,7 +138,11 @@ class _LoginScreenState extends State<LoginScreen> {
       _refocusUsername();
       return;
     }
-    final passValid = InputValidator.validatePassword(password);
+    // opt1：注册用严格密码规则（6-32 位可见 ASCII）；登录保持宽松
+    // 校验——存量口令（含中文密码）用户不被锁死
+    final passValid = _isLogin
+        ? InputValidator.validatePassword(password)
+        : InputValidator.validatePasswordStrict(password);
     if (!passValid.valid) {
       setState(() => _error = passValid.error);
       _refocusUsername();
@@ -585,7 +589,7 @@ class _LoginScreenState extends State<LoginScreen> {
           key: const ValueKey('password_field'),
           controller: _passwordCtrl,
           focusNode: _passwordFocus,
-          hintText: '密码（至少6个字符）',
+          hintText: '密码（登录至少6位；注册需6-32位字母/数字/符号）',
           obscureText: true,
           showVisibilityToggle: true,
           keyboardType: TextInputType.visiblePassword,
@@ -949,7 +953,7 @@ class _LoginScreenState extends State<LoginScreen> {
             child: AdaptiveTextField(
               key: const ValueKey('password_field'),
               controller: _passwordCtrl,
-              hintText: '密码（至少6个字符）',
+              hintText: '密码（登录至少6位；注册需6-32位字母/数字/符号）',
               obscureText: true,
               showVisibilityToggle: true,
               onSubmitted: (_) => _submit(),

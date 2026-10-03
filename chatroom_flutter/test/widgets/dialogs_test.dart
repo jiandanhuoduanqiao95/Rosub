@@ -643,12 +643,13 @@ void main() {
       await tester.tap(find.text('重置用户密码'));
       await tester.pumpAndSettle();
 
-      // 新密码过短 → SnackBar 拦截，不调用
+      // 新密码过短 → SnackBar 拦截，不调用（opt1：重置走严格规则，
+      // 文案为 6-32 位）
       await typeInto(tester, 'bob', index: 0);
       await typeInto(tester, '123', index: 1);
       await tester.tap(find.text('重置'));
       await tester.pumpAndSettle();
-      expect(find.text('密码长度不能少于 6 个字符'), findsOneWidget);
+      expect(find.text('密码长度需为 6-32 个字符'), findsOneWidget);
       verifyNever(() => service.adminResetPassword(any(), any()));
 
       // 取消并重新打开（输入框内容清空）→ 合法输入 → 调用

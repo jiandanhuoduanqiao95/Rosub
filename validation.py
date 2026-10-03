@@ -23,6 +23,10 @@ _USERNAME_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{3,32}$')
 _PASSWORD_MIN_LEN = 6
 _PASSWORD_MAX_LEN = 128
 
+# opt1 严格密码规则（注册/修改密码用；登录沿用上面的宽松规则兼容存量口令）
+_PASSWORD_STRICT_MAX_LEN = 32
+_PASSWORD_STRICT_PATTERN = re.compile(r'^[\x21-\x7e]+$')
+
 
 def validate_username(username):
     """
@@ -86,5 +90,30 @@ def validate_password(password):
     for ch in password:
         if unicodedata.category(ch) == 'Cc':
             return False, "密码不能包含控制字符"
+
+    return True, ""
+
+
+def validate_password_strict(password):
+    """
+    严格密码校验（opt1 收紧）：仅用于注册、修改密码与管理员重置密码；
+    登录必须沿用 validate_password 宽松规则，否则中文等历史口令用户
+    会被锁死在门外。
+
+    规则：
+      - 不能为空
+      - 仅可见 ASCII（U+0021–U+007E：字母/数字/半角符号，不含空格）
+      - 长度 6–32 个字符
+
+    返回: (bool, str)
+    """
+    if not password:
+        return False, "密码不能为空"
+
+    if not _PASSWORD_STRICT_PATTERN.fullmatch(password):
+        return False, "密码仅支持字母、数字和半角符号（不含空格与中文）"
+
+    if len(password) < _PASSWORD_MIN_LEN or len(password) > _PASSWORD_STRICT_MAX_LEN:
+        return False, f"密码长度需为 {_PASSWORD_MIN_LEN}-{_PASSWORD_STRICT_MAX_LEN} 个字符"
 
     return True, ""

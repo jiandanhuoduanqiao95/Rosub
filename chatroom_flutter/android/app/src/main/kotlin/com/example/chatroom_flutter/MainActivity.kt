@@ -39,6 +39,21 @@ class MainActivity : FlutterActivity() {
         // Q1 真机反馈二轮（首开闪退待定位）：Java 层未捕获异常面包屑——
         // 落盘 crash_log.txt，下次启动 Dart 侧读取展示（复制回传排查）
         installCrashLogger()
+        // opt1 P6：通话通知点击（冷启动路径）——标记待消费的回通话意图，
+        // Dart 侧经 consumeOpenCallIntent 拉取后恢复通话界面
+        if (intent?.getBooleanExtra(CallForegroundService.EXTRA_OPEN_CALL, false)
+            == true
+        ) {
+            openCallIntentPending = true
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // opt1 P6：通话通知点击（进程存活路径，singleTop 走 onNewIntent）
+        if (intent.getBooleanExtra(CallForegroundService.EXTRA_OPEN_CALL, false)) {
+            openCallIntentPending = true
+        }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -78,6 +93,9 @@ class MainActivity : FlutterActivity() {
                             result.success(false)
                         }
                     }
+                    // ---- opt1 P6：通话通知渠道（应用启动时删除重建——
+                    // FGS 内删除渠道会 SecurityException 崩溃，真机实锤） ----
+                    "setupCallChannel" -> setupCallChannel(result)
                     // ---- Q1 真机反馈二轮：保活 / 通知 / 返回 / 崩溃日志 ----
                     "startKeepAlive" -> {
                         try {
@@ -94,6 +112,48 @@ class MainActivity : FlutterActivity() {
                         } catch (e: Exception) {
                             result.success(false)
                         }
+                    }
+                    // ---- opt1 P5/P6：通话专属前台服务 + 通知点击回通话 ----
+                    "startCallForeground" -> {
+                        try {
+                            CallForegroundService.start(
+                                this,
+                                call.argument<Boolean>("video") ?: false,
+                            )
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.success(false)
+                        }
+                    }
+                    "stopCallForeground" -> {
+                        try {
+                            CallForegroundService.stop(this)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.success(false)
+                        }
+                    }
+                    "consumeOpenCallIntent" -> {
+                        result.success(openCallIntentPending)
+                        openCallIntentPending = false
+                    }
+                    // ---- opt1 P7：听筒存在性（无听筒设备语音通话默认外放）。
+                    // AudioManager.hasEarpiece() 为隐藏 API（编译不可见），
+                    // 改用公开的 getDevices 枚举输出设备判听筒（API 23+）
+                    "hasEarpiece" -> {
+                        val am = getSystemService(Context.AUDIO_SERVICE)
+                                as android.media.AudioManager
+                        val has = if (Build.VERSION.SDK_INT >= 23) {
+                            am.getDevices(
+                                android.media.AudioManager.GET_DEVICES_OUTPUTS
+                            ).any {
+                                it.type ==
+                                        android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                            }
+                        } else {
+                            true
+                        }
+                        result.success(has)
                     }
                     "showMessageNotification" -> {
                         showMessageNotification(
@@ -270,6 +330,37 @@ class MainActivity : FlutterActivity() {
                 enableVibration(true)
                 vibrationPattern = longArrayOf(0, 180, 100, 180)
                 lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
+            }
+            manager.createNotificationChannel(channel)
+            result.success(true)
+        } catch (_: Exception) {
+            result.success(false)
+        }
+    }
+
+    /**
+     * opt1 P6：通话通知渠道（IMPORTANCE_DEFAULT——LOW 在 vivo OriginOS
+     * 上不在通知中心展示卡片，"点通知回通话"入口失效）。渠道设置创建后
+     * 不可变，每次启动删除重建（幂等）；**必须在 FGS 之外执行**（FGS
+     * 运行中删除自己的渠道被系统拒绝）。
+     */
+    private fun setupCallChannel(result: MethodChannel.Result) {
+        try {
+            val manager =
+                getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+                result.success(false)
+                return
+            }
+            manager.deleteNotificationChannel(CallForegroundService.CHANNEL_ID)
+            val channel = NotificationChannel(
+                CallForegroundService.CHANNEL_ID,
+                "通话中",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                setShowBadge(false)
+                setSound(null, null)
+                enableVibration(false)
             }
             manager.createNotificationChannel(channel)
             result.success(true)
@@ -586,5 +677,10 @@ class MainActivity : FlutterActivity() {
         const val TRANSFER_NOTIF_ID = 2002
         const val REQ_POST_NOTIFICATIONS = 1001
         const val REQ_CALL_PERMISSIONS = 1002
+
+        /** opt1 P6：通话通知点击待消费标志（onCreate/onNewIntent 置位，
+         * Dart 侧 consumeOpenCallIntent 拉取并清除） */
+        @Volatile
+        var openCallIntentPending: Boolean = false
     }
 }

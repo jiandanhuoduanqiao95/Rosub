@@ -52,15 +52,23 @@ Future<T?> showResponsiveDialog<T>({
     context: context,
     barrierDismissible: barrierDismissible,
     barrierColor: barrierColor,
+    // opt1 P3：对话框统一消费底部系统栏 inset（targetSdk 35+ 强制
+    // edge-to-edge，任务栏/手势条压住按钮行的场景）——compact 全屏
+    // 对话框按钮行沉底前留出 inset；宽屏居中对话框在默认 24px
+    // insetPadding 之外再抬任务栏高度。桌面 bottom padding=0 无操作。
     builder: compact
         ? (ctx) => Dialog.fullscreen(
               backgroundColor: barrierColor,
-              child: Theme(
-                data: _fullscreenDialogTheme(ctx),
-                child: Builder(builder: builder),
+              child: SafeArea(
+                top: false,
+                child: Theme(
+                  data: _fullscreenDialogTheme(ctx),
+                  child: Builder(builder: builder),
+                ),
               ),
             )
-        : builder,
+        : (ctx) =>
+            SafeArea(top: false, child: Builder(builder: builder)),
   );
 }
 

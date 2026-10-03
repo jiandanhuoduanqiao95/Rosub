@@ -1532,6 +1532,7 @@ class InputValidator {
   ///
   /// 规则：非空；长度 6–128；不含控制字符（Unicode Cc 类别：
   /// U+0000–U+001F、U+007F–U+009F）。错误文案与服务端逐字一致。
+  /// 【opt1】仅登录路径使用——存量口令（含中文密码）可登录。
   static ValidationResult validatePassword(String password) {
     if (password.isEmpty) {
       return ValidationResult.fail('密码不能为空');
@@ -1546,6 +1547,27 @@ class InputValidator {
       if (unit < 0x20 || (unit >= 0x7F && unit <= 0x9F)) {
         return ValidationResult.fail('密码不能包含控制字符');
       }
+    }
+    return ValidationResult.ok();
+  }
+
+  /// 严格密码校验（【opt1】与服务端 validation.py validate_password_strict
+  /// 保持一致，错误文案逐字镜像）：非空；仅可见 ASCII（U+0021–U+007E，
+  /// 字母/数字/半角符号，不含空格）；长度 6–32。
+  /// 仅用于注册、修改密码、管理员重置；登录一律走宽松 validatePassword。
+  /// 字符集检查在长度之前（可见 ASCII 下 Dart String.length 与 Python
+  /// len 的 code point 计数完全一致，镜像无歧义）。
+  static final RegExp _passwordStrictPattern = RegExp(r'^[\x21-\x7e]+$');
+
+  static ValidationResult validatePasswordStrict(String password) {
+    if (password.isEmpty) {
+      return ValidationResult.fail('密码不能为空');
+    }
+    if (!_passwordStrictPattern.hasMatch(password)) {
+      return ValidationResult.fail('密码仅支持字母、数字和半角符号（不含空格与中文）');
+    }
+    if (password.length < 6 || password.length > 32) {
+      return ValidationResult.fail('密码长度需为 6-32 个字符');
     }
     return ValidationResult.ok();
   }

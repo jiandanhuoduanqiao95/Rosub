@@ -7,7 +7,8 @@ import hmac
 import os
 from protocol import send_message, recv_message
 from server.server_message_handler import MessageHandler
-from validation import validate_username, validate_password
+from validation import (validate_username, validate_password,
+                        validate_password_strict)
 from config import config
 
 class ClientHandler:
@@ -129,13 +130,13 @@ class ClientHandler:
             message_handler = MessageHandler(self.server)  # 提前初始化 message_handler
 
             if msg_type == "register":
-                # 服务端验证用户名和密码格式
+                # 服务端验证用户名和密码格式（opt1：注册用严格密码规则）
                 valid, error = validate_username(username)
                 if not valid:
                     self.server.guarded_send(ssock, "error", error)
                     logging.warning(f"注册失败: 用户名 {username} 格式不合法: {error}")
                     return
-                valid, error = validate_password(password or "")
+                valid, error = validate_password_strict(password or "")
                 if not valid:
                     self.server.guarded_send(ssock, "error", error)
                     logging.warning(f"注册失败: 密码格式不合法: {error}")

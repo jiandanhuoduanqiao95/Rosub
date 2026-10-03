@@ -3,7 +3,7 @@ import logging
 import socket
 import bcrypt
 from protocol import send_message
-from validation import validate_password
+from validation import validate_password, validate_password_strict
 
 class AdminHandler:
     def __init__(self, server):
@@ -150,7 +150,7 @@ class AdminHandler:
             # 管理员重置密码（阶段 J：P0-5）
             target_user = data.decode("utf-8").strip()
             new_password = header.get("new_password") or ""
-            valid, error = validate_password(new_password)
+            valid, error = validate_password_strict(new_password)
             if not valid:
                 self.server.guarded_send(ssock, "error", error)
                 logging.warning(f"重置密码失败: 管理员={username}, 目标={target_user}, 新密码格式不合法: {error}")

@@ -1057,7 +1057,7 @@ void _showResetPasswordDialog(BuildContext context, SocketService service) {
             const SizedBox(height: 8),
             AdaptiveTextField(
               controller: pwCtrl,
-              hintText: '新密码（6-128 位，无控制字符）',
+              hintText: '新密码（6-32 位字母/数字/符号）',
               obscureText: true,
               showVisibilityToggle: true,
             ),
@@ -1072,7 +1072,8 @@ void _showResetPasswordDialog(BuildContext context, SocketService service) {
           onPressed: () {
             final username = userCtrl.text.trim();
             final newPassword = pwCtrl.text;
-            final valid = InputValidator.validatePassword(newPassword);
+            // opt1：重置出的新密码同样受严格规则约束（与服务端一致）
+            final valid = InputValidator.validatePasswordStrict(newPassword);
             if (!valid.valid) {
               showNoticeBar(context, valid.error ?? '新密码不合法');
               return;
@@ -1225,7 +1226,7 @@ void showChangePasswordDialog(BuildContext context, SocketService service) {
             const SizedBox(height: 8),
             AdaptiveTextField(
               controller: newCtrl,
-              hintText: '新密码',
+              hintText: '新密码（6-32 位字母/数字/符号）',
               obscureText: true,
               showVisibilityToggle: true,
             ),
@@ -1247,7 +1248,8 @@ void showChangePasswordDialog(BuildContext context, SocketService service) {
             final old = oldCtrl.text;
             final newPw = newCtrl.text;
             final confirm = confirmCtrl.text;
-            final valid = InputValidator.validatePassword(newPw);
+            // opt1：新密码用严格规则（旧密码仅用于验证，不受新规则约束）
+            final valid = InputValidator.validatePasswordStrict(newPw);
             if (!valid.valid) {
               showNoticeBar(context, valid.error ?? '新密码不合法');
               return;

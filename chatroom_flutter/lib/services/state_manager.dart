@@ -732,6 +732,9 @@ class AppState extends ChangeNotifier {
   void addFriend(String friend) {
     if (!_friends.contains(friend)) {
       _friends.add(friend);
+      // opt1：同步补默认 meta，避免"登录后新加好友在下批 meta 推送前无
+      // meta 行"造成 friendsByGroup 与 sidebar 兜底渲染双源
+      _friendMeta.putIfAbsent(friend, () => FriendMeta(username: friend));
       notifyListeners();
     }
   }

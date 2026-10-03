@@ -73,6 +73,56 @@ class AndroidSystem {
     }
   }
 
+  /// opt1 P5：启动通话专属前台服务（microphone|camera 型——Android 14+
+  /// 熄屏/后台采集媒体的类型要求；通知"通话中"可点击回通话，P6）。
+  /// 通话开始时调用（语音=video:false、视频=video:true），重复调用幂等。
+  static Future<bool> startCallForeground({required bool video}) async {
+    if (!_isAndroid) return false;
+    try {
+      return await _channel.invokeMethod<bool>('startCallForeground', {
+            'video': video,
+          }) ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// opt1 P5：停止通话前台服务（通话结束/teardown 时调用；未运行时 no-op）
+  static Future<bool> stopCallForeground() async {
+    if (!_isAndroid) return false;
+    try {
+      return await _channel.invokeMethod<bool>('stopCallForeground') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// opt1 P7：设备是否有听筒（AudioManager.hasEarpiece）——无听筒设备
+  /// （平板等）语音通话默认外放，消除"UI 显示听筒实际走扬声器"的路由
+  /// 状态不一致。非 Android 平台恒 true（桌面路由语义不变）。
+  static Future<bool> hasEarpiece() async {
+    if (!_isAndroid) return true;
+    try {
+      return await _channel.invokeMethod<bool>('hasEarpiece') ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// opt1 P6：拉取并清除"通话通知点击"标志（MainActivity 通知
+  /// contentIntent 携带 open_call=1，onCreate/onNewIntent 置位）。
+  /// true = 用户点了"通话中"通知希望回到通话界面。
+  static Future<bool> consumeOpenCallIntent() async {
+    if (!_isAndroid) return false;
+    try {
+      return await _channel.invokeMethod<bool>('consumeOpenCallIntent') ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// 应用外新消息通知（横幅 + 震动 + 提示音——通知渠道承载，
   /// 权限未授予时原生侧静默忽略）。fire-and-forget。
   static void showMessageNotification({
@@ -95,6 +145,19 @@ class AndroidSystem {
     if (!_isAndroid) return false;
     try {
       return await _channel.invokeMethod<bool>('setupMessageChannel') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// opt1 P6：通话通知渠道初始化——删除重建为 IMPORTANCE_DEFAULT
+  /// （LOW 在 vivo OriginOS 不展示通知卡片，"点通知回通话"入口失效）。
+  /// **必须在应用启动路径（FGS 之外）调用**——FGS 运行中删除自己的
+  /// 渠道被系统拒绝（SecurityException 进程崩溃，真机实锤）。
+  static Future<bool> setupCallChannel() async {
+    if (!_isAndroid) return false;
+    try {
+      return await _channel.invokeMethod<bool>('setupCallChannel') ?? false;
     } catch (_) {
       return false;
     }

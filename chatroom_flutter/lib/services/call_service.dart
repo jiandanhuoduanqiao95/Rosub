@@ -167,6 +167,11 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   bool cameraOff = false;
   bool speakerOn = false;
 
+  /// opt1 P7：无听筒设备判定（仅 Android 有意义；UI 层进入聊天页时经
+  /// AndroidSystem.hasEarpiece 预取注入，默认 false 桌面/有听筒不变）。
+  /// true = 语音通话默认外放 + 接通时提示调高通话音量（P7 提示入口）。
+  bool noEarpieceDevice = false;
+
   /// 当前摄像头朝向（默认前置自拍；切换镜头后翻转——本地小窗镜像跟随，
   /// 后置不镜像）
   bool isFrontCamera = true;
@@ -189,6 +194,15 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   CallType? get type => _type;
   String? get callId => _callId;
   bool get isBusy => _phase != CallPhase.idle;
+
+  /// opt1 P5：通话是否处于进行中（calling/ringing/connecting/active，
+  /// 含最小化；ended 展示期不算）——socket 断线豁免拆场与回前台探测
+  /// 跳过的判定依据（媒体 P2P 直连不依赖信令通道，熄屏/断线继续通话）
+  bool get isInLiveCall =>
+      _phase == CallPhase.calling ||
+      _phase == CallPhase.ringing ||
+      _phase == CallPhase.connecting ||
+      _phase == CallPhase.active;
 
   // ---- 群通话 getters ----
   bool get isGroupCall => _isGroup;
@@ -313,7 +327,10 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     micMuted = false;
     cameraOff = false;
     // 微信式默认路由：语音通话听筒、视频通话外放
-    speakerOn = type == CallType.video;
+    // opt1 P7：无听筒设备（平板，AudioManager.hasEarpiece=false 经 UI
+    // 层预取注入）语音通话同样默认外放——无听筒可切，维持"听筒"显示
+    // 而实际走扬声器是路由状态不一致
+    speakerOn = type == CallType.video || noEarpieceDevice;
     isFrontCamera = true;
   }
 

@@ -156,8 +156,13 @@ class Sidebar extends StatelessWidget {
                       )),
                 ],
                 // 好友分区（阶段 J4：提供 friendGroups 时按分组渲染）
+                // opt1：'未分组' 键（meta.groupName 为空的 meta 行产生）不在此
+                // 渲染——其成员统一由 _renderUngroupedFriends 与无 meta 好友
+                // 合并成单一"未分组"分区，杜绝双头
                 if (friendGroups != null && friends.isNotEmpty) ...[
-                  for (final entry in friendGroups!.entries) ...[
+                  for (final entry
+                      in friendGroups!.entries.where((e) =>
+                          e.key != AppState.ungroupedLabel)) ...[
                     if (entry.value.any((k) => friends.any((f) => f.key == k)))
                       _SectionHeader(title: entry.key),
                     ...entry.value
@@ -175,7 +180,7 @@ class Sidebar extends StatelessWidget {
                                   : null,
                             )),
                   ],
-                  // 未分组好友
+                  // 未分组好友（含 meta 为空组与无 meta 两种来源，单一分区头）
                   ..._renderUngroupedFriends(friends),
                 ] else if (friends.isNotEmpty) ...[
                   _SectionHeader(title: '好友 (${friends.length})'),
@@ -240,9 +245,12 @@ class Sidebar extends StatelessWidget {
 
   /// 未分组好友渲染（阶段 J4）：分组参数提供时，不在任何分组中的好友
   /// 归入 AppState.ungroupedLabel（"未分组"）分区
+  /// opt1：'未分组' 键的成员不算"已分组"——与无 meta 好友合并为单一分区
   List<Widget> _renderUngroupedFriends(List<ChatTarget> friends) {
     final groupedKeys = <String>{};
-    friendGroups?.forEach((_, keys) => groupedKeys.addAll(keys));
+    friendGroups?.forEach((label, keys) {
+      if (label != AppState.ungroupedLabel) groupedKeys.addAll(keys);
+    });
     final ungrouped =
         friends.where((f) => !groupedKeys.contains(f.key)).toList();
     if (ungrouped.isEmpty) return const [];
