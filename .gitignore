@@ -57,3 +57,11 @@ third_party/flutter_webrtc/.dart_tool/
 
 # 发行产物目录
 dist/
+
+# 开源整备（2026-10-06）：内部开发文档与营销物料不入开源仓库
+AGENTS.md
+TESTING_GUIDE.md
+TESTING_GUIDE_FLUTTER.md
+.zcodeignore
+promo_video_prompt.md
+promo-video/

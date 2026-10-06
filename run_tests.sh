@@ -26,7 +26,19 @@
 set -e
 
 cd "$(dirname "$0")"
-PYTEST=".venv/bin/python -m pytest"
+
+# Python 解释器发现：优先项目 .venv，其次系统 python3（需安装 requirements-dev.txt）
+if [ -x ".venv/bin/python" ]; then
+    PYTEST=".venv/bin/python -m pytest"
+else
+    PYTEST="python3 -m pytest"
+    if ! python3 -c "import pytest" 2>/dev/null; then
+        echo -e "\033[0;31m[错误] 未找到可用的 pytest 环境。\033[0m"
+        echo -e "  方式一（推荐）：python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt"
+        echo -e "  方式二：python3 -m pip install -r requirements.txt -r requirements-dev.txt"
+        exit 1
+    fi
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
