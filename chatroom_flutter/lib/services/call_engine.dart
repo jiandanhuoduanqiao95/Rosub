@@ -4,6 +4,7 @@
 /// WebRtcCallEngine 为真实现。SDP/ICE 经信令传输时统一转 Map 序列化。
 /// R2 群通话扩展：CallPeerSession 按对端一一对应（mesh 网状每条边一个
 /// PC，本地轨道共享 addTrack）；一对一保持单 PC 路径不变。
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -30,6 +31,12 @@ abstract class CallPeerSession {
 
   /// 挂载远端视频渲染器（null=解除挂载；流后到时自动补挂）
   void attachRenderer(RTCVideoRenderer? renderer);
+
+  /// opt6 排障探针：暴露内部 PC 供电平采样（仅同文件诊断代码使用）
+  RTCPeerConnection? get peerConnection;
+
+  /// opt6 排障探针：对端音频入站电平（0~1；null=无字段）
+  Future<double?> inboundAudioLevel();
   Future<void> close();
 }
 
@@ -94,6 +101,13 @@ class WebRtcCallEngine implements CallEngine {
   RTCPeerConnection? _pc;
   MediaStream? _local;
   MediaStream? _remote;
+  // opt7 采集死亡看门狗状态（仅 Windows 生效，见 _startCaptureWatchdog）
+  Timer? _captureWatchdog;
+  int _captureSilentStreak = 0;
+  bool _everSentAudio = false;
+  DateTime? _lastCaptureResyncAt;
+  bool _micMutedState = false;
+  int _captureResyncCount = 0;
   // Linux 本端预览回环（r1s11）：m150 SDK 桌面端本地 VideoTrack 不向
   // 渲染器扇出帧（AddRenderer 后 onFirstFrameRendered 永不触发，远端
   // 轨道正常，spike 探针实锤）——用一对隐藏 PC 把本地轨道"远端化"，
@@ -177,11 +191,71 @@ class WebRtcCallEngine implements CallEngine {
     } else {
       _localRenderer?.srcObject = _local;
     }
+    _startCaptureWatchdog();
   }
 
   @override
   Future<void> ensureMedia({required bool video}) async {
     await _acquireMedia(video: video);
+  }
+
+  /// opt7 采集死亡看门狗（仅 Windows）。opt6 真机复现：ADM 侧任何一次
+  /// Stop→Set→Init→Start 重启链中途失败（蓝牙拆除风暴中最易发生）后，
+  /// wrapper fire-and-forget 无人重试——出站音频从此恒为 1~2 LSB 的
+  /// 数字静音，整场通话单向无声且无自愈。此看门狗以出站电平为最终
+  /// 判据：曾活过、未静音、连续 24s（12 样本）纯数字静音 → 调原生
+  /// chatroomAudioResync 强制重绑当前默认采集端点（绕过同目标跳过与
+  /// 活性探针——管道死在自己端点上时恰恰需要一次无条件重启来复活）。
+  /// "曾活过"门控：若本次媒体会话从未出过声（系统级静音麦克风等用户
+  /// 环境问题），重绑无意义，不进入循环。
+  void _startCaptureWatchdog() {
+    if (!Platform.isWindows) return;
+    _captureSilentStreak = 0;
+    _everSentAudio = false;
+    _lastCaptureResyncAt = null;
+    _captureResyncCount = 0;
+    _captureWatchdog?.cancel();
+    _captureWatchdog = Timer.periodic(
+        const Duration(seconds: 2), (_) => _checkCaptureLiveness());
+  }
+
+  void _stopCaptureWatchdog() {
+    _captureWatchdog?.cancel();
+    _captureWatchdog = null;
+  }
+
+  Future<void> _checkCaptureLiveness() async {
+    final level = await outboundAudioLevel();
+    if (level == null) return;
+    if (level > 2e-4) {
+      _everSentAudio = true;
+      _captureSilentStreak = 0;
+      return;
+    }
+    if (_micMutedState) {
+      _captureSilentStreak = 0;
+      return;
+    }
+    if (!_everSentAudio) return;
+    _captureSilentStreak++;
+    if (_captureSilentStreak < 12) return;
+    // 不可修复场景（如系统级静音麦克风）封顶重试，避免周期性无谓重启闪断
+    if (_captureResyncCount >= 3) return;
+    final now = DateTime.now();
+    final last = _lastCaptureResyncAt;
+    if (last != null && now.difference(last) < const Duration(seconds: 30)) {
+      return;
+    }
+    _lastCaptureResyncAt = now;
+    _captureSilentStreak = 0;
+    _captureResyncCount++;
+    debugPrint(
+        '[call-audio] outbound digital silence 24s → chatroomAudioResync');
+    try {
+      await WebRTC.invokeMethod('chatroomAudioResync', <String, dynamic>{});
+    } catch (_) {
+      // 非 Windows 平台无此入口（notImplemented），静默忽略
+    }
   }
 
   @override
@@ -434,6 +508,7 @@ class WebRtcCallEngine implements CallEngine {
 
   @override
   Future<void> setMicMuted(bool muted) async {
+    _micMutedState = muted;
     // track.enabled=false 即停止发送（发静音包），是标准的麦克风静音
     for (final track
         in _local?.getAudioTracks() ?? const <MediaStreamTrack>[]) {
@@ -530,6 +605,50 @@ class WebRtcCallEngine implements CallEngine {
     return session.inboundVideoFrames();
   }
 
+  /// opt6 音频路由排障探针：本端出站音频电平（stats media-source/track
+  /// 的 audioLevel，0~1 线性；null=stats 无该字段）。判定"麦克风真的
+  /// 采到非静音并送入编码"——bytesSent 只证明在发包，静音也发包。
+  Future<double?> outboundAudioLevel() async {
+    double? level;
+    for (final pc in _allStatsPcs()) {
+      try {
+        final stats = await pc.getStats();
+        for (final s in stats) {
+          final v = s.values;
+          final kind = v['kind'] ?? v['mediaType'] ?? '?';
+          if (kind != 'audio') continue;
+          if (s.type == 'media-source' || s.type == 'track') {
+            final raw = v['audioLevel'];
+            final parsed =
+                raw is num ? raw.toDouble() : double.tryParse('$raw');
+            if (parsed != null) {
+              if (level == null || parsed > level) level = parsed;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    return level;
+  }
+
+  /// opt6 音频路由排障探针：指定 mesh 边对端音频入站电平（inbound-rtp
+  /// audioLevel，0~1；null=无字段；会话不存在 -1）。判定"对方真的听得
+  /// 见我"——对端入站电平是最终判据。
+  Future<double?> peerInboundAudioLevel(String peerId) async {
+    final session = _peers[peerId];
+    if (session == null) return -1;
+    return session.inboundAudioLevel();
+  }
+
+  Iterable<RTCPeerConnection> _allStatsPcs() sync* {
+    final pc = _pc;
+    if (pc != null) yield pc;
+    for (final session in _peers.values) {
+      final pc = session.peerConnection;
+      if (pc != null) yield pc;
+    }
+  }
+
   @override
   Future<void> close() async {
     final pc = _pc;
@@ -539,6 +658,7 @@ class WebRtcCallEngine implements CallEngine {
     _remote = null;
     final peers = List.of(_peers.values);
     _peers.clear();
+    _stopCaptureWatchdog();
     await _stopLoopbackPreview();
     // 先摘掉渲染器对流的引用（native 纹理仍持有 stream 时 dispose 会
     // 在原生层产生悬空引用——Linux 关闭卡死的加固项）
@@ -704,6 +824,26 @@ class _WebRtcPeerSession implements CallPeerSession {
       }
     } catch (_) {}
     return 0;
+  }
+
+  @override
+  RTCPeerConnection? get peerConnection => _pc;
+
+  @override
+  Future<double?> inboundAudioLevel() async {
+    try {
+      final stats = await _pc.getStats();
+      for (final s in stats) {
+        final v = s.values;
+        final kind = v['kind'] ?? v['mediaType'] ?? '?';
+        if (s.type == 'inbound-rtp' && kind == 'audio') {
+          final raw = v['audioLevel'];
+          if (raw is num) return raw.toDouble();
+          return double.tryParse('$raw');
+        }
+      }
+    } catch (_) {}
+    return null;
   }
 
   @override

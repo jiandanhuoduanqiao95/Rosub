@@ -43,18 +43,8 @@ Future<void> _waitUntil(bool Function() cond, WidgetTester tester,
   fail('waitUntil 超时');
 }
 
-Future<bool> _waitUntilSoft(bool Function() cond, WidgetTester tester,
-    {Duration timeout = const Duration(seconds: 15)}) async {
-  final end = DateTime.now().add(timeout);
-  while (DateTime.now().isBefore(end)) {
-    if (cond()) return true;
-    await tester.pump(const Duration(milliseconds: 200));
-  }
-  return false;
-}
-
 Future<void> main() async {
-  final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   AppConfig.serverHost = '127.0.0.1';
   AppConfig.serverPort = 8090;
@@ -69,10 +59,10 @@ Future<void> main() async {
     // ── 场景 1：登录页（宽屏布局，含品牌区与标语）──
     await tester.pumpWidget(RepaintBoundary(
       key: _shotKey,
-      child: MaterialApp(
+      child: const MaterialApp(
         title: 'Rosub',
         debugShowCheckedModeBanner: false,
-        home: const LoginScreen(),
+        home: LoginScreen(),
       ),
     ));
     await tester.pumpAndSettle(const Duration(seconds: 2));

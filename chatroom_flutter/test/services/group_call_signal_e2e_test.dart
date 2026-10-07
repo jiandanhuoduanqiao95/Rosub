@@ -157,6 +157,12 @@ class _FakeE2ePeerSession implements CallPeerSession {
   void attachRenderer(RTCVideoRenderer? renderer) {}
 
   @override
+  RTCPeerConnection? get peerConnection => null;
+
+  @override
+  Future<double?> inboundAudioLevel() async => null;
+
+  @override
   Future<void> close() async {}
 }
 

@@ -30,6 +30,7 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_common.cc"
   "loopback_capturer_factory.cc"
   "pulse_loopback_capturer.cc"
+  "pulse_default_device_monitor.cc"
   "flutter_webrtc_plugin.cc"
   "flutter/core_implementations.cc"
   "flutter/standard_codec.cc"

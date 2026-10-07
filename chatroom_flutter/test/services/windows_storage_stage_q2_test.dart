@@ -118,12 +118,12 @@ void main() {
       final src = srcOf('lib/config.dart');
       expect(
           RegExp(
-                  "buildStamp = '(\\d+\\.\\d+\\.\\d+|q2r\\d+|gc\\d+|opt\\d+)'")
+                  "buildStamp = '(\\d+\\.\\d+\\.\\d+(-opt\\d+)?|q2r\\d+|gc\\d+|opt\\d+)'")
               .hasMatch(src),
           isTrue,
           reason: '§36.1：每端构建后核对登录页"构建"标识与所测服务端版本一致'
               '（正式发行起用语义版本号 1.0.0 起递增；修订期为 q2rN/gcN/'
-              'optN 轮次号——多端排障先看构建标识）');
+              'optN 轮次号或版本号 -optN 后缀——多端排障先看构建标识）');
     });
   });
 }

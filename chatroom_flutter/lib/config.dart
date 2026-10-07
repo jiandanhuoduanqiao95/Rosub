@@ -56,12 +56,13 @@ class AppConfig {
   static const int autoAcceptImageMaxSize = 5 * 1024 * 1024;
 
   /// 构建标识（R-P27 引入）：显示在登录页页脚并打印到启动日志——
-  /// 多客户端排查"谁在跑旧构建"时一眼可辨。正式发版使用语义版本号
-  /// （1.0.0 → 1.0.1 → …）；修订期轮次亦可沿用 gc/opt 系列。
-  /// 1.0.2 = opt1 体验优化批次（P1 未分组双头 / P2 通话悬浮条 / P3
-  /// 平板任务栏遮挡 / P4 密码规则收紧 / P5+P6 通话后台保活与通知
-  /// 回通话 / P7 无听筒默认外放）转正版本（开发期页脚曾显示 vopt1）。
-  static const String buildStamp = '1.0.2';
+  /// 多客户端排查"谁在跑旧构建"时一眼可辨。versionName 恒 1.0.2，
+  /// 修订轮次以 -optN 后缀递增（versionCode 每轮同步 +1）。
+  /// 1.0.2-opt5 = 安卓通话 FGS 闪退修复：microphone 型 startForeground
+  /// 硬校验 RECORD_AUDIO（vivo"仅本次允许"回收后必炸）——权限感知动态
+  /// 选型（未授予降级 specialUse，授妥后随通话阶段变更升级回）+
+  /// SecurityException 双层兜底 stopSelf，任何路径不崩。
+  static const String buildStamp = '1.0.2-opt7';
 
   /// 彩色 emoji 字体栈（R-P26 硬化）：首选内置 COLRv1 字体，第二兜底
   /// 系统 Noto Color Emoji（CBDT 彩色位图，Ubuntu 默认安装、覆盖全部

@@ -182,8 +182,12 @@ void main() {
           srcOf('android/app/src/main/AndroidManifest.xml');
       expect(src, contains('android.permission.FOREGROUND_SERVICE_MICROPHONE'));
       expect(src, contains('android.permission.FOREGROUND_SERVICE_CAMERA'));
-      expect(src, contains('android:foregroundServiceType="microphone|camera"'),
-          reason: 'Android 14+ 要求 FGS 类型与实际采集匹配');
+      expect(
+          src,
+          contains(
+              'android:foregroundServiceType="microphone|camera|specialUse"'),
+          reason: 'Android 14+ 要求 FGS 类型与实际采集匹配；opt5 扩'
+              ' specialUse（权限回收时降级保活，勿缩回）');
       expect(src, contains('.CallForegroundService'));
       // 消息保活 FGS 不受影响（Q1 定稿只能增强）
       expect(src, contains('.KeepAliveService'));

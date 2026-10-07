@@ -79,12 +79,19 @@
              媒体采集（Android 14+ 要求 FGS 类型与实际采集匹配）；通知
              "通话中"带 contentIntent 打开 MainActivity（extra open_call=1，
              Dart 侧恢复通话界面）。与消息 KeepAliveService 并存（渠道
-             不同），消息保活生命周期门控不受影响 -->
+             不同），消息保活生命周期门控不受影响。opt5：specialUse 进
+             类型集——RECORD_AUDIO 未授予（vivo"仅本次允许"回收）时服务
+             降级启动用，杜绝 microphone 型 startForeground 的
+             SecurityException 闪退 -->
         <service
             android:name=".CallForegroundService"
             android:exported="false"
             android:stopWithTask="false"
-            android:foregroundServiceType="microphone|camera"/>
+            android:foregroundServiceType="microphone|camera|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="call_signaling_keepalive"/>
+        </service>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

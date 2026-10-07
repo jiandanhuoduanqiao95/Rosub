@@ -85,14 +85,59 @@ class CallForegroundService : Service() {
                 NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE
             )
             .build()
-        if (Build.VERSION.SDK_INT >= 34) {
-            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            if (video) {
-                type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
-            }
-            startForeground(NOTIF_ID, notification, type)
-        } else {
+        if (Build.VERSION.SDK_INT < 34) {
             startForeground(NOTIF_ID, notification)
+            return
+        }
+        // opt5（1.0.2-opt5，真机 SecurityException 闪退修复）：Android 14+
+        // 的 microphone 型 FGS 在 startForeground 时**硬校验 RECORD_AUDIO
+        // 已授予**（any-of 捕获权限 + eligible state），未授予直接
+        // SecurityException 炸进程。vivo OriginOS 的"仅本次允许"会在进程
+        // 结束后回收权限——下次来电（振铃期就启 FGS，早于运行时权限申请）
+        // 必撞。策略：
+        //   ① 权限感知选型——RECORD_AUDIO 授予才用 microphone（视频且
+        //      CAMERA 授予才追加 camera）；未授予降级 specialUse（仅保
+        //      连接/信令，后台媒体采集会被系统切断，前台通话不受影响；
+        //      权限授妥后 Dart 侧 _onCallChanged 会再次启动本服务完成
+        //      升级回 microphone 型）。
+        //   ② SecurityException 双层兜底——先试 specialUse，再失败则
+        //      stopSelf 撤场（规避 FGS 启动超时异常），**任何路径不崩**。
+        val micGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+            this, android.Manifest.permission.RECORD_AUDIO
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        val camGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+            this, android.Manifest.permission.CAMERA
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        var type = 0
+        if (micGranted) {
+            type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        }
+        if (video && camGranted) {
+            type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+        }
+        if (type == 0) {
+            type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+        }
+        try {
+            startForeground(NOTIF_ID, notification, type)
+        } catch (e: SecurityException) {
+            try {
+                android.util.Log.w(
+                    "CallForegroundService",
+                    "FGS type $type rejected, downgrading to specialUse: $e"
+                )
+                startForeground(
+                    NOTIF_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            } catch (e2: Exception) {
+                android.util.Log.e(
+                    "CallForegroundService",
+                    "specialUse FGS also rejected, stopping service", e2
+                )
+                stopSelf()
+            }
         }
     }
 

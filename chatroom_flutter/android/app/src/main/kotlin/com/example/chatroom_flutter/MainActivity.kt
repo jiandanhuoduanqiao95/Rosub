@@ -137,24 +137,6 @@ class MainActivity : FlutterActivity() {
                         result.success(openCallIntentPending)
                         openCallIntentPending = false
                     }
-                    // ---- opt1 P7：听筒存在性（无听筒设备语音通话默认外放）。
-                    // AudioManager.hasEarpiece() 为隐藏 API（编译不可见），
-                    // 改用公开的 getDevices 枚举输出设备判听筒（API 23+）
-                    "hasEarpiece" -> {
-                        val am = getSystemService(Context.AUDIO_SERVICE)
-                                as android.media.AudioManager
-                        val has = if (Build.VERSION.SDK_INT >= 23) {
-                            am.getDevices(
-                                android.media.AudioManager.GET_DEVICES_OUTPUTS
-                            ).any {
-                                it.type ==
-                                        android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
-                            }
-                        } else {
-                            true
-                        }
-                        result.success(has)
-                    }
                     "showMessageNotification" -> {
                         showMessageNotification(
                             call.argument<String>("title") ?: "新消息",

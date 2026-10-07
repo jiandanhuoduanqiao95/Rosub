@@ -407,7 +407,8 @@ void main() {
       expect(svc2.cameraOff, isFalse);
     });
 
-    test('免提默认路由：语音=听筒 关、视频=外放 开，媒体建立后应用', () async {
+    test('免提默认路由：语音/视频均默认关（听筒/系统回退），媒体建立后应用',
+        () async {
       final h = _Harness();
       final svc = h.build();
       await svc.startCall('bob', CallType.audio);
@@ -420,10 +421,12 @@ void main() {
       final h2 = _Harness();
       final svc2 = h2.build();
       await svc2.startCall('bob', CallType.video);
-      expect(svc2.speakerOn, isTrue);
+      expect(svc2.speakerOn, isFalse,
+          reason: '1.0.2-opt1 用户决策：默认不再外放（听筒/系统回退路由），'
+              '免提由用户手动开；无听筒设备由 AudioSwitch 偏好链回退扬声器');
       _signal(svc2, 'call_accept', 'bob', h2.last('call_invite').callId);
       await Future<void>.delayed(Duration.zero);
-      verify(() => h2.engine.setSpeakerphoneOn(true)).called(1);
+      verify(() => h2.engine.setSpeakerphoneOn(false)).called(1);
       svc2.cancelOutgoing();
     });
 

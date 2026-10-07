@@ -118,11 +118,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       await maybeShowBatteryOptimizationGuide(context);
       if (!mounted) return;
       await _maybeShowLastCrashDialog();
-      // opt1 P7：无听筒设备预取（平板）——语音通话默认外放 + 接通提示
-      try {
-        widget.socketService.callService.noEarpieceDevice =
-            !await AndroidSystem.hasEarpiece();
-      } catch (_) {}
     });
     // 阶段 O1 修订（2026-08-31 多公告并存）：进入聊天页时对当前会话
     // （重连恢复场景）拉取群公告历史

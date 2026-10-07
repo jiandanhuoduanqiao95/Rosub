@@ -98,18 +98,6 @@ class AndroidSystem {
     }
   }
 
-  /// opt1 P7：设备是否有听筒（AudioManager.hasEarpiece）——无听筒设备
-  /// （平板等）语音通话默认外放，消除"UI 显示听筒实际走扬声器"的路由
-  /// 状态不一致。非 Android 平台恒 true（桌面路由语义不变）。
-  static Future<bool> hasEarpiece() async {
-    if (!_isAndroid) return true;
-    try {
-      return await _channel.invokeMethod<bool>('hasEarpiece') ?? true;
-    } catch (_) {
-      return true;
-    }
-  }
-
   /// opt1 P6：拉取并清除"通话通知点击"标志（MainActivity 通知
   /// contentIntent 携带 open_call=1，onCreate/onNewIntent 置位）。
   /// true = 用户点了"通话中"通知希望回到通话界面。

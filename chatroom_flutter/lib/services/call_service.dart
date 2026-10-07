@@ -167,11 +167,6 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   bool cameraOff = false;
   bool speakerOn = false;
 
-  /// opt1 P7：无听筒设备判定（仅 Android 有意义；UI 层进入聊天页时经
-  /// AndroidSystem.hasEarpiece 预取注入，默认 false 桌面/有听筒不变）。
-  /// true = 语音通话默认外放 + 接通时提示调高通话音量（P7 提示入口）。
-  bool noEarpieceDevice = false;
-
   /// 当前摄像头朝向（默认前置自拍；切换镜头后翻转——本地小窗镜像跟随，
   /// 后置不镜像）
   bool isFrontCamera = true;
@@ -326,11 +321,11 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     minimized = false;
     micMuted = false;
     cameraOff = false;
-    // 微信式默认路由：语音通话听筒、视频通话外放
-    // opt1 P7：无听筒设备（平板，AudioManager.hasEarpiece=false 经 UI
-    // 层预取注入）语音通话同样默认外放——无听筒可切，维持"听筒"显示
-    // 而实际走扬声器是路由状态不一致
-    speakerOn = type == CallType.video || noEarpieceDevice;
+    // 默认不外放（1.0.2-opt1，用户决策）：语音/视频一律默认听筒/系统
+    // 回退路由，需要免提由用户手动开。Android 上 setSpeakerphoneOn(false)
+    // 经 AudioSwitch 偏好链选设备，无听筒设备（平板）自动回退到扬声器
+    // 不会无声，因此不再需要"无听筒设备默认外放"特例与预取注入。
+    speakerOn = false;
     isFrontCamera = true;
   }
 
