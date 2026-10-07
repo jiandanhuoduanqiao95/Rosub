@@ -15,6 +15,10 @@
 
 <!-- 🎬 宣传片内嵌占位：在 GitHub 网页编辑本 README，把视频文件拖入下方空行即可自动生成内嵌播放器 -->
 
+
+https://github.com/user-attachments/assets/cbeb7380-7bae-46e9-8f1d-26ae985a2bce
+
+
 ## 功能一览
 
 | 即时通讯 | 媒体与文件 | 群组治理 | 体验细节 |
