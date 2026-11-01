@@ -46,6 +46,30 @@ void chatroom_set_urgency(int urgent) {
   g_idle_add(apply_urgency_cb, d);
 }
 
+// opt8 功能三：来电唤起——恢复最小化窗口并置前（ ringing 时由 Dart 经
+// DynamicLibrary.process() 调用）。符号约定与 chatroom_set_urgency 一致
+// （extern "C" / used / visibility("default") / g_idle_add 主线程转发）。
+// 已 active 时不设 urgency：urgency 在窗口聚焦时由 FocusTracker 清除，
+// 若对已聚焦窗口反复置位，任务栏会持续闪烁（clearUrgency 不再触发）。
+// Wayland 合成器的焦点窃取防护可能拒绝 present——此时 deiconify/present
+// 仍生效于部分 WM，抢焦点失败的表现记录为系统行为，由 urgency 兜底提醒。
+static gboolean apply_bring_to_front_cb(gpointer user_data) {
+  auto* win = static_cast<GtkWindow*>(user_data);
+  if (win != nullptr) {
+    if (!gtk_window_is_active(win)) {
+      gtk_window_set_urgency_hint(win, TRUE);
+    }
+    gtk_window_deiconify(win);
+    gtk_window_present(win);
+  }
+  return G_SOURCE_REMOVE;
+}
+
+extern "C" __attribute__((used, visibility("default")))
+void chatroom_bring_to_front() {
+  g_idle_add(apply_bring_to_front_cb, g_app_window);
+}
+
 // 阶段 N3（P2-4 文件拖拽发送）：GTK 拖拽接收 —— 把拖入窗口的文件
 // （text/uri-list）解析为本地路径，经 MethodChannel("chatroom/dnd")
 // 的 "files" 方法转发给 Dart 侧（走既有上传通道，复用 M8 大文件分流）。

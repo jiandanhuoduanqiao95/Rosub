@@ -51,7 +51,6 @@
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -61,11 +60,18 @@ import 'package:chatroom_flutter/platform/battery_optimization.dart';
 class FakeBattery implements BatteryOptimizationCapability {
   bool? ignoring;
   int openCount = 0;
+  int requestIgnoreCount = 0;
   @override
   Future<bool?> isIgnoring() async => ignoring;
   @override
   Future<bool> openSettings() async {
     openCount++;
+    return true;
+  }
+
+  @override
+  Future<bool> requestIgnore() async {
+    requestIgnoreCount++;
     return true;
   }
 }
@@ -203,155 +209,44 @@ void main() {
     });
   });
 
-  group('Q1-4 —— 引导 UI（一次性提醒 + 双出口持久化）', () {
-    Future<void> pumpTrigger(WidgetTester tester) async {
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: Builder(
-            builder: (ctx) => Center(
-              child: TextButton(
-                onPressed: () => maybeShowBatteryOptimizationGuide(ctx),
-                child: const Text('TRIGGER'),
-              ),
-            ),
-          ),
-        ),
-      ));
-      await tester.pump();
-    }
-
-    testWidgetsOnPlatform(
-        '未白名单 + 未提醒过 → 弹出引导对话框（含"电池优化"文案与两出口）', TargetPlatform.android,
-        (tester) async {
-      BatteryOptimization.resetForTest();
-      final fake = FakeBattery()..ignoring = false;
-      BatteryOptimization.override = fake;
-      await pumpTrigger(tester);
-
-      await tester.tap(find.text('TRIGGER'));
-      await tester.pump();
-      await tester.pumpAndSettle();
-
-      expect(find.textContaining('电池优化'), findsWidgets,
-          reason: '引导文案出现（OneUI/OriginOS 深度休眠杀后台背景说明）');
-      expect(find.text('去设置'), findsOneWidget);
-      expect(find.text('暂不'), findsOneWidget);
+  group('opt8 —— requestIgnore 直弹确认框（引导 UI 并入运行环境自检）', () {
+    test("通道 'requestIgnoreBatteryOptimizations' true → true", () async {
+      useAndroid();
+      MethodCall? received;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(platformChannel, (call) async {
+        received = call;
+        return true;
+      });
+      expect(await BatteryOptimization.instance.requestIgnore(), isTrue);
+      expect(received!.method, 'requestIgnoreBatteryOptimizations');
     });
 
-    testWidgetsOnPlatform('"去设置" → openSettings 恰 1 次 + dismissed 持久化 + 弹窗关闭',
-        TargetPlatform.android, (tester) async {
-      BatteryOptimization.resetForTest();
-      final fake = FakeBattery()..ignoring = false;
-      BatteryOptimization.override = fake;
-      await pumpTrigger(tester);
-      await tester.tap(find.text('TRIGGER'));
-      await tester.pump();
-      await tester.pumpAndSettle();
-
-      await tester.tap(find.text('去设置'));
-      await tester.pump();
-      await tester.pumpAndSettle();
-
-      expect(fake.openCount, 1, reason: '跳转电池优化设置恰一次');
-      expect(find.textContaining('电池优化'), findsNothing, reason: '弹窗已关闭');
-      expect(
-          (await SharedPreferences.getInstance())
-              .getBool('battery_guide_dismissed'),
-          isTrue,
-          reason: '提醒过即持久化（本次安装不再弹）');
+    test('通道 false / 缺失 → false（失败不崩）', () async {
+      useAndroid();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(platformChannel, (call) async => false);
+      expect(await BatteryOptimization.instance.requestIgnore(), isFalse);
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(platformChannel, null);
+      expect(await BatteryOptimization.instance.requestIgnore(), isFalse);
     });
 
-    testWidgetsOnPlatform(
-        '"暂不" → 不调 openSettings + dismissed 持久化', TargetPlatform.android,
-        (tester) async {
+    test('桌面（Unsupported）→ requestIgnore false', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       BatteryOptimization.resetForTest();
-      final fake = FakeBattery()..ignoring = false;
-      BatteryOptimization.override = fake;
-      await pumpTrigger(tester);
-      await tester.tap(find.text('TRIGGER'));
-      await tester.pump();
-      await tester.pumpAndSettle();
-
-      await tester.tap(find.text('暂不'));
-      await tester.pump();
-      await tester.pumpAndSettle();
-
-      expect(fake.openCount, 0, reason: '"暂不"不跳设置');
-      expect(
-          (await SharedPreferences.getInstance())
-              .getBool('battery_guide_dismissed'),
-          isTrue);
-      expect(find.textContaining('电池优化'), findsNothing);
-    });
-
-    testWidgetsOnPlatform(
-        '已提醒过（dismissed=true）→ 不再弹（即使仍未白名单）', TargetPlatform.android,
-        (tester) async {
-      BatteryOptimization.resetForTest();
-      SharedPreferences.setMockInitialValues(
-          <String, Object>{'battery_guide_dismissed': true});
-      final fake = FakeBattery()..ignoring = false;
-      BatteryOptimization.override = fake;
-      await pumpTrigger(tester);
-
-      await tester.tap(find.text('TRIGGER'));
-      await tester.pump();
-      await tester.pumpAndSettle();
-
-      expect(find.textContaining('电池优化'), findsNothing);
-      expect(find.text('去设置'), findsNothing);
-    });
-
-    testWidgetsOnPlatform('已白名单（isIgnoring=true）→ 不弹', TargetPlatform.android,
-        (tester) async {
-      BatteryOptimization.resetForTest();
-      final fake = FakeBattery()..ignoring = true;
-      BatteryOptimization.override = fake;
-      await pumpTrigger(tester);
-
-      await tester.tap(find.text('TRIGGER'));
-      await tester.pump();
-      await tester.pumpAndSettle();
-
-      expect(find.textContaining('电池优化'), findsNothing);
-    });
-
-    testWidgetsOnPlatform(
-        '无法判定（isIgnoring=null，通道缺失等）→ 不弹（安全默认）', TargetPlatform.android,
-        (tester) async {
-      BatteryOptimization.resetForTest();
-      final fake = FakeBattery()..ignoring = null;
-      BatteryOptimization.override = fake;
-      await pumpTrigger(tester);
-
-      await tester.tap(find.text('TRIGGER'));
-      await tester.pump();
-      await tester.pumpAndSettle();
-
-      expect(find.textContaining('电池优化'), findsNothing,
-          reason: 'null 恒不弹——桌面/通道缺失环境的安全默认');
-    });
-
-    testWidgetsOnPlatform(
-        'linux 桌面 → 永不弹（Unsupported 链路）', TargetPlatform.linux, (tester) async {
-      BatteryOptimization.resetForTest();
-      await pumpTrigger(tester);
-
-      await tester.tap(find.text('TRIGGER'));
-      await tester.pump();
-      await tester.pumpAndSettle();
-
-      expect(find.textContaining('电池优化'), findsNothing,
-          reason: '桌面无电池优化语义（Q0-D 手动清单回归）');
+      expect(await BatteryOptimization.instance.requestIgnore(), isFalse);
     });
   });
 
-  group('Q1-4 —— ChatScreen 接线（源码扫描）', () {
-    test('chat_screen.dart 进入聊天页时接线引导（maybeShowBatteryOptimizationGuide）', () {
+  group('opt8 —— ChatScreen 接线（源码扫描）', () {
+    test('chat_screen.dart 进入聊天页时接线运行环境自检（maybeShowEnvironmentCheckDialog）', () {
       final src = srcOf('screens/chat_screen.dart');
-      expect(countOf(src, 'maybeShowBatteryOptimizationGuide'),
+      expect(countOf(src, 'maybeShowEnvironmentCheckDialog'),
           greaterThanOrEqualTo(1),
-          reason: 'ChatScreen initState（postFrame）触发引导检查；桌面天然不弹');
+          reason: 'ChatScreen initState（postFrame）触发自检；桌面/null 恒不弹');
+      expect(src.contains('maybeShowBatteryOptimizationGuide'), isFalse,
+          reason: '旧单项电池引导已并入自检（勿双轨残留）');
     });
   });
 }

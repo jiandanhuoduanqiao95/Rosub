@@ -148,9 +148,18 @@ void main() {
 
     test('通知点击回通话：resumed 消费 open_call 意图', () {
       final src = srcOf('lib/screens/chat_screen.dart');
-      expect(src, contains('consumeOpenCallIntent'),
-          reason: 'resumed 时拉取通话通知点击标志');
-      expect(src, contains('_handleOpenCallIntent'));
+      // opt8 扩展：_handleOpenCallIntent 升级为统一 _handleCallIntent
+      //（consumeCallIntent 携带 accept/decline action），P6"点通知回通话"
+      // 语义保留（default 分支最小化才 restore）
+      expect(src, contains('consumeCallIntent'),
+          reason: 'resumed 时拉取通话通知点击/来电 action 意图');
+      expect(src, contains('_handleCallIntent'));
+      expect(src, contains("case 'decline'"),
+          reason: '来电通知拒绝 action（opt8）');
+      expect(src, contains("case 'accept'"),
+          reason: '来电通知接听 action（opt8）');
+      expect(src, contains('if (svc.minimized) svc.restore()'),
+          reason: 'P6 语义保留：最小化才 restore');
     });
   });
 

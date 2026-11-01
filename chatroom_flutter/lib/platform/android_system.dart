@@ -39,6 +39,36 @@ class AndroidSystem {
     }
   }
 
+  /// 通知权限当前是否已开启；null = 无法判定（非 Android/通道缺失——
+  /// 运行环境自检以"确凿缺失(false)才弹"为语义，null 恒不弹）
+  static Future<bool?> areNotificationsEnabled() async {
+    if (!_isAndroid) return null;
+    try {
+      return await _channel.invokeMethod<bool>('areNotificationsEnabled');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 直弹系统"忽略电池优化"确认框（一键允许；对端已白名单时不弹直接
+  /// true）。 fire-and-forget 语义（结果以 isIgnoring 复查为准）。
+  static Future<void> requestIgnoreBatteryOptimizations() async {
+    if (!_isAndroid) return;
+    try {
+      await _channel
+          .invokeMethod<bool>('requestIgnoreBatteryOptimizations');
+    } catch (_) {}
+  }
+
+  /// 打开系统"应用信息"页（vivo 自启动/后台高耗电开关的可靠落点——
+  /// 厂商无公开跳转接口，应用信息页含这些入口）
+  static Future<void> openAppDetailsSettings() async {
+    if (!_isAndroid) return;
+    try {
+      await _channel.invokeMethod<bool>('openAppDetailsSettings');
+    } catch (_) {}
+  }
+
   /// 阶段 R1：通话运行时权限——语音=RECORD_AUDIO，视频追加 CAMERA
   /// （全部授予才 true；拒绝时不发起通话）。非 Android 平台恒 true。
   static Future<bool> requestCallPermissions({required bool video}) async {
@@ -214,4 +244,131 @@ class AndroidSystem {
       await _channel.invokeMethod<bool>('clearCrashLog');
     } catch (_) {}
   }
+
+  // ============================================================
+  // opt8 功能三：后台来电弹出（系统来电通知 + full-screen intent）
+  // ============================================================
+
+  /// 来电通知（振铃且 App 不在前台时调用；标题/正文由 CallPresentation
+  /// 计算后传入，原生不重复拼文案）。锁屏 full-screen intent / 解锁
+  /// heads-up；通知带"接听/拒绝"action（经 MainActivity 拉起 App 后由
+  /// consumeCallIntent 消费）。Android 13+ 通知权限未授予时原生侧静默。
+  static Future<void> showIncomingCallNotification({
+    required String title,
+    required String body,
+  }) async {
+    if (!_isAndroid) return;
+    try {
+      await _channel.invokeMethod<bool>('showIncomingCallNotification', {
+        'title': title,
+        'body': body,
+      });
+    } catch (_) {}
+  }
+
+  /// 撤除来电通知（接听/拒绝/超时/主叫取消/其他设备接听/回前台等收敛点）
+  static Future<void> cancelIncomingCallNotification() async {
+    if (!_isAndroid) return;
+    try {
+      await _channel.invokeMethod<bool>('cancelIncomingCallNotification');
+    } catch (_) {}
+  }
+
+  /// 拉取并清除来电通知意图（open_call + action）。
+  /// [CallIntentResult.action] = 'accept' | 'decline' | null（null=点通知
+  /// 本体，仅回通话界面）。
+  static Future<CallIntentResult> consumeCallIntent() async {
+    if (!_isAndroid) return const CallIntentResult(open: false);
+    try {
+      final raw = await _channel
+          .invokeMethod<Map<Object?, Object?>>('consumeCallIntent');
+      return CallIntentResult(
+        open: raw?['open'] == true,
+        action: raw?['action'] is String ? raw!['action'] as String : null,
+      );
+    } catch (_) {
+      return const CallIntentResult(open: false);
+    }
+  }
+
+  /// Android 14+ 全屏通知权限是否已授予（低版本恒 true——无需授权）
+  static Future<bool> hasFullScreenIntentPermission() async {
+    if (!_isAndroid) return true;
+    try {
+      return await _channel
+              .invokeMethod<bool>('hasFullScreenIntentPermission') ??
+          true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// 跳转系统"全屏通知"授权设置页（Android 14+；低版本/失败静默）
+  static Future<void> requestFullScreenIntentPermission() async {
+    if (!_isAndroid) return;
+    try {
+      await _channel.invokeMethod<bool>('requestFullScreenIntentPermission');
+    } catch (_) {}
+  }
+
+  /// 清除锁屏显示标志（通话结束/非来电启动路径；避免普通启动覆盖锁屏）
+  static Future<void> clearCallLockFlags() async {
+    if (!_isAndroid) return;
+    try {
+      await _channel.invokeMethod<bool>('clearCallLockFlags');
+    } catch (_) {}
+  }
+
+  // ============================================================
+  // opt8 功能二：Android 通话悬浮球（CallForegroundService overlay）
+  // ============================================================
+
+  /// 是否已授予"显示在其他应用上层"（SYSTEM_ALERT_WINDOW 特殊权限，
+  /// 只能跳系统设置授予）。null = 无法判定（非 Android/通道缺失）——
+  /// 运行环境自检以"确凿缺失(false)才弹"为语义，null 恒不弹；
+  /// 与 areNotificationsEnabled 同一可空语义（勿改回 ?? false 强转，
+  /// 会把"查不到"当成"未授权"误弹引导）。
+  static Future<bool?> hasOverlayPermission() async {
+    if (!_isAndroid) return null;
+    try {
+      return await _channel.invokeMethod<bool>('hasOverlayPermission');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 跳转系统悬浮窗授权设置页（无返回值语义；用户手动开启/关闭）
+  static Future<void> requestOverlayPermission() async {
+    if (!_isAndroid) return;
+    try {
+      await _channel.invokeMethod<bool>('requestOverlayPermission');
+    } catch (_) {}
+  }
+
+  /// 显示通话悬浮球（仅 isInLiveCall 时调用；video 必传——气泡 action
+  /// 不得把进行中的视频 FGS 降级成纯 microphone 类型）
+  static Future<void> showCallBubble({required bool video}) async {
+    if (!_isAndroid) return;
+    try {
+      await _channel.invokeMethod<bool>('showCallBubble', {'video': video});
+    } catch (_) {}
+  }
+
+  /// 隐藏通话悬浮球（通话结束/回前台/dispose 时调用；video 语义同上）
+  static Future<void> hideCallBubble({required bool video}) async {
+    if (!_isAndroid) return;
+    try {
+      await _channel.invokeMethod<bool>('hideCallBubble', {'video': video});
+    } catch (_) {}
+  }
+}
+
+/// opt8 功能三：来电通知意图解析结果
+class CallIntentResult {
+  const CallIntentResult({required this.open, this.action});
+
+  final bool open;
+
+  /// 'accept' | 'decline' | null（null=点通知本体，仅回通话界面）
+  final String? action;
 }

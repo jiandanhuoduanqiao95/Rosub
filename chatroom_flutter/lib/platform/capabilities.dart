@@ -153,6 +153,12 @@ abstract class FileDropCapability {
   void setOnFilesDropped(void Function(List<String> files)? handler);
 }
 
+/// 窗口唤起（opt8 功能三：桌面来电 ringing 时恢复/置前主窗口）
+abstract class WindowActivationCapability {
+  bool get isSupported;
+  Future<void> bringToFront();
+}
+
 class PlatformCapabilities {
   PlatformCapabilities._();
 
@@ -162,12 +168,14 @@ class PlatformCapabilities {
   static SoundCapability? soundOverride;
   static FileLauncherCapability? fileLauncherOverride;
   static FileDropCapability? fileDropOverride;
+  static WindowActivationCapability? windowOverride;
 
   static TargetPlatform? _resolvedPlatform;
   static NotificationCapability? _notification;
   static SoundCapability? _sound;
   static FileLauncherCapability? _fileLauncher;
   static FileDropCapability? _fileDrop;
+  static WindowActivationCapability? _window;
 
   static NotificationCapability get notification {
     if (notificationOverride != null) return notificationOverride!;
@@ -193,9 +201,19 @@ class PlatformCapabilities {
     return _fileDrop!;
   }
 
+  static WindowActivationCapability get window {
+    if (windowOverride != null) return windowOverride!;
+    _resolve();
+    return _window!;
+  }
+
   static PlatformCapabilities _resolve() {
     final platform = effectiveTargetPlatform();
-    if (_resolvedPlatform == platform && _notification != null) {
+    // 缓存命中须校验 _window：只初始化过部分能力的调用点（如仅 sound）
+    // 会让 _window 留空，后续 window getter 永远拿到 null 崩溃
+    if (_resolvedPlatform == platform &&
+        _notification != null &&
+        _window != null) {
       return _instance;
     }
     _resolvedPlatform = platform;
@@ -205,6 +223,7 @@ class PlatformCapabilities {
         _sound = LinuxSoundCapability();
         _fileLauncher = LinuxFileLauncherCapability();
         _fileDrop = FileDrop.instance;
+        _window = LinuxWindowActivationCapability();
         break;
       case TargetPlatform.windows:
         // 阶段 Q2 接入：
@@ -217,6 +236,7 @@ class PlatformCapabilities {
         _sound = WindowsSoundCapability();
         _fileLauncher = DesktopFileLauncher(platform);
         _fileDrop = FileDrop.instance;
+        _window = WindowsWindowActivationCapability();
         break;
       case TargetPlatform.macOS:
         // Q3 接入 Dock bounce / afplay / desktop_drop 类方案
@@ -224,6 +244,7 @@ class PlatformCapabilities {
         _sound = DesktopSoundStub();
         _fileLauncher = DesktopFileLauncher(platform);
         _fileDrop = DesktopFileDropStub();
+        _window = DesktopWindowActivationStub();
         break;
       case TargetPlatform.android:
         // 阶段 Q1-2：Android 端接入按端适配器实现
@@ -232,6 +253,8 @@ class PlatformCapabilities {
         _sound = AndroidSoundCapability();
         _fileLauncher = AndroidFileLauncherCapability();
         _fileDrop = AndroidFileDropStub();
+        // Android 来电走系统通知/full-screen intent，不做窗口唤起
+        _window = DesktopWindowActivationStub();
         break;
       case TargetPlatform.iOS:
       case TargetPlatform.fuchsia:
@@ -239,6 +262,7 @@ class PlatformCapabilities {
         _sound = MobileSoundCapability();
         _fileLauncher = MobileFileLauncher();
         _fileDrop = MobileFileDropStub();
+        _window = DesktopWindowActivationStub();
         break;
     }
     return _instance;
@@ -251,11 +275,13 @@ class PlatformCapabilities {
     soundOverride = null;
     fileLauncherOverride = null;
     fileDropOverride = null;
+    windowOverride = null;
     _resolvedPlatform = null;
     _notification = null;
     _sound = null;
     _fileLauncher = null;
     _fileDrop = null;
+    _window = null;
   }
 }
 
@@ -314,6 +340,47 @@ class LinuxFileLauncherCapability implements FileLauncherCapability {
   }
 }
 
+/// opt8 功能三：Linux 来电唤起——FFI 调用 runner 导出的
+/// `chatroom_bring_to_front`（g_idle_add 主线程执行 deiconify + present，
+/// 未聚焦时补 urgency）。符号缺失（runner 未重编译）或 FFI 异常静默降级；
+/// linux/runner/CMakeLists.txt 的 -Wl,--export-dynamic 不可删（H2 约定）。
+typedef _BringToFrontNative = Void Function();
+typedef _BringToFrontDart = void Function();
+
+class LinuxWindowActivationCapability implements WindowActivationCapability {
+  static DynamicLibrary? _self;
+  _BringToFrontDart? _fn;
+  bool _resolved = false;
+
+  _BringToFrontDart? _resolve() {
+    if (_resolved) return _fn;
+    _resolved = true;
+    try {
+      _self ??= DynamicLibrary.process();
+      _fn = _self!
+          .lookupFunction<_BringToFrontNative, _BringToFrontDart>(
+              'chatroom_bring_to_front');
+    } catch (_) {
+      _fn = null;
+    }
+    return _fn;
+  }
+
+  @override
+  // 平台能力陈述（工厂仅在 Linux 构造本类）；FFI 符号是否可用属运行期
+  // 细节（测试宿主进程无 runner 符号），可用性降级在 bringToFront 内处理
+  bool get isSupported => true;
+
+  @override
+  Future<void> bringToFront() async {
+    final fn = _resolve();
+    if (fn == null) return;
+    try {
+      fn();
+    } catch (_) {}
+  }
+}
+
 // FileDrop（GTK drag channel）直接 implements FileDropCapability，
 // 工厂在 Linux 返回 FileDrop.instance——既有逻辑零改动。
 
@@ -342,6 +409,28 @@ typedef _FindWindowNative = IntPtr Function(Pointer<Utf16>, Pointer<Utf16>);
 typedef _FindWindowDart = int Function(Pointer<Utf16>, Pointer<Utf16>);
 typedef _PlaySoundNative = Int32 Function(Pointer<Utf16>, IntPtr, Uint32);
 typedef _PlaySoundDart = int Function(Pointer<Utf16>, int, int);
+typedef _IsIconicNative = Int32 Function(IntPtr);
+typedef _IsIconicDart = int Function(int);
+typedef _ShowWindowNative = Int32 Function(IntPtr, Int32);
+typedef _ShowWindowDart = int Function(int, int);
+typedef _SetWindowPosNative = Int32 Function(
+    IntPtr, IntPtr, Int32, Int32, Int32, Int32, Uint32);
+typedef _SetWindowPosDart = int Function(
+    int, int, int, int, int, int, int);
+typedef _SetForegroundWindowNative = Int32 Function(IntPtr);
+typedef _SetForegroundWindowDart = int Function(int);
+
+/// 标准 runner 窗口类名（win32_window.cpp kWindowClassName）解析主窗口
+/// 句柄；共享 helper（WindowsNotificationCapability 闪烁与 opt8 窗口唤起
+/// 共用）。解析失败返回 0，调用方静默降级。
+int _resolveRunnerWindowHwnd(DynamicLibrary lib) {
+  final findWindow =
+      lib.lookupFunction<_FindWindowNative, _FindWindowDart>('FindWindowW');
+  final className = 'FLUTTER_RUNNER_WIN32_WINDOW'.toNativeUtf16();
+  final hwnd = findWindow(className, nullptr);
+  calloc.free(className);
+  return hwnd;
+}
 
 /// Windows 任务栏闪烁（win32 FlashWindowEx）。
 ///
@@ -372,12 +461,7 @@ class WindowsNotificationCapability implements NotificationCapability {
     final lib = _lib;
     if (lib == null) return 0;
     try {
-      final findWindow =
-          lib.lookupFunction<_FindWindowNative, _FindWindowDart>('FindWindowW');
-      final className = 'FLUTTER_RUNNER_WIN32_WINDOW'.toNativeUtf16();
-      final hwnd = findWindow(className, nullptr);
-      calloc.free(className);
-      return hwnd;
+      return _resolveRunnerWindowHwnd(lib);
     } catch (_) {
       return 0;
     }
@@ -411,6 +495,89 @@ class WindowsNotificationCapability implements NotificationCapability {
 
   @override
   void clearUrgency() => _flash(_flashwStop);
+}
+
+/// opt8 功能三：Windows 来电唤起（user32 FFI）——最小化先 SW_RESTORE，
+/// SetWindowPos 置顶显示，SetForegroundWindow 抢前台；前台锁（foreground
+/// lock）拒绝时回退 FlashWindowEx 任务栏闪烁兜底。**禁用
+/// AttachThreadInput/模拟按键等侵入手段**（系统行为尊重，失败表现记录
+/// 为已知限制）。窗口句柄经标准 runner 类名解析；user32 缺失/句柄不可得
+/// 时静默降级（Q0-3 FFI 降级惯例）。
+class WindowsWindowActivationCapability implements WindowActivationCapability {
+  static const int _swRestore = 9;
+  static const int _hwndTop = 0;
+  static const int _swpNosize = 0x0001;
+  static const int _swpNomove = 0x0002;
+  static const int _swpShowwindow = 0x0040;
+
+  static const int _flashwAll = 0x3;
+  static const int _flashwTimerNofg = 0xC;
+
+  static DynamicLibrary? _user32;
+
+  DynamicLibrary? get _lib => _user32 ??= _open();
+
+  static DynamicLibrary? _open() {
+    try {
+      return DynamicLibrary.open('user32.dll');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  // 平台能力陈述（工厂仅在 Windows 构造本类）；非 Windows 宿主（测试）
+  // FFI 打不开 user32.dll，降级在 bringToFront 内处理
+  bool get isSupported => true;
+
+  void _flash(int hwnd) {
+    final lib = _lib;
+    if (lib == null) return;
+    try {
+      final flashWindowEx =
+          lib.lookupFunction<_FlashWindowExNative, _FlashWindowExDart>(
+              'FlashWindowEx');
+      final info = calloc<_Flashwinfo>();
+      info.ref
+        ..cbSize = sizeOf<_Flashwinfo>()
+        ..hwnd = hwnd
+        ..dwFlags = _flashwAll | _flashwTimerNofg
+        ..uCount = 0
+        ..dwTimeout = 0;
+      flashWindowEx(info);
+      calloc.free(info);
+    } catch (_) {}
+  }
+
+  @override
+  Future<void> bringToFront() async {
+    final lib = _lib;
+    if (lib == null) return;
+    try {
+      final hwnd = _resolveRunnerWindowHwnd(lib);
+      if (hwnd == 0) return;
+      final isIconic =
+          lib.lookupFunction<_IsIconicNative, _IsIconicDart>('IsIconic');
+      if (isIconic(hwnd) != 0) {
+        final showWindow =
+            lib.lookupFunction<_ShowWindowNative, _ShowWindowDart>(
+                'ShowWindow');
+        showWindow(hwnd, _swRestore);
+      }
+      final setWindowPos =
+          lib.lookupFunction<_SetWindowPosNative, _SetWindowPosDart>(
+              'SetWindowPos');
+      setWindowPos(hwnd, _hwndTop, 0, 0, 0, 0,
+          _swpNomove | _swpNosize | _swpShowwindow);
+      final setForegroundWindow = lib
+          .lookupFunction<_SetForegroundWindowNative, _SetForegroundWindowDart>(
+              'SetForegroundWindow');
+      if (setForegroundWindow(hwnd) == 0) {
+        // Windows 前台锁拒绝抢焦点 → 任务栏持续闪烁兜底
+        _flash(hwnd);
+      }
+    } catch (_) {}
+  }
 }
 
 /// Windows 提示音（winmm PlaySoundW）。
@@ -531,6 +698,16 @@ class DesktopFileDropStub implements FileDropCapability {
 
   @override
   void setOnFilesDropped(void Function(List<String> files)? handler) {}
+}
+
+/// opt8 功能三：窗口唤起占位（Android/iOS/macOS——Android 来电走系统
+/// 通知/full-screen intent；macOS Q3 接入 NSApplication activate 类方案）
+class DesktopWindowActivationStub implements WindowActivationCapability {
+  @override
+  bool get isSupported => false;
+
+  @override
+  Future<void> bringToFront() async {}
 }
 
 // ============================================================

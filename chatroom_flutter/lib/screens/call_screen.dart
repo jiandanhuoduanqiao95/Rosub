@@ -43,6 +43,17 @@ class _CallScreenState extends State<CallScreen> {
   /// 自动返回已执行标志（防 idle 通知重复 pop / 返回链递归）
   bool _autoPopped = false;
 
+  /// opt8 功能一：接通后舞台点击切换顶部信息条/底部控制排显隐。
+  /// 仅 connecting/active 舞台使用；ended 强制恢复可见（结束原因不被遮挡）。
+  bool _chromeVisible = true;
+
+  void _toggleChrome() => setState(() => _chromeVisible = !_chromeVisible);
+
+  void _hideChrome() {
+    if (!_chromeVisible) return;
+    setState(() => _chromeVisible = false);
+  }
+
   CallService get _svc => widget.callService;
 
   @override
@@ -149,6 +160,10 @@ class _CallScreenState extends State<CallScreen> {
     if (_svc.isGroupCall) {
       unawaited(_syncGroupRenderers());
     }
+    // opt8 功能一：结束原因必须可见——隐藏态进入 ended 强制恢复上下栏
+    if (_svc.phase == CallPhase.ended) {
+      _chromeVisible = true;
+    }
     if (mounted) setState(() {});
   }
 
@@ -178,18 +193,7 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   Future<void> _accept() async {
-    final granted = await AndroidSystem.requestCallPermissions(
-        video: _svc.type == CallType.video);
-    if (!granted) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('需要麦克风/摄像头权限才能接听')),
-        );
-      }
-      _svc.rejectIncoming();
-      return;
-    }
-    await _svc.acceptIncoming();
+    await acceptIncomingCallFlow(context, _svc);
   }
 
   String get _typeLabel => _svc.type == CallType.video ? '视频通话' : '语音通话';
@@ -269,22 +273,57 @@ class _CallScreenState extends State<CallScreen> {
             if (showStage) ...[
               Positioned.fill(
                 child: SafeArea(
-                  child: (_svc.type == CallType.video && !_renderersReady)
-                      ? _buildStagePending()
-                      : _buildStage(),
+                  // opt8 功能一：点击舞台任意位置收起/恢复上下栏。
+                  // opaque 保证 RTCVideoView（Texture 层）不吃掉点击；
+                  // 与上层栏的手势竞争由 Stack 命中顺序裁决（上层栏优先）
+                  child: GestureDetector(
+                    key: const Key('call_stage'),
+                    behavior: HitTestBehavior.opaque,
+                    onTap: _toggleChrome,
+                    child: (_svc.type == CallType.video && !_renderersReady)
+                        ? _buildStagePending()
+                        : _buildStage(),
+                  ),
                 ),
               ),
+              // opt8 功能一：上下栏可收起——AnimatedOpacity 淡入淡出
+              // （不用 Visibility/Offstage，避免布局跳动与 finder 漂移）；
+              // IgnorePointer 必须随隐藏置位，否则透明度为 0 的栏仍吃点击
               Positioned(
                 top: topInset + 8,
                 left: 12,
                 right: 12,
-                child: _buildStageHeaderBar(),
+                child: IgnorePointer(
+                  ignoring: !_chromeVisible,
+                  child: AnimatedOpacity(
+                    key: const Key('call_stage_header'),
+                    opacity: _chromeVisible ? 1 : 0,
+                    duration: const Duration(milliseconds: 180),
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _hideChrome,
+                      child: _buildStageHeaderBar(),
+                    ),
+                  ),
+                ),
               ),
               Positioned(
                 left: 0,
                 right: 0,
                 bottom: 0,
-                child: _buildStageControlsBar(phase),
+                child: IgnorePointer(
+                  ignoring: !_chromeVisible,
+                  child: AnimatedOpacity(
+                    key: const Key('call_stage_controls'),
+                    opacity: _chromeVisible ? 1 : 0,
+                    duration: const Duration(milliseconds: 180),
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _hideChrome,
+                      child: _buildStageControlsBar(phase),
+                    ),
+                  ),
+                ),
               ),
               // gc3 微信式：视频通话自己为可拖动悬浮小窗（1:1 与群一致）
               if (_svc.type == CallType.video) _buildStageSelfPip(context),
@@ -654,6 +693,9 @@ class _CallScreenState extends State<CallScreen> {
       left: pos.dx,
       top: pos.dy,
       child: GestureDetector(
+        key: const Key('call_stage_self_pip'),
+        // opt8 功能一：点小窗同样切换上下栏（拖动超 touch slop 不触发 tap）
+        onTap: _toggleChrome,
         onPanUpdate: (details) => setState(() {
           _pipOffset =
               _clampPip((_pipOffset ?? fallback) + details.delta, screen);
@@ -847,6 +889,27 @@ class _CallScreenState extends State<CallScreen> {
       ),
     );
   }
+}
+
+/// 统一接听入口（opt8 功能三提取——通话页接听键与来电通知"接听"action
+/// 共用，文案/权限语义单一来源）：请求运行时权限；拒绝时自动 reject
+/// 来电并提示（主叫侧收到拒绝信令）。
+Future<void> acceptIncomingCallFlow(
+  BuildContext context,
+  CallService callService,
+) async {
+  final granted = await AndroidSystem.requestCallPermissions(
+      video: callService.type == CallType.video);
+  if (!granted) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('需要麦克风/摄像头权限才能接听')),
+      );
+    }
+    callService.rejectIncoming();
+    return;
+  }
+  await callService.acceptIncoming();
 }
 
 /// 发起一对一通话的统一入口（ChatScreen 头部按钮调用）：

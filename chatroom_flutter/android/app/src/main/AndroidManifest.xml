@@ -9,6 +9,16 @@
     <!-- Q1 真机反馈二轮：应用外新消息通知（横幅/提示音）与震动 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
+    <!-- opt8 功能三：来电 full-screen intent（锁屏全屏显示通话页；
+         Android 14+ 需用户在设置中授予"全屏通知"权限，未授予时系统
+         自动降级 heads-up，通知仍发送 -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+    <!-- opt8 功能二：通话悬浮球（TYPE_APPLICATION_OVERLAY；特殊权限，
+         只能跳系统设置"显示在其他应用上层"授予，不可 requestPermissions） -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+    <!-- opt8 运行环境自检：直弹系统"忽略电池优化"确认框（一键允许），
+         免去翻设置页——OneUI/OriginOS 深度休眠杀后台的前置防御 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <!-- Q1 五轮（问题1 重大回归修复）：恢复生命周期门控前台服务——
          无前台状态时国产 ROM 深度休眠冻结/回收进程，后台收不到消息；
          前台服务是后台收消息的唯一可靠机制（通知仅后台期间存在） -->

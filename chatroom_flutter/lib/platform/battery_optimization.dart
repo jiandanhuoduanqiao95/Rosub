@@ -16,7 +16,6 @@
 /// 不再提醒）。SharedPreferences/通道异常一律按"不弹"安全降级。
 
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'capabilities.dart';
 import 'capabilities_android.dart';
@@ -27,6 +26,10 @@ abstract class BatteryOptimizationCapability {
 
   /// 跳转电池优化设置页；false = 失败/不适用
   Future<bool> openSettings();
+
+  /// 直弹系统"忽略电池优化"确认框（一键允许，无需翻设置页；
+  /// 需 manifest REQUEST_IGNORE_BATTERY_OPTIMIZATIONS）；false = 失败/不适用
+  Future<bool> requestIgnore();
 }
 
 class AndroidBatteryOptimization implements BatteryOptimizationCapability {
@@ -50,6 +53,17 @@ class AndroidBatteryOptimization implements BatteryOptimizationCapability {
       return false;
     }
   }
+
+  @override
+  Future<bool> requestIgnore() async {
+    try {
+      return await platformChannel
+              .invokeMethod<bool>('requestIgnoreBatteryOptimizations') ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
 }
 
 /// 桌面/非 Android：无电池优化语义（isIgnoring null → 引导恒不弹）
@@ -59,6 +73,9 @@ class UnsupportedBatteryOptimization implements BatteryOptimizationCapability {
 
   @override
   Future<bool> openSettings() async => false;
+
+  @override
+  Future<bool> requestIgnore() async => false;
 }
 
 class BatteryOptimization {
@@ -88,62 +105,9 @@ class BatteryOptimization {
   }
 }
 
-/// 本次安装内"已提醒过"的持久化键（任一出口置 true）
-const String batteryGuideDismissedKey = 'battery_guide_dismissed';
-
-/// 进入聊天页时检查并按需弹出电池优化白名单引导（Q1-4）
-///
-/// 仅 Android 且 isIgnoring()==false 且未提醒过时弹出；桌面（null 链）
-/// 与已白名单/已提醒场景均为无操作。SharedPreferences 异常按"未提醒
-/// 过"处理（不崩）；弹窗关闭后持久化 dismissed，"去设置"再跳系统页。
-Future<void> maybeShowBatteryOptimizationGuide(BuildContext context) async {
-  bool? ignoring;
-  try {
-    ignoring = await BatteryOptimization.instance.isIgnoring();
-  } catch (_) {
-    return;
-  }
-  if (ignoring == null || ignoring) return;
-  if (!context.mounted) return;
-
-  bool dismissed = false;
-  try {
-    final prefs = await SharedPreferences.getInstance();
-    dismissed = prefs.getBool(batteryGuideDismissedKey) ?? false;
-  } catch (_) {
-    dismissed = false;
-  }
-  if (dismissed || !context.mounted) return;
-
-  final goSettings = await showDialog<bool>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: const Text('电池优化白名单'),
-      content: const Text(
-        '部分手机厂商（如三星 OneUI、vivo OriginOS）会在深度休眠时'
-        '结束后台应用，导致消息延迟送达。\n\n'
-        '建议将本应用加入电池优化白名单：后台仍仅在前台连接收消息，'
-        '退后台后可离线查看本地缓存消息。',
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(ctx, false),
-          child: const Text('暂不'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(ctx, true),
-          child: const Text('去设置'),
-        ),
-      ],
-    ),
-  );
-
-  try {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(batteryGuideDismissedKey, true);
-  } catch (_) {}
-
-  if (goSettings == true) {
-    await BatteryOptimization.instance.openSettings();
-  }
-}
+// 电池白名单引导 UI 已并入 widgets/dialogs.dart 的"运行环境自检"
+// （maybeShowEnvironmentCheckDialog，opt8）：与通知/悬浮窗/vivo 自启动
+// 合并为一次引导，电池项走上面的 requestIgnore 直弹系统确认框。
+// 旧 maybeShowBatteryOptimizationGuide 已删除（Q1-4 引导契约由新自检
+// 语义覆盖，见 battery_optimization_stage_q1_test 与
+// env_check_dialog_opt8_test）。

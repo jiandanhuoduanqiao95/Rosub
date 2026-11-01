@@ -16,10 +16,10 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../l10n/app_strings.dart';
 import '../models/chat_models.dart';
 import '../platform/android_system.dart';
-import '../platform/battery_optimization.dart';
 import '../platform/capabilities.dart';
 import '../screens/call_screen.dart';
 import '../services/call_service.dart';
+import '../services/call_presentation.dart';
 import '../services/chat_exporter.dart';
 import '../services/app_paths.dart';
 import '../services/export_saver.dart';
@@ -61,6 +61,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   /// 阶段 R1：通话界面路由占用标志（防重复 push；关闭后复位）
   bool _callRouteOpen = false;
+
+  /// opt8 功能三：App 是否处于前台（resumed）。振铃期来电通知只在
+  /// 后台补发（前台 CallScreen 已直接弹出）；paused/resumed 时刷新。
+  bool _appResumed = true;
+
+  /// opt8 功能三：桌面来电唤起防重标志（振铃期 _onCallChanged 可能
+  /// 多次触发，只抢一次焦点；离开 ringing 复位）。
+  bool _desktopCallBrought = false;
+
+  /// opt8 功能二：悬浮球已请求显示标志（防止未显示过时调用 hide——
+  /// 前台 idle/resume 会无端给服务发 hide action 甚至无意义启动 FGS）
+  bool _bubbleRequested = false;
 
   /// 阶段 M2：群邀请以入口保留（AppBar badge + 列表对话框），无即时弹窗
 
@@ -115,9 +127,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (!mounted) return;
       await AndroidSystem.requestNotificationPermission();
       if (!mounted) return;
-      await maybeShowBatteryOptimizationGuide(context);
+      // opt8：运行环境自检（通知/电池白名单/悬浮窗确凿缺失才弹一次；
+      // vivo 自启动指引并入；替代 Q1-4 单项电池引导）
+      await maybeShowEnvironmentCheckDialog(context);
       if (!mounted) return;
       await _maybeShowLastCrashDialog();
+      if (!mounted) return;
+      // opt8 功能三：冷启动/warm start 时来电通知可能已置入 pending
+      // intent（onCreate 路径）——首帧后消费一次，不只在 resumed 时
+      await _handleCallIntent();
     });
     // 阶段 O1 修订（2026-08-31 多公告并存）：进入聊天页时对当前会话
     // （重连恢复场景）拉取群公告历史
@@ -133,29 +151,112 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused) {
+      _appResumed = false;
       unawaited(AndroidSystem.startKeepAlive());
+      // opt8 功能二：退后台且通话进行中 → 系统悬浮球（ringing 不显示，
+      // 来电通知接管）；未显示过球时是 no-op
+      _syncSystemBubble();
+      // opt8 功能三：退后台时若正在振铃（paused 前台振铃不发通知），
+      // 补发系统来电通知；非振铃路径为 no-op/撤除
+      _syncIncomingNotification();
     } else if (state == AppLifecycleState.resumed) {
+      _appResumed = true;
       unawaited(AndroidSystem.stopKeepAlive());
       // opt1 P6：用户可能刚点了通知栏"通话中"通知——拉取回通话意图
-      unawaited(_handleOpenCallIntent());
+      //（opt8 扩展为统一来电意图消费：接听/拒绝 action 亦在此执行）
+      unawaited(_handleCallIntent());
+      // opt8 功能二/三：回前台取消来电通知与悬浮球（应用内悬浮条接管）
+      unawaited(AndroidSystem.cancelIncomingCallNotification());
+      _syncSystemBubble();
     }
   }
 
-  /// opt1 P6：通话通知点击 → 回到通话界面。MainActivity 经通知
-  /// contentIntent（extra open_call=1）置位标志，此处拉取后 restore
-  /// （notifyListeners → onCallPhaseChanged → _onCallChanged push，
-  /// pop 职责契约不动）；通话已结束（冷启动残留标志）则忽略——
-  /// 不承诺恢复已死的媒体会话。
-  Future<void> _handleOpenCallIntent() async {
-    final pending = await AndroidSystem.consumeOpenCallIntent();
-    if (!pending || !mounted) return;
+  /// opt8 功能三：来电通知意图消费（扩展自 opt1 P6 _handleOpenCallIntent）。
+  /// - open_call=1 + 无 action → 回通话界面（最小化则 restore，pop 职责
+  ///   契约不动）；
+  /// - action=accept → 按类型请求权限后 acceptIncoming（拒绝权限自动
+  ///   reject）；
+  /// - action=decline → rejectIncoming（v1 已接受"拒绝短暂拉起 App"取舍）；
+  /// - 通话已结束（冷启动残留标志）→ 仅清理通知与锁屏标志。
+  Future<void> _handleCallIntent() async {
+    final intent = await AndroidSystem.consumeCallIntent();
+    if (!intent.open || !mounted) return;
     try {
       final svc = widget.socketService.callService;
-      if (svc.isInLiveCall && svc.minimized) {
-        svc.restore();
+      if (!svc.isInLiveCall) {
+        unawaited(AndroidSystem.cancelIncomingCallNotification());
+        unawaited(AndroidSystem.clearCallLockFlags());
+        return;
+      }
+      switch (intent.action) {
+        case 'accept':
+          await _acceptCallFromIntent(svc);
+          break;
+        case 'decline':
+          unawaited(AndroidSystem.cancelIncomingCallNotification());
+          svc.rejectIncoming();
+          break;
+        default:
+          if (svc.minimized) svc.restore();
       }
     } catch (_) {
       // Mock 测试未 stub callService getter——纯增益通道静默降级
+    }
+  }
+
+  /// opt8 功能三：来电通知"接听"action——振铃中才执行（通知残留的
+  /// 过期 action 忽略）；权限拒绝自动 reject 并提示。
+  Future<void> _acceptCallFromIntent(CallService svc) async {
+    if (svc.phase != CallPhase.ringing) {
+      if (svc.minimized) svc.restore();
+      return;
+    }
+    await acceptIncomingCallFlow(context, svc);
+  }
+
+  /// opt8 功能三：来电通知同步——振铃且 App 不在前台发系统来电通知
+  /// （前台振铃由 CallScreen 接管，不发高优先级通知）；其余状态撤除。
+  /// 标题/正文由 CallPresentation 计算（文案可单测）。
+  void _syncIncomingNotification() {
+    if (effectiveTargetPlatform() != TargetPlatform.android) return;
+    if (!CallPresentation.shouldShowIncomingNotification(
+      phase: _callSnapshotPhase,
+      appResumed: _appResumed,
+    )) {
+      unawaited(AndroidSystem.cancelIncomingCallNotification());
+      return;
+    }
+    final title = CallPresentation.displayName(
+      isGroup: _callSnapshotIsGroup,
+      peer: _callSnapshotPeer,
+      groupName: _callSnapshotGroupName,
+    );
+    final body = CallPresentation.incomingBody(
+      isGroup: _callSnapshotIsGroup,
+      video: _callSnapshotType == CallType.video,
+    );
+    unawaited(AndroidSystem.showIncomingCallNotification(
+        title: title, body: body));
+  }
+
+  /// opt8 功能二：系统悬浮球同步（仅 Android；前台不显示，应用内
+  /// 悬浮条接管）。_bubbleRequested 防止从未显示过球时调用 hide——
+  /// 否则前台 idle/resume 会无端给 CallForegroundService 发 hide action。
+  void _syncSystemBubble() {
+    if (effectiveTargetPlatform() != TargetPlatform.android) return;
+    final visible = CallPresentation.shouldShowCallBubble(
+      phase: _callSnapshotPhase,
+      appResumed: _appResumed,
+    );
+    final video = _callSnapshotType == CallType.video;
+    if (visible) {
+      if (_bubbleRequested) return;
+      _bubbleRequested = true;
+      unawaited(AndroidSystem.showCallBubble(video: video));
+    } else {
+      if (!_bubbleRequested) return;
+      _bubbleRequested = false;
+      unawaited(AndroidSystem.hideCallBubble(video: video));
     }
   }
 
@@ -181,8 +282,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // 启动后残留）；未启动时 stopService 为无害 no-op
     if (effectiveTargetPlatform() == TargetPlatform.android) {
       unawaited(AndroidSystem.stopKeepAlive());
+      // opt8 功能二：悬浮球双保险撤除（仅在确实请求过显示时才 hide，
+      // 避免 hide 反而把服务拉起；hide 先于 FGS 停止——任务书 6.6.4
+      // 规定顺序，服务存活时 hide action 才可靠移除球视图）
+      if (_bubbleRequested) {
+        _bubbleRequested = false;
+        unawaited(AndroidSystem.hideCallBubble(
+            video: _callSnapshotType == CallType.video));
+      }
       // opt1 P5：通话 FGS 双保险撤除（正常路径经 _onCallChanged 已停）
       unawaited(AndroidSystem.stopCallForeground());
+      // opt8 功能三：来电通知与锁屏标志双保险撤除
+      unawaited(AndroidSystem.cancelIncomingCallNotification());
+      unawaited(AndroidSystem.clearCallLockFlags());
     }
     PlatformCapabilities.fileDrop.setOnFilesDropped(null);
     _draftDebounce?.cancel();
@@ -1332,10 +1444,26 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _callSnapshotActiveSince = svc.activeSince;
     _callSnapshotEndReason = svc.endReason;
     _callSnapshotMinimized = svc.minimized;
+    // opt8 功能三：来电通知/悬浮球文案所需快照
+    _callSnapshotIsGroup = svc.isGroupCall;
+    _callSnapshotGroupName = svc.groupName;
+    _callSnapshotType = svc.type;
+    // opt8 功能二：悬浮球（后台 calling/connecting/active）。hide 先于
+    // FGS 停止——服务存活时 hide action 才可靠移除球视图（停止路径的
+    // onDestroy 兜底亦可移除，但先 hide 是任务书规定的双保险顺序）
+    _syncSystemBubble();
     _syncCallForegroundService(svc);
+    // opt8 功能三：来电通知（振铃+后台）与结束收敛撤除
+    _syncIncomingNotification();
     if (svc.phase == CallPhase.idle) {
       _callPillPos = null;
       _callPillCollapsed = false;
+    }
+    // opt8 功能三：离开 live call（teardown 后的 ended 展示期即清）——
+    // 撤除来电通知与锁屏显示标志（避免普通启动覆盖锁屏）
+    if (!svc.isInLiveCall) {
+      unawaited(AndroidSystem.cancelIncomingCallNotification());
+      unawaited(AndroidSystem.clearCallLockFlags());
     }
     if (mounted) setState(() {});
     if (!svc.minimized && svc.phase != CallPhase.idle && !_callRouteOpen) {
@@ -1347,6 +1475,20 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           ))
           .then((_) => _callRouteOpen = false);
     }
+    // opt8 功能三：桌面来电唤起——仅 ringing + Linux/Windows（去电
+    // calling 不抢焦点；Android 走系统通知）。振铃期本回调可能多次
+    // 触发，_desktopCallBrought 防重复；离开 ringing 复位。能力幂等，
+    // 已在前台时 gtk_window_present/SetForegroundWindow 无副作用。
+    if (_callSnapshotPhase != CallPhase.ringing) {
+      _desktopCallBrought = false;
+    } else if (!_desktopCallBrought &&
+        CallPresentation.shouldBringDesktopCallToFront(
+          phase: _callSnapshotPhase,
+          platform: effectiveTargetPlatform(),
+        )) {
+      _desktopCallBrought = true;
+      unawaited(PlatformCapabilities.window.bringToFront());
+    }
     setState(() {});
   }
 
@@ -1357,6 +1499,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   DateTime? _callSnapshotActiveSince;
   String? _callSnapshotEndReason;
   bool _callSnapshotMinimized = false;
+
+  // opt8 功能三：来电通知/悬浮球所需快照（isGroup/groupName/type）
+  bool _callSnapshotIsGroup = false;
+  String? _callSnapshotGroupName;
+  CallType? _callSnapshotType;
 
   // opt1：悬浮条拖动位置（null = 默认位左下角，避开列表头部功能行）
   // 与两态开关（false = 胶囊展开态，true = 圆点收起态）

@@ -39,20 +39,68 @@ class MainActivity : FlutterActivity() {
         // Q1 真机反馈二轮（首开闪退待定位）：Java 层未捕获异常面包屑——
         // 落盘 crash_log.txt，下次启动 Dart 侧读取展示（复制回传排查）
         installCrashLogger()
-        // opt1 P6：通话通知点击（冷启动路径）——标记待消费的回通话意图，
-        // Dart 侧经 consumeOpenCallIntent 拉取后恢复通话界面
-        if (intent?.getBooleanExtra(CallForegroundService.EXTRA_OPEN_CALL, false)
-            == true
-        ) {
-            openCallIntentPending = true
-        }
+        // opt8 功能三：来电通知点击/action（冷启动路径）统一处理——
+        // open_call 置位 + call_action 记录 + call_lockscreen 锁屏显示
+        handleCallIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        // opt1 P6：通话通知点击（进程存活路径，singleTop 走 onNewIntent）
-        if (intent.getBooleanExtra(CallForegroundService.EXTRA_OPEN_CALL, false)) {
+        // opt1 P6 / opt8 功能三：通话通知与来电通知点击（进程存活路径，
+        // singleTop 走 onNewIntent）
+        handleCallIntent(intent)
+    }
+
+    /**
+     * opt8 功能三：来电/通话通知意图统一处理。
+     * - open_call=1 → openCallIntentPending 置位 + pendingCallAction 记录
+     *   （accept/decline，Dart 侧 consumeCallIntent 消费后执行）；
+     * - call_lockscreen=1（**仅来电通知携带**）→ 锁屏显示/点亮屏幕；
+     *   FGS"通话中"通知不带该 extra，普通启动不覆盖锁屏（隐私红线）。
+     * 非 open_call 的普通启动不动 pendingCallAction。
+     */
+    private fun handleCallIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra(CallForegroundService.EXTRA_OPEN_CALL, false)
+            == true
+        ) {
             openCallIntentPending = true
+            pendingCallAction = intent.getStringExtra(EXTRA_CALL_ACTION)
+            if (intent.getBooleanExtra(EXTRA_CALL_LOCKSCREEN, false)) {
+                applyCallLockFlags()
+            }
+        }
+    }
+
+    private fun applyCallLockFlags() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                setShowWhenLocked(true)
+                setTurnScreenOn(true)
+            } else {
+                @Suppress("DEPRECATION")
+                window.addFlags(
+                    android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                            android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                )
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    /** 通话结束/非来电路径清除锁屏标志（避免普通启动覆盖锁屏） */
+    private fun clearCallLockFlagsInternal() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                setShowWhenLocked(false)
+                setTurnScreenOn(false)
+            } else {
+                @Suppress("DEPRECATION")
+                window.clearFlags(
+                    android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                            android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                )
+            }
+        } catch (_: Exception) {
         }
     }
 
@@ -96,6 +144,105 @@ class MainActivity : FlutterActivity() {
                     // ---- opt1 P6：通话通知渠道（应用启动时删除重建——
                     // FGS 内删除渠道会 SecurityException 崩溃，真机实锤） ----
                     "setupCallChannel" -> setupCallChannel(result)
+                    // ---- opt8 功能三：来电通知（full-screen intent）----
+                    "showIncomingCallNotification" -> {
+                        IncomingCallNotifier.show(
+                            this,
+                            call.argument<String>("title") ?: "",
+                            call.argument<String>("body") ?: "",
+                        )
+                        result.success(true)
+                    }
+                    "cancelIncomingCallNotification" -> {
+                        IncomingCallNotifier.cancel(this)
+                        result.success(true)
+                    }
+                    // opt8：来电渠道随 setupCallChannel 在启动路径同步创建
+                    // （ensureChannel 幂等，仅 create 不 delete——FGS 运行中
+                    // 禁止删除渠道；复审修订：无独立 Dart 调用点，
+                    // 勿恢复独立 setupIncomingCallChannel 通道——死代码）
+                    "consumeCallIntent" -> {
+                        result.success(
+                            mapOf(
+                                "open" to openCallIntentPending,
+                                "action" to pendingCallAction
+                            )
+                        )
+                        openCallIntentPending = false
+                        pendingCallAction = null
+                    }
+                    "hasFullScreenIntentPermission" -> result.success(
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                            (getSystemService(Context.NOTIFICATION_SERVICE)
+                                    as NotificationManager).canUseFullScreenIntent()
+                        } else {
+                            true
+                        }
+                    )
+                    "requestFullScreenIntentPermission" -> {
+                        try {
+                            // ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT 为 API 34
+                            // 才存在（勿降回 Q 判定——Android 10~13 会
+                            // ActivityNotFoundException 被吞成 false，按钮看似
+                            // 可点实则无跳转）；低版本无需授权恒 true
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                                startActivity(
+                                    Intent(
+                                        Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                                        Uri.parse("package:$packageName")
+                                    )
+                                )
+                                result.success(true)
+                            } else {
+                                result.success(false)
+                            }
+                        } catch (e: Exception) {
+                            result.success(false)
+                        }
+                    }
+                    "clearCallLockFlags" -> {
+                        clearCallLockFlagsInternal()
+                        result.success(true)
+                    }
+                    // ---- opt8 功能二：通话悬浮球（SYSTEM_ALERT_WINDOW）----
+                    "hasOverlayPermission" -> result.success(
+                        Settings.canDrawOverlays(this)
+                    )
+                    "requestOverlayPermission" -> {
+                        try {
+                            startActivity(
+                                Intent(
+                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:$packageName")
+                                )
+                            )
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.success(false)
+                        }
+                    }
+                    "showCallBubble" -> {
+                        try {
+                            CallForegroundService.showBubble(
+                                this,
+                                call.argument<Boolean>("video") ?: false,
+                            )
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.success(false)
+                        }
+                    }
+                    "hideCallBubble" -> {
+                        try {
+                            CallForegroundService.hideBubble(
+                                this,
+                                call.argument<Boolean>("video") ?: false,
+                            )
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.success(false)
+                        }
+                    }
                     // ---- Q1 真机反馈二轮：保活 / 通知 / 返回 / 崩溃日志 ----
                     "startKeepAlive" -> {
                         try {
@@ -133,9 +280,13 @@ class MainActivity : FlutterActivity() {
                             result.success(false)
                         }
                     }
+                    // opt1 P6 兼容通道（opt8 复审修订）：与 consumeCallIntent
+                    // 同步清 pendingCallAction——旧路径残留过期 action 会让
+                    // 后续来电意图消费误执行 accept/decline
                     "consumeOpenCallIntent" -> {
                         result.success(openCallIntentPending)
                         openCallIntentPending = false
+                        pendingCallAction = null
                     }
                     "showMessageNotification" -> {
                         showMessageNotification(
@@ -184,6 +335,45 @@ class MainActivity : FlutterActivity() {
                             )
                         } else {
                             result.success(true)
+                        }
+                    }
+                    // ---- opt8：运行环境自检（通知/电池/悬浮窗/应用信息）----
+                    "areNotificationsEnabled" -> result.success(
+                        NotificationManagerCompat.from(this).areNotificationsEnabled()
+                    )
+                    "requestIgnoreBatteryOptimizations" -> {
+                        try {
+                            val pm = getSystemService(POWER_SERVICE) as PowerManager
+                            if (pm.isIgnoringBatteryOptimizations(packageName)) {
+                                result.success(true)
+                            } else {
+                                // 直弹系统确认框（一键允许；须声明
+                                // REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 权限）
+                                startActivity(
+                                    Intent(
+                                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                        Uri.parse("package:$packageName")
+                                    )
+                                )
+                                result.success(true)
+                            }
+                        } catch (e: Exception) {
+                            result.success(false)
+                        }
+                    }
+                    "openAppDetailsSettings" -> {
+                        try {
+                            // vivo 自启动/后台高耗电无公开跳转接口——应用信息页
+                            // 是可靠落点（OriginOS 该页含自启动/电池入口）
+                            startActivity(
+                                Intent(
+                                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                    Uri.parse("package:$packageName")
+                                )
+                            )
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.success(false)
                         }
                     }
                     // ---- 阶段 R1：通话运行时权限（audio=RECORD_AUDIO，
@@ -345,6 +535,10 @@ class MainActivity : FlutterActivity() {
                 enableVibration(false)
             }
             manager.createNotificationChannel(channel)
+            // opt8 功能三：来电渠道在应用启动路径同步创建/更新
+            // （IMPORTANCE_HIGH；仅 create 幂等，勿 delete——启动路径 FGS
+            // 未运行，但保持与通话 FGS 通知渠道一致的安全惯例）
+            IncomingCallNotifier.ensureChannel(this)
             result.success(true)
         } catch (_: Exception) {
             result.success(false)
@@ -664,5 +858,16 @@ class MainActivity : FlutterActivity() {
          * Dart 侧 consumeOpenCallIntent 拉取并清除） */
         @Volatile
         var openCallIntentPending: Boolean = false
+
+        /** opt8 功能三：来电通知 action（accept/decline，点击通知按钮
+         * 时由 PendingIntent extra 带入，Dart 侧 consumeCallIntent 消费） */
+        const val EXTRA_CALL_ACTION = "call_action"
+
+        /** opt8 功能三：仅来电通知携带——锁屏显示/点亮屏幕；
+         * FGS"通话中"通知与普通启动不带，避免覆盖锁屏（隐私红线） */
+        const val EXTRA_CALL_LOCKSCREEN = "call_lockscreen"
+
+        @Volatile
+        var pendingCallAction: String? = null
     }
 }

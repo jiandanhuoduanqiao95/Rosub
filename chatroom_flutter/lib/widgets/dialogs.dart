@@ -28,6 +28,8 @@ import '../services/socket_service.dart';
 import '../services/sticker_store.dart';
 import '../services/state_manager.dart';
 import '../services/taskbar_notifier.dart';
+import '../platform/battery_optimization.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/theme_settings.dart';
 
 // ============================================================
@@ -1504,6 +1506,29 @@ void showSettingsDialog(BuildContext context) {
                       if (v) TaskbarNotifier.ensureDndEndInFuture();
                     }),
                   ),
+                  // ---- opt8 功能二/三：通话权限入口（仅 Android 渲染）----
+                  if (effectiveTargetPlatform() == TargetPlatform.android) ...[
+                    const _CallPermissionTile(
+                      title: '通话悬浮球',
+                      hint: '通话中退到桌面时显示，点击直接回到通话',
+                      deniedText: '未开启——需要"显示在其他应用上层"权限',
+                      status: AndroidSystem.hasOverlayPermission,
+                      request: AndroidSystem.requestOverlayPermission,
+                      buttonKey: Key('call_bubble_permission_entry'),
+                    ),
+                    const _CallPermissionTile(
+                      title: '锁屏全屏来电',
+                      hint: '锁屏来电时全屏显示通话页，解锁来电显示横幅',
+                      deniedText: '未开启——锁屏来电仅显示横幅（Android 14+ 需"全屏通知"权限）',
+                      status: AndroidSystem.hasFullScreenIntentPermission,
+                      request: AndroidSystem.requestFullScreenIntentPermission,
+                      buttonKey: Key('fullscreen_call_permission_entry'),
+                      // Android 10~13 无"全屏通知"系统页（API 34 才有
+                      // 该 action）且恒已授权——授权态不显示入口按钮，
+                      // 避免"可点但无反应"的死按钮
+                      viewWhenGranted: false,
+                    ),
+                  ],
                   if (TaskbarNotifier.dndEnabled)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
@@ -1766,6 +1791,313 @@ void showSettingsDialog(BuildContext context) {
       },
     ),
   );
+}
+
+/// opt8 功能二/三：通话相关系统权限入口（仅 Android 渲染）——悬浮窗
+/// （悬浮球）与全屏通知（锁屏全屏来电页）。设置页主动入口，不启动时
+/// 申请；权限拒绝仅功能降级不崩溃（悬浮球→P6 通知入口，全屏→heads-up）。
+/// 状态异步查询（null=查询中显示 hint）；点"去开启"跳系统授权页，返回
+/// 后延迟重查刷新状态。
+class _CallPermissionTile extends StatefulWidget {
+  const _CallPermissionTile({
+    required this.title,
+    required this.hint,
+    required this.deniedText,
+    required this.status,
+    required this.request,
+    required this.buttonKey,
+    this.viewWhenGranted = true,
+  });
+
+  final String title;
+  final String hint;
+  final String deniedText;
+
+  /// 授权后是否保留"查看"入口（跳系统设置页）。跳转在所有版本都可用
+  /// 的权限（悬浮窗）保持 true；**API<34 无对应系统页的权限（全屏通知）
+  /// 必须传 false**——授权态恒"已开启"，避免"可点但无反应"的死按钮。
+  final bool viewWhenGranted;
+
+  final Future<bool?> Function() status;
+  final Future<void> Function() request;
+  final Key buttonKey;
+
+  @override
+  State<_CallPermissionTile> createState() => _CallPermissionTileState();
+}
+
+class _CallPermissionTileState extends State<_CallPermissionTile>
+    with WidgetsBindingObserver {
+  bool? _granted;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refresh();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// 用户跳系统设置页授权后返回（resumed）即刷新——600ms 延迟重查仅作
+  /// 兜底（startActivity 立即返回、用户通常停留在设置页，固定延迟查到
+  /// 的是旧值；勿删 resumed 刷新）
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _refresh();
+    }
+  }
+
+  Future<void> _refresh() async {
+    final granted = await widget.status();
+    if (mounted) setState(() => _granted = granted);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final granted = _granted;
+    final showButton = granted != true || widget.viewWhenGranted;
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      title: Text(widget.title),
+      subtitle: Text(
+        granted == null ? widget.hint : (granted ? '已开启' : widget.deniedText),
+        style: const TextStyle(fontSize: 12),
+      ),
+      trailing: showButton
+          ? TextButton(
+              key: widget.buttonKey,
+              onPressed: () async {
+                await widget.request();
+                // 兜底刷新（真实 Timer——测试须 pump 过防 pending）；
+                // 用户真返回时的刷新由 didChangeAppLifecycleState 承担
+                await Future<void>.delayed(const Duration(milliseconds: 600));
+                if (!mounted) return;
+                await _refresh();
+              },
+              child: Text(granted == true ? '查看' : '去开启'),
+            )
+          : null,
+    );
+  }
+}
+
+// ============================================================
+// opt8 —— 运行环境自检引导（进聊天页一次性；Android）
+// ============================================================
+
+/// 本次安装内"自检已处理"的持久化键（用户"稍后再说"或全部就绪后置位）
+const String envCheckDismissedKey = 'env_check_dismissed';
+
+/// opt8：进聊天页一次性"运行环境自检"——通知权限/电池优化白名单/悬浮窗
+/// **确凿缺失**（false）时逐项引导，缺什么弹什么、每项一键直达：
+/// - 电池白名单 = 系统直弹确认框（一键允许，替代 Q1-4 的翻设置页引导）；
+/// - 悬浮窗 = 跳系统授权页（通话悬浮球前置）；
+/// - vivo 自启动/后台高耗电无公开跳转接口 → 应用信息页 + 文字指引
+///   （后台 30~60s 被 ROM 冻结断线的根因，2026-11-01 真机实证）。
+/// "无法判定"(null，桌面/通道缺失/测试环境) 恒不弹——安全默认，既有
+/// ChatScreen 测试零扰动；全部就绪或用户"稍后再说"→ 持久化本次安装
+/// 不再弹；设置页的悬浮窗/全屏来电瓦片保留为手动入口。
+Future<void> maybeShowEnvironmentCheckDialog(BuildContext context) async {
+  if (effectiveTargetPlatform() != TargetPlatform.android) return;
+  try {
+    final notifications = await AndroidSystem.areNotificationsEnabled();
+    final battery = await BatteryOptimization.instance.isIgnoring();
+    final overlay = await AndroidSystem.hasOverlayPermission();
+    final missingNotifications = notifications == false;
+    final missingBattery = battery == false;
+    final missingOverlay = overlay == false;
+    if (!missingNotifications && !missingBattery && !missingOverlay) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getBool(envCheckDismissedKey) ?? false) return;
+    } catch (_) {}
+    if (!context.mounted) return;
+    await showResponsiveDialog<void>(
+      context: context,
+      builder: (ctx) => _EnvCheckDialog(
+        missingNotifications: missingNotifications,
+        missingBattery: missingBattery,
+        missingOverlay: missingOverlay,
+      ),
+    );
+    // 弹窗关闭（任一出口）→ 本次安装不再弹
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(envCheckDismissedKey, true);
+    } catch (_) {}
+  } catch (_) {}
+}
+
+class _EnvCheckDialog extends StatefulWidget {
+  const _EnvCheckDialog({
+    required this.missingNotifications,
+    required this.missingBattery,
+    required this.missingOverlay,
+  });
+
+  final bool missingNotifications;
+  final bool missingBattery;
+  final bool missingOverlay;
+
+  @override
+  State<_EnvCheckDialog> createState() => _EnvCheckDialogState();
+}
+
+class _EnvCheckDialogState extends State<_EnvCheckDialog>
+    with WidgetsBindingObserver {
+  late bool _notificationsOk = !widget.missingNotifications;
+  late bool _batteryOk = !widget.missingBattery;
+  late bool _overlayOk = !widget.missingOverlay;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// 用户从系统页/系统框返回（resumed）即刷新状态——600ms 固定延迟
+  /// 仅作兜底（用户在系统页停留期间延迟查到的仍是旧值）
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _refresh();
+    }
+  }
+
+  Future<void> _refresh() async {
+    try {
+      final notifications = await AndroidSystem.areNotificationsEnabled();
+      final battery = await BatteryOptimization.instance.isIgnoring();
+      final overlay = await AndroidSystem.hasOverlayPermission();
+      if (!mounted) return;
+      setState(() {
+        if (notifications != null) _notificationsOk = notifications;
+        if (battery != null) _batteryOk = battery;
+        if (overlay != null) _overlayOk = overlay;
+      });
+    } catch (_) {}
+  }
+
+  Widget _row({
+    required bool ok,
+    required String title,
+    required String subtitle,
+    String? actionLabel,
+    Future<void> Function()? action,
+    Key? actionKey,
+  }) {
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(
+        ok ? Icons.check_circle_rounded : Icons.error_outline_rounded,
+        color: ok ? Colors.green : Colors.orange,
+        size: 22,
+      ),
+      title: Text(title, style: const TextStyle(fontSize: 14)),
+      subtitle: Text(subtitle, style: const TextStyle(fontSize: 12)),
+      trailing: (!ok && action != null)
+          ? TextButton(
+              key: actionKey,
+              onPressed: () async {
+                await action();
+                await Future<void>.delayed(const Duration(milliseconds: 600));
+                await _refresh();
+              },
+              child: Text(actionLabel ?? '去开启'),
+            )
+          : null,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('运行环境自检'),
+      content: SizedBox(
+        width: 360,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '以下权限影响后台消息与通话提醒，缺失时后台可能掉线：',
+                style: TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 8),
+              _row(
+                ok: _notificationsOk,
+                title: '通知权限',
+                subtitle: '应用外消息/来电提醒',
+                actionLabel: '去开启',
+                action: AndroidSystem.requestNotificationPermission,
+                actionKey: const Key('env_check_notification'),
+              ),
+              _row(
+                ok: _batteryOk,
+                title: '电池优化白名单',
+                subtitle: '深度休眠会掐断后台连接（后台掉线常见原因）',
+                actionLabel: '去允许',
+                action: AndroidSystem.requestIgnoreBatteryOptimizations,
+                actionKey: const Key('env_check_battery'),
+              ),
+              _row(
+                ok: _overlayOk,
+                title: '通话悬浮球',
+                subtitle: '通话中退到桌面时的快速返回球',
+                actionLabel: '去开启',
+                action: AndroidSystem.requestOverlayPermission,
+                actionKey: const Key('env_check_overlay'),
+              ),
+              const Divider(),
+              const Text(
+                'vivo/三星请额外确认：设置 → 应用 → Rosub → 自启动允许、'
+                '电池 → 后台高耗电允许（厂商无自动开启接口）。',
+                style: TextStyle(fontSize: 11),
+              ),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  key: const Key('env_check_app_info'),
+                  onPressed: () async {
+                    await AndroidSystem.openAppDetailsSettings();
+                    await Future<void>.delayed(
+                        const Duration(milliseconds: 600));
+                    await _refresh();
+                  },
+                  child: const Text('去应用信息'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('稍后再说'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('完成'),
+        ),
+      ],
+    );
+  }
 }
 
 // ============================================================
