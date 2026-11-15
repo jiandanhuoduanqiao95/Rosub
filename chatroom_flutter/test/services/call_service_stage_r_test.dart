@@ -245,6 +245,83 @@ void main() {
       expect(svc.peer, 'alice');
     });
 
+    test('opt8 #4：connecting + call_cancel → ended / 对方已断开', () async {
+      final h = _Harness();
+      final svc = h.build();
+      _signal(svc, 'call_invite', 'alice', 'c-cc1');
+      expect(svc.phase, CallPhase.ringing);
+      await svc.acceptIncoming();
+      expect(svc.phase, CallPhase.connecting);
+      _signal(svc, 'call_cancel', 'alice', 'c-cc1');
+      expect(svc.phase, CallPhase.ended);
+      expect(svc.endReason, '对方已断开');
+    });
+
+    test('opt8 #4：active + call_cancel → ended / 对方已断开', () async {
+      final h = _Harness();
+      final svc = h.build();
+      await svc.startCall('bob', CallType.audio);
+      final id = h.last('call_invite').callId;
+      _signal(svc, 'call_accept', 'bob', id);
+      await Future<void>.delayed(Duration.zero);
+      _signal(svc, 'call_answer', 'bob', id,
+          body: {'sdp': 'answer-sdp', 'type': 'answer'});
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.phase, CallPhase.active);
+      _signal(svc, 'call_cancel', 'bob', id);
+      expect(svc.phase, CallPhase.ended);
+      expect(svc.endReason, '对方已断开');
+    });
+
+    test('opt8 #4：active + call_hangup → ended / 通话已结束', () async {
+      final h = _Harness();
+      final svc = h.build();
+      await svc.startCall('bob', CallType.audio);
+      final id = h.last('call_invite').callId;
+      _signal(svc, 'call_accept', 'bob', id);
+      await Future<void>.delayed(Duration.zero);
+      _signal(svc, 'call_answer', 'bob', id,
+          body: {'sdp': 'answer-sdp', 'type': 'answer'});
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.phase, CallPhase.active);
+      _signal(svc, 'call_hangup', 'bob', id);
+      expect(svc.phase, CallPhase.ended);
+      expect(svc.endReason, '通话已结束');
+    });
+
+    test('opt8 #4：ended + call_cancel 不重复收尾', () async {
+      final h = _Harness();
+      final svc = h.build();
+      await svc.startCall('bob', CallType.audio);
+      final id = h.last('call_invite').callId;
+      svc.cancelOutgoing();
+      expect(svc.phase, CallPhase.ended);
+      expect(svc.endReason, '已取消');
+      _signal(svc, 'call_cancel', 'bob', id);
+      expect(svc.phase, CallPhase.ended);
+      expect(svc.endReason, '已取消', reason: 'ended 态忽略 cancel，不覆盖原因');
+    });
+
+    test('opt8 #4：idle + call_cancel 无副作用', () {
+      final h = _Harness();
+      final svc = h.build();
+      _signal(svc, 'call_cancel', 'alice', 'ghost');
+      expect(svc.phase, CallPhase.idle);
+      expect(svc.endReason, isNull);
+    });
+
+    test('opt8 #4：错误 call_id 的 call_cancel 不处理', () {
+      final h = _Harness();
+      final svc = h.build();
+      _signal(svc, 'call_invite', 'alice', 'c-cc9');
+      _signal(svc, 'call_cancel', 'alice', 'other-call');
+      expect(svc.phase, CallPhase.ringing);
+      expect(svc.endReason, isNull);
+      _signal(svc, 'call_cancel', 'alice', 'c-cc9');
+      expect(svc.phase, CallPhase.ended);
+      expect(svc.endReason, '对方已取消');
+    });
+
     test('多端接听收敛：call_active 结束本机响铃', () {
       final h = _Harness();
       final svc = h.build();
@@ -271,7 +348,7 @@ void main() {
       });
     });
 
-    test('引擎连接失败：hangup 信令 + ended', () async {
+    test('引擎连接失败：caller 恢复重协商，超 2 次 → hangup + ended', () async {
       final h = _Harness();
       final svc = h.build();
       await svc.startCall('bob', CallType.audio);
@@ -281,7 +358,19 @@ void main() {
       _signal(svc, 'call_answer', 'bob', id,
           body: {'sdp': 'a', 'type': 'answer'});
       await Future<void>.delayed(Duration.zero);
+      expect(svc.phase, CallPhase.active);
       h.listener!.onConnectionState('failed');
+      await Future<void>.delayed(Duration.zero);
+      expect(h.sent('call_offer'), isTrue,
+          reason: 'opt9：failed 不再立即挂断，caller 发起恢复协商');
+      expect(svc.phase, CallPhase.active);
+      expect(svc.reconnecting, isTrue);
+      expect(svc.iceRestartAttempts, 1);
+      h.listener!.onConnectionState('failed');
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.iceRestartAttempts, 2);
+      h.listener!.onConnectionState('failed');
+      await Future<void>.delayed(Duration.zero);
       expect(h.sent('call_hangup'), isTrue);
       expect(svc.phase, CallPhase.ended);
       expect(svc.endReason, '连接失败');

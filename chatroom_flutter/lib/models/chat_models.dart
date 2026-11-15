@@ -40,6 +40,7 @@ class ChatMessage {
   String? filePath; // 文件消息的本地落盘路径（阶段 N3b：内联图片展示）
   int? groupId; // 群聊消息的群组 ID
   int? filesize; // 文件消息字节数（阶段 P1：气泡大小行；null = 未知）
+  bool isFileMeta; // R-P21 file_meta 元数据补推（无消息体，本地无文件）
 
   // ---- 阶段 K5（P1-2/P1-4）消息操作扩展 ----
   String? replyTo; // 引用原消息 id（P1-2）
@@ -59,6 +60,7 @@ class ChatMessage {
     this.filePath,
     this.groupId,
     this.filesize,
+    this.isFileMeta = false,
     this.replyTo,
     this.replyPreview,
     this.reactions = const {},

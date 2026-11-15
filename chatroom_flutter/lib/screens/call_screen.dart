@@ -325,6 +325,52 @@ class _CallScreenState extends State<CallScreen> {
                   ),
                 ),
               ),
+              // opt9 断线恢复提示条（reconnecting/hint 驱动；不拦截手势）。
+              // hint 为空时渲染空盒——CircularProgressIndicator 永不静止，
+              // 常驻构建会令 pumpAndSettle 超时（测试与真实帧调度均受影响）
+              Positioned(
+                top: topInset + 64,
+                left: 0,
+                right: 0,
+                child: IgnorePointer(
+                  child: AnimatedOpacity(
+                    key: const Key('call_reconnect_hint'),
+                    opacity: _svc.hint != null ? 1 : 0,
+                    duration: const Duration(milliseconds: 180),
+                    child: _svc.hint == null
+                        ? const SizedBox.shrink()
+                        : Center(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 14, vertical: 7),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.65),
+                                borderRadius: BorderRadius.circular(18),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const SizedBox(
+                                    width: 13,
+                                    height: 13,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white70,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    _svc.hint!,
+                                    style: const TextStyle(
+                                        color: Colors.white, fontSize: 13),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                  ),
+                ),
+              ),
               // gc3 微信式：视频通话自己为可拖动悬浮小窗（1:1 与群一致）
               if (_svc.type == CallType.video) _buildStageSelfPip(context),
             ],

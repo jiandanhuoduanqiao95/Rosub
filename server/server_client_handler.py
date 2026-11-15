@@ -256,6 +256,13 @@ class ClientHandler:
                     if not was_online:
                         self.server.broadcast_presence(username, True)
                     self.server.send_presence_snapshot(username, ssock)
+                    # 阶段 opt9：主会话上线 → 清除通话重连挂起态并通知在线
+                    # 对端 call_peer_back（未挂起时 no-op；transfer/register
+                    # 不调用）
+                    try:
+                        self.server.call_handler.user_online(username)
+                    except Exception as e:
+                        logging.warning(f"通话上线恢复失败: 用户={username}, 错误={e}")
                     # 加载离线消息、好友请求和文件请求，并发送初始好友/群组列表
                     message_handler.load_offline_data(username, ssock)
                     message_handler.send_initial_data(username, ssock)

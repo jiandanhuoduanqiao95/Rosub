@@ -15,6 +15,7 @@
 
 import 'package:flutter/services.dart';
 
+import 'android_audio_policy.dart';
 import 'capabilities.dart';
 
 class AndroidSystem {
@@ -360,6 +361,21 @@ class AndroidSystem {
     try {
       await _channel.invokeMethod<bool>('hideCallBubble', {'video': video});
     } catch (_) {}
+  }
+
+  /// 设备信息上报（opt9 批次 #3：音频策略分流数据源）。非 Android /
+  /// 通道缺失 / 旧构建未实现该通道 / 通道异常一律返回 null（上层按
+  /// defaultProcessing 兜底——安全降级，不阻塞启动）。
+  static Future<AndroidAudioDeviceInfo?> getAudioDeviceInfo() async {
+    if (!_isAndroid) return null;
+    try {
+      final map = await _channel
+          .invokeMethod<Object?>('getAudioDeviceInfo') as Map<Object?, Object?>?;
+      if (map == null) return null;
+      return AndroidAudioDeviceInfo.fromMap(map);
+    } catch (_) {
+      return null;
+    }
   }
 }
 

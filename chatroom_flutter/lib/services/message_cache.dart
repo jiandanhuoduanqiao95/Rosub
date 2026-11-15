@@ -5,6 +5,10 @@
 ///   - [restoreAll]：登录后把缓存历史合并进 AppState（去重 + 时间排序）；
 ///   - [clear]：退出登录清空缓存（防跨账号数据泄漏）。
 ///
+/// 全部写操作经静态写队列 [_writeTail] 串行化（opt8 #6/#8 修复）：SQLite
+/// 异步并发写与删除交错时可能出现"后写入覆盖先删除"的复活竞态，队列保证
+/// 同一时刻只有一个写任务在途、按入队顺序执行。
+///
 /// 未初始化（_store == null，如单元测试环境）时全部方法为安全 no-op，不影响
 /// 既有测试。初始化仅在生产入口（main.dart）进行。
 
@@ -14,6 +18,7 @@ import 'state_manager.dart';
 
 class MessageCache {
   static MessageCacheStore? _store;
+  static Future<void> _writeTail = Future.value();
 
   static MessageCacheStore? get store => _store;
 
@@ -26,17 +31,42 @@ class MessageCache {
     final s = MessageCacheStore();
     await s.init(dbPath: dbPath);
     _store = s;
+    _writeTail = Future.value();
   }
 
   /// 落盘一条消息（未初始化/空 messageId/异常时安全跳过）
-  static Future<void> persist(String chatKey, ChatMessage msg) async {
+  static Future<void> persist(String chatKey, ChatMessage msg) {
     final s = _store;
-    if (s == null || !s.isOpen || msg.messageId.isEmpty) return;
-    try {
-      await s.upsertMessage(chatKey, msg);
-    } catch (_) {
-      // 缓存失败不影响消息收发（尽力而为）
+    if (s == null || !s.isOpen || msg.messageId.isEmpty) {
+      return Future.value();
     }
+    final task = _writeTail
+        .then((_) => s.upsertMessage(chatKey, msg))
+        .catchError((Object _) {});
+    _writeTail = task;
+    return task;
+  }
+
+  /// 移除一条消息（永久删除/公告删除；与写队列串行避免复活竞态）
+  static Future<void> removeMessage(String chatKey, String messageId) {
+    final s = _store;
+    if (s == null || !s.isOpen) return Future.value();
+    final task = _writeTail
+        .then((_) => s.removeMessage(chatKey, messageId))
+        .catchError((Object _) {});
+    _writeTail = task;
+    return task;
+  }
+
+  /// 清空某会话全部缓存消息（会话移除时调用）
+  static Future<void> clearConversation(String chatKey) {
+    final s = _store;
+    if (s == null || !s.isOpen) return Future.value();
+    final task = _writeTail
+        .then((_) => s.clearConversation(chatKey))
+        .catchError((Object _) {});
+    _writeTail = task;
+    return task;
   }
 
   /// 登录后把缓存历史合并进 AppState（按 message_id 去重 + 时间排序），
@@ -58,11 +88,22 @@ class MessageCache {
   }
 
   /// 退出登录清空缓存（防跨账号数据泄漏）
-  static Future<void> clear() async {
+  static Future<void> clear() {
     final s = _store;
-    if (s == null || !s.isOpen) return;
-    try {
-      await s.clearAll();
-    } catch (_) {}
+    if (s == null || !s.isOpen) return Future.value();
+    final task = _writeTail.then((_) => s.clearAll()).catchError((Object _) {});
+    _writeTail = task;
+    return task;
+  }
+
+  /// 等待全部已入队写任务完成（测试同步用）
+  static Future<void> flush() => _writeTail;
+
+  /// 测试重置：关闭并清空 store、重置写队列（生产代码不得调用）
+  static Future<void> resetForTest() async {
+    final s = _store;
+    _store = null;
+    _writeTail = Future.value();
+    await s?.close();
   }
 }

@@ -17,11 +17,15 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:chatroom_flutter/config.dart';
 import 'package:chatroom_flutter/models/chat_models.dart';
+import 'package:chatroom_flutter/services/message_cache.dart';
+import 'package:chatroom_flutter/services/message_cache_store.dart';
+import 'package:chatroom_flutter/services/sent_file_store.dart';
 import 'package:chatroom_flutter/services/socket_service.dart';
 import 'package:chatroom_flutter/services/state_manager.dart';
 
@@ -155,6 +159,41 @@ time.sleep(2.0)
 s.close()
 ''';
 
+const sameNameFileSender = r'''
+import sys, os, time, threading, ssl, socket
+root = os.environ['CHATROOM_ROOT']
+sys.path.insert(0, root)
+from protocol import recv_message, send_message
+user, pw, to, filename = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+s = ctx.wrap_socket(socket.create_connection(('127.0.0.1', 8095)))
+send_message(s, 'login', user, extra_headers={'password': pw, 'device_id': 'linux'})
+def reader():
+    try:
+        while True:
+            h, b = recv_message(s)
+            if h is None:
+                break
+    except Exception:
+        pass
+threading.Thread(target=reader, daemon=True).start()
+time.sleep(0.6)
+png1 = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x01])
+png2 = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x02, 0x02])
+for payload in (png1, png2):
+    send_message(s, 'file', payload, extra_headers={
+        'to': to,
+        'filename': filename,
+        'filesize': str(len(payload)),
+        'message_id': 'opt8same-%f-%d' % (time.time(), len(payload)),
+    })
+    time.sleep(1.0)
+time.sleep(2.0)
+s.close()
+''';
+
 const androidSession = r'''
 import sys, os, time, threading, ssl, socket
 root = os.environ['CHATROOM_ROOT']
@@ -262,6 +301,7 @@ void main() {
       'alice' => aliceSender,
       'file' => fileSender,
       'groupfile' => groupFileSender,
+      'samefile' => sameNameFileSender,
       _ => androidSession,
     };
     _writeE2eScript(script, body);
@@ -340,6 +380,65 @@ void main() {
     expect(state.hasPendingFileRequests, isFalse,
         reason: '群小图片同样自动接受，无残留待处理请求');
     bob.disconnect();
+  });
+
+  test('opt8 #13 —— 同名图片连续发送：接收方路径唯一、内容不互相覆盖',
+      () async {
+    if (skipped) {
+      markTestSkipped('缺少本地 Python 服务端环境，跳过 E2E 测试');
+      return;
+    }
+    final bob = SocketService();
+    expect(await bob.connect(), isTrue);
+    expect(await bob.login('bob', 'password456'), isNull);
+
+    final stamp = DateTime.now().microsecondsSinceEpoch;
+    final name = 'opt8same_$stamp.png';
+    final png1 = <int>[
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x01
+    ];
+    final png2 = <int>[
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x02, 0x02
+    ];
+    final receivedPaths = <String>[];
+    try {
+      final alice =
+          await startPython('samefile', ['alice', 'password123', 'bob', name]);
+      await alice.exitCode;
+
+      final ok = await waitFor(() {
+        final msgs = state
+            .getMessages('alice')
+            .where((m) => m.type == 'file' && m.filename == name)
+            .toList();
+        return msgs.length == 2 &&
+            msgs.every(
+                (m) => m.filePath != null && File(m.filePath!).existsSync());
+      });
+      expect(ok, isTrue, reason: 'bob 应自动接收两条同名图片且均已落盘');
+
+      final two = state
+          .getMessages('alice')
+          .where((m) => m.type == 'file' && m.filename == name)
+          .toList();
+      final paths = two.map((m) => m.filePath!).toList();
+      expect(paths.toSet().length, 2,
+          reason: 'messageId 唯一路径：同名文件不得互相覆盖');
+
+      final contents =
+          paths.map((p) => File(p).readAsBytesSync().join(',')).toList();
+      expect(contents.any((c) => c == png1.join(',')), isTrue,
+          reason: '第一份内容完整保留');
+      expect(contents.any((c) => c == png2.join(',')), isTrue,
+          reason: '第二份内容完整保留（旧实现同名覆盖会丢一份）');
+      receivedPaths.addAll(paths);
+    } finally {
+      for (final p in receivedPaths) {
+        final f = File(p);
+        if (f.existsSync()) f.deleteSync();
+      }
+      bob.disconnect();
+    }
   });
 
   test('N6 —— 设备管理：双设备列表 + 远程下线 android', () async {
@@ -421,4 +520,95 @@ void main() {
             '${state.auditLogs.map((e) => "${e.operator}/${e.action}/${e.target}").toList()}）');
     admin.disconnect();
   });
+
+  test('opt8 #1 —— sendFileBytes：本地回显带 filePath，缓存重开仍在', () async {
+    if (skipped) {
+      markTestSkipped('缺少本地 Python 服务端环境，跳过 E2E 测试');
+      return;
+    }
+    final tmp = await Directory.systemTemp.createTemp('opt8_sendfile_e2e');
+    final cacheDb = '${tmp.path}/cache.db';
+    await MessageCache.init(dbPath: cacheDb);
+    await SentFileStore.init();
+    final alice = SocketService();
+    final sentCopies = <String>[];
+    try {
+      expect(await alice.connect(), isTrue);
+      expect(await alice.login('alice', 'password123'), isNull);
+
+      final bytes = Uint8List.fromList(
+          [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02]);
+      final ok = await alice.sendFileBytes('bob', bytes, 'opt8shot.png');
+      expect(ok, isTrue);
+
+      final sent = state.getMessages('bob').firstWhere(
+          (m) => m.type == 'file' && m.filename == 'opt8shot.png');
+      expect(sent.filePath, isNotNull, reason: 'sendFileBytes 应带 filePath');
+      expect(File(sent.filePath!).existsSync(), isTrue,
+          reason: 'sent_files 副本应已落盘');
+      expect(SentFileStore.pathOf(sent.messageId), sent.filePath);
+      sentCopies.add(sent.filePath!);
+
+      await MessageCache.flush();
+      await MessageCache.resetForTest();
+      final reopened = MessageCacheStore();
+      await reopened.init(dbPath: cacheDb);
+      final rows = await reopened.loadMessages('bob');
+      final cached =
+          rows.firstWhere((m) => m.messageId == sent.messageId);
+      expect(cached.filePath, sent.filePath,
+          reason: '重启（缓存重开）后 filePath 不丢——缩略图恢复的数据源');
+      await reopened.close();
+    } finally {
+      await MessageCache.resetForTest();
+      alice.disconnect();
+      for (final path in sentCopies) {
+        final f = File(path);
+        if (f.existsSync()) f.deleteSync();
+      }
+      if (tmp.existsSync()) tmp.deleteSync(recursive: true);
+    }
+  });
+
+  test('opt8 #1 —— sendFileBytes：副本落盘失败不阻塞发送', () async {
+    if (skipped) {
+      markTestSkipped('缺少本地 Python 服务端环境，跳过 E2E 测试');
+      return;
+    }
+    if (Platform.isWindows) {
+      markTestSkipped('chmod 权限模拟仅 POSIX 可用');
+      return;
+    }
+    final dir = Directory('sent_files');
+    final preExisted = dir.existsSync();
+    final originalMode = preExisted ? dir.statSync().mode & 0x1FF : null;
+    if (!preExisted) dir.createSync();
+    await Process.run('chmod', ['0500', dir.path]);
+    final alice = SocketService();
+    try {
+      expect(await alice.connect(), isTrue);
+      expect(await alice.login('alice', 'password123'), isNull);
+
+      final ok = await alice.sendFileBytes(
+          'bob', Uint8List.fromList([1, 2, 3]), 'opt8fail.png');
+      expect(ok, isTrue, reason: '副本落盘失败不应阻塞发送');
+      final sent = state.getMessages('bob').firstWhere(
+          (m) => m.type == 'file' && m.filename == 'opt8fail.png');
+      expect(sent.filePath, isNull, reason: '落盘失败时 filePath 为 null');
+    } finally {
+      final restoreMode = originalMode != null
+          ? originalMode.toRadixString(8).padLeft(4, '0')
+          : '0700';
+      await Process.run('chmod', [restoreMode, dir.path]);
+      if (!preExisted) {
+        try {
+          await dir.delete();
+        } catch (_) {}
+      }
+      alice.disconnect();
+    }
+  });
+
+
 }
+

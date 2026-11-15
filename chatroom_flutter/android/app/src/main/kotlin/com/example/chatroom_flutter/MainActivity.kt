@@ -409,6 +409,22 @@ class MainActivity : FlutterActivity() {
                         moveTaskToBack(true)
                         result.success(true)
                     }
+                    // ---- opt9 批次 #3：设备信息上报（音频策略按设备分流，
+                    // 避免 bypass 全局关闭硬件 AEC）----
+                    "getAudioDeviceInfo" -> {
+                        result.success(
+                            mapOf(
+                                "manufacturer" to Build.MANUFACTURER,
+                                "brand" to Build.BRAND,
+                                "model" to Build.MODEL,
+                                "device" to Build.DEVICE,
+                                "product" to Build.PRODUCT,
+                                "display" to Build.DISPLAY,
+                                "release" to Build.VERSION.RELEASE,
+                                "sdk" to Build.VERSION.SDK_INT,
+                            )
+                        )
+                    }
                     "getLastCrashLog" -> {
                         try {
                             val f = File(filesDir, "crash_log.txt")

@@ -328,6 +328,7 @@ class AppState extends ChangeNotifier {
 
   // ---- 消息 ID → 消息映射（用于撤回） ----
   final Map<String, ChatMessage> _messageMap = {};
+  final Map<String, String> _messageChatKey = {};
 
   // ---- 未读消息计数（阶段 E）----
   final Map<String, int> _unreadCount = {};
@@ -612,6 +613,7 @@ class AppState extends ChangeNotifier {
     final before = list.length;
     list.removeWhere((m) => m.messageId == messageId);
     _messageMap.remove(messageId);
+    _messageChatKey.remove(messageId);
     if (list.length != before) notifyListeners();
   }
 
@@ -672,6 +674,7 @@ class AppState extends ChangeNotifier {
     _pendingFriendNotes.clear();
     _pendingFileRequests.clear();
     _messageMap.clear();
+    _messageChatKey.clear();
     _unreadCount.clear();
     _noMoreHistory.clear();
     _transfers.clear();
@@ -739,15 +742,38 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// 集中会话清理（删好友/退群/被移出群共用）：
+  /// 内存消息列表 + 全局 _messageMap/_messageChatKey（仅当归属为本会话）+
+  /// 未读/历史分页/搜索状态 + 会话元数据（置顶/草稿/静音，防重加复活）+
+  /// 本地缓存会话。不清理 _pendingMessages（重连补发由上层决策，阶段 I
+  /// 契约）。只 notify 一次。
+  void _removeConversation(String chatKey) {
+    final msgs = _messages[chatKey];
+    if (msgs != null) {
+      for (final m in msgs) {
+        final id = m.messageId;
+        if (id.isEmpty) continue;
+        if (_messageChatKey[id] == chatKey) {
+          _messageMap.remove(id);
+          _messageChatKey.remove(id);
+        }
+      }
+    }
+    _messages.remove(chatKey);
+    _unreadCount.remove(chatKey);
+    _noMoreHistory.remove(chatKey);
+    _searchResults.remove(chatKey);
+    _searchQueries.remove(chatKey);
+    _conversationMeta.remove(chatKey);
+    MessageCache.clearConversation(chatKey);
+    notifyListeners();
+  }
+
   void removeFriend(String friend) {
     _friends.remove(friend);
-    _messages.remove(friend);
-    _unreadCount.remove(friend);
-    _searchResults.remove(friend);
-    _searchQueries.remove(friend);
     _friendMeta.remove(friend);
     if (_currentChat == friend) _currentChat = null;
-    notifyListeners();
+    _removeConversation(friend);
   }
 
   void addGroup(Group group) {
@@ -760,13 +786,8 @@ class AppState extends ChangeNotifier {
   void leaveGroup(int groupId) {
     final key = 'group_$groupId';
     _groups.removeWhere((g) => g.id == groupId);
-    _messages.remove(key);
-    _unreadCount.remove(key);
-    _noMoreHistory.remove(key);
-    _searchResults.remove(key);
-    _searchQueries.remove(key);
     if (_currentChat == key) _currentChat = null;
-    notifyListeners();
+    _removeConversation(key);
   }
 
   void updateGroupMembers(int groupId, List<String> members) {
@@ -806,13 +827,8 @@ class AppState extends ChangeNotifier {
   void removeGroup(int groupId) {
     final key = 'group_$groupId';
     _groups.removeWhere((g) => g.id == groupId);
-    _messages.remove(key);
-    _unreadCount.remove(key);
-    _noMoreHistory.remove(key);
-    _searchResults.remove(key);
-    _searchQueries.remove(key);
     if (_currentChat == key) _currentChat = null;
-    notifyListeners();
+    _removeConversation(key);
   }
 
   // ---- 阶段 M2：入群申请状态 ----
@@ -918,16 +934,30 @@ class AppState extends ChangeNotifier {
     // 已存在的消息仅更新状态（sent → delivered），不重复添加。
     // 空 messageId 不做去重：不同消息不得因空 id 被合并丢失
     if (msg.messageId.isNotEmpty && _messageMap.containsKey(msg.messageId)) {
-      _messageMap[msg.messageId]!.status = msg.status;
-      // 阶段 L3：去重更新同样落盘（状态演进 sent→delivered 持久化）
-      MessageCache.persist(chatKey, _messageMap[msg.messageId]!);
-      notifyListeners();
+      final current = _messageMap[msg.messageId]!;
+      var changed = false;
+      final merged = _mergeServerStatus(current.status, msg.status);
+      if (merged != current.status) {
+        current.status = merged;
+        changed = true;
+      }
+      if (msg.isFileMeta && !current.isFileMeta) {
+        current.isFileMeta = true;
+        changed = true;
+      }
+      final knownKey =
+          _messageChatKey.putIfAbsent(msg.messageId, () => chatKey);
+      if (changed) {
+        MessageCache.persist(knownKey, current);
+        notifyListeners();
+      }
       return;
     }
     _messages.putIfAbsent(chatKey, () => []);
     _messages[chatKey]!.add(msg);
     if (msg.messageId.isNotEmpty) {
       _messageMap[msg.messageId] = msg;
+      _messageChatKey[msg.messageId] = chatKey;
     }
     // 阶段 L3：任何到达/发出的消息落盘（本地缓存，离线可读 + 启动秒开）
     MessageCache.persist(chatKey, msg);
@@ -942,32 +972,75 @@ class AppState extends ChangeNotifier {
   }
 
   /// 批量插入历史消息到会话列表（上滑加载更旧消息，阶段 E）
-  /// 历史消息不计未读，按 messageId 去重，按 timestamp 排序确保时间顺序正确
+  /// 历史消息不计未读，按 messageId 去重，按 timestamp 排序确保时间顺序正确。
+  /// 已有 ID 做服务端状态合并（sent→delivered/recalled 可升级；recalled
+  /// 不降级——迟到的旧回显/历史不得把撤回态覆盖回 sent/delivered）。
   void prependHistoryMessages(String chatKey, List<ChatMessage> msgs) {
     if (msgs.isEmpty) return;
     _messages.putIfAbsent(chatKey, () => []);
     final list = _messages[chatKey]!;
-    int inserted = 0;
+    int changed = 0;
     for (final msg in msgs) {
-      if (_messageMap.containsKey(msg.messageId)) continue;
+      final existing = _messageMap[msg.messageId];
+      if (existing != null) {
+        var touched = false;
+        final merged = _mergeServerStatus(existing.status, msg.status);
+        if (merged != existing.status) {
+          existing.status = merged;
+          touched = true;
+        }
+        if (msg.isFileMeta && !existing.isFileMeta) {
+          existing.isFileMeta = true;
+          touched = true;
+        }
+        if (touched) {
+          MessageCache.persist(chatKey, existing);
+          changed++;
+        }
+        continue;
+      }
       list.add(msg);
       _messageMap[msg.messageId] = msg;
-      inserted++;
+      if (msg.messageId.isNotEmpty) {
+        _messageChatKey[msg.messageId] = chatKey;
+      }
+      changed++;
       // 阶段 L3：历史消息同样落盘（增量同步合并的持久化基础）
       MessageCache.persist(chatKey, msg);
     }
     // 按 timestamp 升序排序（旧消息在前，新消息在后）
-    if (inserted > 0) {
+    if (changed > 0) {
       list.sort((a, b) => a.timestamp.compareTo(b.timestamp));
       notifyListeners();
     }
+  }
+
+  /// 服务端数据合并路径的状态裁决（addMessage 去重 / prepend 历史合并共用）：
+  ///   - recalled 是这两条路径上的终态：任何迟到回显/历史不得降级撤回态；
+  ///   - delivered 不被迟到的 sent 回显降级；
+  ///   - sending/failed（本地在途态）由服务端最新回显接管；
+  ///   - 其余以服务端为准。
+  /// 显式 setter（updateMessageStatus）不受此规则约束（既有契约）。
+  static String _mergeServerStatus(String current, String incoming) {
+    if (current == 'recalled') return 'recalled';
+    if (incoming == 'recalled') return 'recalled';
+    if (current == 'delivered' && incoming == 'sent') return 'delivered';
+    if (current == 'sending' || current == 'failed') return incoming;
+    return incoming;
   }
 
   /// 更新消息状态（送达、撤回等）
   void updateMessageStatus(String messageId, String newStatus) {
     final msg = _messageMap[messageId];
     if (msg != null) {
+      final changed = msg.status != newStatus;
       msg.status = newStatus;
+      if (changed) {
+        final chatKey = _messageChatKey[messageId];
+        if (chatKey != null && chatKey.isNotEmpty) {
+          MessageCache.persist(chatKey, msg);
+        }
+      }
       notifyListeners();
     }
     // 阶段 I1：收到 delivered/recalled 说明消息已生效（回执/撤回路径），
@@ -977,6 +1050,31 @@ class AppState extends ChangeNotifier {
       _pendingMessages.removeWhere((e) => e.message.messageId == messageId);
       if (_pendingMessages.length != before) notifyListeners();
     }
+  }
+
+  /// 服务端状态路径（status_update）的终态合并入口：recalled 不被迟到的
+  /// delivered/sent 覆盖、delivered 不被迟到的 sent 降级、sending/failed
+  /// 由服务端接管；delivered/recalled 仍清 pending 队列。
+  /// 显式 setter（updateMessageStatus）不受此规则约束（既有契约）。
+  void applyServerStatus(String messageId, String newStatus) {
+    final msg = _messageMap[messageId];
+    if (msg == null) return;
+    var changed = false;
+    final merged = _mergeServerStatus(msg.status, newStatus);
+    if (merged != msg.status) {
+      msg.status = merged;
+      final chatKey = _messageChatKey[messageId];
+      if (chatKey != null && chatKey.isNotEmpty) {
+        MessageCache.persist(chatKey, msg);
+      }
+      changed = true;
+    }
+    if (newStatus == 'delivered' || newStatus == 'recalled') {
+      final before = _pendingMessages.length;
+      _pendingMessages.removeWhere((e) => e.message.messageId == messageId);
+      if (_pendingMessages.length != before) changed = true;
+    }
+    if (changed) notifyListeners();
   }
 
   /// 撤回消息

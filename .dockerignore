@@ -1,0 +1,28 @@
+# 构建上下文裁剪：仅保留服务端运行所需（requirements.txt / server/ / config.py /
+# database.py / protocol.py / validation.py / config.yaml / backup/ / scripts/ /
+# deploy/ / client/），以下目录与文件不进入镜像
+.git
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+users.db
+users.db-*
+file_store
+files
+SSL
+dist
+.pytest_cache
+.hypothesis
+.idea
+chatroom_flutter
+chatroom_flutter/.dart_tool
+.dart_tool
+build
+.flutter-plugins
+.flutter-plugins-dependencies
+dart_protocol
+promo-video
+docs
+screenshots
+*.md

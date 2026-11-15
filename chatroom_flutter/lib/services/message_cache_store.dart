@@ -41,7 +41,7 @@ class MessageCacheStore {
     final path = dbPath ?? await _defaultPath();
     _db = await openDatabase(
       path,
-      version: 1,
+      version: 3,
       onCreate: (db, version) async {
         // IF NOT EXISTS：旧格式库（user_version 0）打开时同样会走 onCreate
         await db.execute('''
@@ -57,14 +57,36 @@ class MessageCacheStore {
             group_id    INTEGER,
             reply_to    TEXT,
             reply_preview TEXT,
-            reactions   TEXT
+            reactions   TEXT,
+            file_path   TEXT,
+            is_file_meta INTEGER NOT NULL DEFAULT 0
           )
         ''');
         await db.execute(
             'CREATE INDEX idx_messages_chat ON messages(chat_key, timestamp)');
       },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 3) {
+          await _ensureMessageColumns(db);
+        }
+      },
     );
     _closed = false;
+    await _ensureMessageColumns(_database);
+  }
+
+  /// 兜底补列：v1/v2 旧库、user_version=0 但已有旧表等任何缺列形态，
+  /// 打开后统一检查补齐。
+  Future<void> _ensureMessageColumns(Database db) async {
+    final cols = await db.rawQuery('PRAGMA table_info(messages)');
+    final names = cols.map((r) => r['name']).toSet();
+    if (!names.contains('file_path')) {
+      await db.execute('ALTER TABLE messages ADD COLUMN file_path TEXT');
+    }
+    if (!names.contains('is_file_meta')) {
+      await db.execute(
+          'ALTER TABLE messages ADD COLUMN is_file_meta INTEGER NOT NULL DEFAULT 0');
+    }
   }
 
   /// 关闭数据库（测试/退出时调用）；关闭后可重新 init
@@ -137,6 +159,8 @@ class MessageCacheStore {
       'reply_to': msg.replyTo,
       'reply_preview': msg.replyPreview,
       'reactions': reactions,
+      'file_path': msg.filePath,
+      'is_file_meta': msg.isFileMeta ? 1 : 0,
     };
   }
 
@@ -236,6 +260,8 @@ class MessageCacheStore {
       replyTo: row['reply_to'] as String?,
       replyPreview: row['reply_preview'] as String?,
       reactions: reactions,
+      filePath: row['file_path'] as String?,
+      isFileMeta: (row['is_file_meta'] as int? ?? 0) != 0,
     );
   }
 

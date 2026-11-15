@@ -500,27 +500,89 @@ class Server:
 
     SCHEDULER_INTERVAL = 5.0  # 定时器扫描周期（秒）
 
+    def _scheduled_permission_error(self, item):
+        """投递前权限复核（登记后关系可能变化），返回失败原因或 None。"""
+        sender = item["sender"]
+        group_id = item["group_id"]
+        if group_id:
+            if self.db.get_group_info(group_id) is None:
+                return "群组不存在或已被解散"
+            if not self.db.is_group_member(group_id, sender):
+                return "您已不在该群组中"
+            return None
+        receiver = item["receiver"] or ""
+        if not receiver:
+            return "缺少接收者"
+        if not self.db.user_exists(sender):
+            return "发送者账号不存在"
+        if not self.db.is_friend(sender, receiver):
+            return f"{receiver} 不是您的好友"
+        if self.db.is_blocked(receiver, sender):
+            return "对方已将您拉黑"
+        return None
+
+    def _notify_scheduled_failure(self, sender, message_id, reason):
+        """投递失败通知发送者（系统会话）：在线推送，离线落库，不重复。"""
+        text = f"定时消息未能发送：{reason}"
+        notify_id = f"schedfail_{message_id}"
+        try:
+            delivered = self.broadcast_to_user(
+                sender, "chat", text,
+                extra_headers={"from": "系统", "message_id": notify_id})
+            if delivered == 0 and self.db.user_exists(sender):
+                self.db.save_offline_message(
+                    "系统", sender, "chat", text.encode("utf-8"),
+                    message_id=notify_id)
+        except Exception as e:
+            logging.error(f"定时消息失败通知异常: 接收者={sender}, "
+                          f"消息ID={notify_id}, 错误={e}")
+
     def scheduler_scan(self, now=None):
-        """单次到期扫描（O5）：投递全部到期的 pending 定时消息。
+        """单次到期扫描（O5）：原子领取到点任务并逐条投递。
 
         可独立调用（测试直接驱动，仿 watchdog_scan）；
         start_scheduler 周期性调用。返回已投递的 message_id 列表。
+        领取（pending -> sending，BEGIN IMMEDIATE 原子）与取消（仅 pending
+        可取消）互斥：取消成功必然未领取，领取后取消必失败——不会出现
+        "已取消仍投递"或"已投递仍可取消"。
         投递复用既有完整路径：
           - 私聊 = chat 路径：offline 落库 + history 落库 + 会话级推送
             （在线送达标记 delivered，接收方不在线则仅落库）
           - 群聊 = group_chat 路径：history 一条 + 离线成员副本
             （message_id=f"{id}_{成员}", group_id）+ notify_group_members
             群推送（跳过发送者）
+        投递前复核发送权限（登记后关系可能变化：拉黑/删好友/退群/群解散），
+        复核失败 -> failed + 通知发送者（不落库不广播）；投递异常 -> 释放回
+        pending 重试（达上限 failed + 通知），单条异常隔离。
         """
         try:
             self.call_handler.expire_calls(now=now)
         except Exception as e:
             logging.error(f"通话邀请过期清理异常: {e}")
-        due = self.db.get_due_scheduled_messages(now)
+        try:
+            recovered = self.db.recover_stale_scheduled_claims(now=now)
+            if recovered:
+                logging.info(f"定时消息崩溃恢复: {recovered} 条超时领取重新入队")
+        except Exception as e:
+            logging.error(f"定时消息崩溃恢复异常: {e}")
+        try:
+            due = self.db.claim_due_scheduled_messages(now=now)
+        except Exception as e:
+            logging.error(f"定时消息领取异常: {e}")
+            return []
         delivered_ids = []
         for item in due:
             message_id = item["message_id"]
             try:
+                reason = self._scheduled_permission_error(item)
+                if reason:
+                    if self.db.fail_scheduled_message(item["id"], reason):
+                        self._notify_scheduled_failure(
+                            item["sender"], message_id, reason)
+                        logging.info(
+                            f"定时消息权限复核未通过: 消息ID={message_id}, "
+                            f"发送者={item['sender']}, 原因={reason}")
+                    continue
                 content = item["content"]
                 if item["group_id"]:
                     group_id = item["group_id"]
@@ -566,13 +628,29 @@ class Server:
                         extra_headers={"from": item["sender"],
                                        "to": receiver,
                                        "message_id": message_id})
-                self.db.mark_scheduled_message_sent(item["id"])
-                delivered_ids.append(message_id)
-                logging.info(f"定时消息已投递: 消息ID={message_id}, "
-                             f"发送者={item['sender']}")
+                if self.db.mark_scheduled_message_sent(item["id"]):
+                    delivered_ids.append(message_id)
+                    logging.info(f"定时消息已投递: 消息ID={message_id}, "
+                                 f"发送者={item['sender']}")
+                else:
+                    logging.warning(
+                        f"定时消息投递后标记失败（状态已非可投递）: "
+                        f"消息ID={message_id}, 发送者={item['sender']}")
             except Exception as e:
-                # 单条投递异常隔离：不影响其余到期消息（阶段 I 惯例）
-                logging.error(f"定时消息投递异常（跳过）: 消息ID={message_id}, 错误={e}")
+                try:
+                    release_status = self.db.release_scheduled_message(
+                        item["id"])
+                except Exception as rel_err:
+                    release_status = None
+                    logging.error(
+                        f"定时消息释放异常: 消息ID={message_id}, "
+                        f"错误={rel_err}")
+                if release_status == "failed":
+                    self._notify_scheduled_failure(
+                        item["sender"], message_id,
+                        f"投递重试已达上限：{str(e)[:160]}")
+                logging.error(f"定时消息投递异常（已释放重试）: "
+                              f"消息ID={message_id}, 错误={e}")
         return delivered_ids
 
     def start_scheduler(self, interval=None):

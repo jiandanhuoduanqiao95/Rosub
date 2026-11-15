@@ -12,6 +12,7 @@
     timeout = config.get("message.recall_timeout_minutes")
 """
 
+import copy
 import os
 import yaml
 
@@ -67,7 +68,16 @@ class Config:
             with open(path, "r", encoding="utf-8") as f:
                 self._data = yaml.safe_load(f)
         else:
-            self._data = dict(self._DEFAULTS)
+            self._data = copy.deepcopy(self._DEFAULTS)
+        self._apply_env_overrides()
+
+    def _apply_env_overrides(self):
+        data_dir = os.environ.get("CHATROOM_DATA_DIR", "").strip()
+        if not data_dir or not isinstance(self._data, dict):
+            return
+        if not isinstance(self._data.get("database"), dict):
+            self._data["database"] = {}
+        self._data["database"]["path"] = os.path.join(data_dir, "users.db")
 
     def get(self, key_path, default=None):
         """

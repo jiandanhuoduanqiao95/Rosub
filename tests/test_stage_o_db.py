@@ -63,7 +63,13 @@
     content     BLOB NOT NULL               -- 消息文本（UTF-8）
     schedule_at REAL NOT NULL               -- 预定发送时刻（epoch 秒，UTC 中立；
                                             -- "注意时区"以 epoch 比较，不做本地化换算）
-    status      TEXT NOT NULL DEFAULT 'pending'   -- pending / sent / cancelled
+    status      TEXT NOT NULL DEFAULT 'pending'   -- pending / sending / sent /
+                                                  -- cancelled / failed
+                                                  --（sending=已领取投递中；
+                                                  -- failed=终态不重试）
+    attempts    INTEGER NOT NULL DEFAULT 0        -- 投递重试计数（旧库迁移补列）
+    claimed_at  REAL                              -- 领取时刻（epoch 秒；NULL=未领取）
+    fail_reason TEXT NOT NULL DEFAULT ''          -- 终态失败原因
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   Database 新增方法：
     add_scheduled_message(message_id, sender, content, schedule_at,
@@ -73,14 +79,33 @@
       - 成功插入 status='pending' 行，返回 True
     get_due_scheduled_messages(now=None) -> [dict]
       - now 缺省取当前时间（time.time()）；返回 status='pending' 且
-        schedule_at <= now 的行，按 schedule_at ASC 排序
+        schedule_at <= now 的行，按 schedule_at ASC 排序（只读，不领取）
       - 每项 dict：{id, message_id, sender, receiver, group_id, content(str),
                     schedule_at}
-      - 已投递（sent）/已取消（cancelled）永不返回
-    mark_scheduled_message_sent(scheduled_id) -> None（幂等，置 status='sent'）
+      - 已投递（sent）/已取消（cancelled）/投递中（sending）/失败（failed）
+        永不返回
+    claim_due_scheduled_messages(now=None, limit=100) -> [dict]
+      - 原子领取：单连接 BEGIN IMMEDIATE，SELECT 到期 pending 行后逐条
+        UPDATE status='sending', claimed_at=now（WHERE ... AND
+        status='pending' 条件更新）；返回与 get_due 相同结构
+      - 并发第二次调用必为空（领取后不再可见）
+    mark_scheduled_message_sent(scheduled_id) -> bool
+      - 仅 status IN ('pending','sending') 可置 'sent'；返回是否置成功
+      - 绝不覆盖 cancelled / failed / sent（已 sent 再调 → False，状态不变）
     cancel_scheduled_message(message_id, sender) -> bool
       - 仅发送者本人可取消（sender 不符 → False；不存在 → False）
-      - 仅 pending 可取消；已 sent/cancelled → False；成功置 status='cancelled'
+      - 仅 pending 可取消；已 sending（被领取）/sent/cancelled → False；
+        成功置 status='cancelled'
+    recover_stale_scheduled_claims(now=None, stale_seconds=300) -> int
+      - 崩溃恢复：status='sending' 且 claimed_at < now-stale_seconds 的行
+        重置回 pending（claimed_at=NULL）；返回恢复条数
+    release_scheduled_message(scheduled_id, max_attempts=3) -> 'pending'|'failed'
+      - 仅 status='sending' 生效：attempts+1、claimed_at=NULL；
+        attempts 达 max_attempts → 'failed'（fail_reason 落库），
+        否则 → 'pending'（重新入队）
+    fail_scheduled_message(scheduled_id, reason) -> bool
+      - 仅 status='sending' 生效：置 'failed' + fail_reason=reason +
+        claimed_at=NULL；返回是否生效
     list_scheduled_messages(sender) -> [dict]
       - 返回该用户自己的 pending 定时消息，按 schedule_at ASC；
         dict 字段同 get_due_scheduled_messages（另含 status）
@@ -99,6 +124,7 @@
 import os
 import sqlite3
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -571,3 +597,206 @@ class TestScheduledMessagesDbO5:
         db.add_scheduled_message("o5-u1", "alice", text,
                                  time.time() + 60, receiver="bob")
         assert db.list_scheduled_messages("alice")[0]["content"] == text
+
+
+# ============================================================
+# O5 修订（opt8 #7/#12）—— 原子领取 / 取消边界 / 覆盖保护 / 崩溃恢复
+# ============================================================
+
+def _sched_raw(db, message_id):
+    with db._get_connection() as conn:
+        row = conn.execute(
+            "SELECT status, attempts, claimed_at, fail_reason "
+            "FROM scheduled_messages WHERE message_id = ?",
+            (message_id,)).fetchone()
+    assert row is not None, f"定时消息行不存在: {message_id}"
+    return {"status": row[0], "attempts": row[1],
+            "claimed_at": row[2], "fail_reason": row[3]}
+
+
+class TestScheduledClaimLifecycleO5:
+
+    def test_claim_returns_due_and_marks_sending(self, db):
+        """领取返回到期行并置 sending；并发第二次为空；get_due 只读转空。"""
+        due = time.time() - 1
+        db.add_scheduled_message("o5-cl-1", "alice", "第一条", due,
+                                 receiver="bob")
+        db.add_scheduled_message("o5-cl-2", "alice", "第二条", due,
+                                 receiver="bob")
+        pending = db.get_due_scheduled_messages(now=due)
+        assert [r["message_id"] for r in pending] == ["o5-cl-1", "o5-cl-2"]
+
+        claimed = db.claim_due_scheduled_messages(now=due)
+        assert claimed == pending
+        for mid in ("o5-cl-1", "o5-cl-2"):
+            raw = _sched_raw(db, mid)
+            assert raw["status"] == "sending"
+            assert raw["claimed_at"] == due
+        assert db.claim_due_scheduled_messages(now=due) == []
+        assert db.get_due_scheduled_messages(now=due) == []
+
+    def test_claim_then_cancel_rejected_mark_sent_ok(self, db):
+        """领取后取消失败（仅 pending 可取消）；mark_sent 成功转 sent。"""
+        db.add_scheduled_message("o5-cl-3", "alice", "领取后取消",
+                                 time.time() - 1, receiver="bob")
+        claimed = db.claim_due_scheduled_messages()[0]
+        assert db.cancel_scheduled_message("o5-cl-3", "alice") is False
+        assert db.mark_scheduled_message_sent(claimed["id"]) is True
+        raw = _sched_raw(db, "o5-cl-3")
+        assert raw["status"] == "sent"
+        assert raw["claimed_at"] is None
+
+    def test_cancel_before_claim_blocks_claim_and_mark(self, db):
+        """先取消后领取为空；对 cancelled 行 mark_sent 返回 False 且状态不变。"""
+        db.add_scheduled_message("o5-cl-4", "alice", "先取消",
+                                 time.time() - 1, receiver="bob")
+        row = db.get_due_scheduled_messages()[0]
+        assert db.cancel_scheduled_message("o5-cl-4", "alice") is True
+        assert db.claim_due_scheduled_messages() == []
+        assert db.mark_scheduled_message_sent(row["id"]) is False
+        assert _sched_raw(db, "o5-cl-4")["status"] == "cancelled"
+
+    def test_mark_sent_never_overrides_terminal(self, db):
+        """cancelled / failed / sent 均不被 mark_sent 覆盖。"""
+        due = time.time() - 1
+        db.add_scheduled_message("o5-m-c", "alice", "取消态", due,
+                                 receiver="bob")
+        db.add_scheduled_message("o5-m-f", "alice", "失败态", due,
+                                 receiver="bob")
+        db.add_scheduled_message("o5-m-s", "alice", "已发态", due,
+                                 receiver="bob")
+        rows = db.get_due_scheduled_messages(now=due)
+        by_id = {r["message_id"]: r["id"] for r in rows}
+        assert db.cancel_scheduled_message("o5-m-c", "alice") is True
+        claimed = db.claim_due_scheduled_messages(now=due)
+        assert {r["message_id"] for r in claimed} == {"o5-m-f", "o5-m-s"}
+        assert db.fail_scheduled_message(by_id["o5-m-f"], "测试失败") is True
+        assert db.mark_scheduled_message_sent(by_id["o5-m-s"]) is True
+        assert db.mark_scheduled_message_sent(by_id["o5-m-c"]) is False
+        assert db.mark_scheduled_message_sent(by_id["o5-m-f"]) is False
+        assert db.mark_scheduled_message_sent(by_id["o5-m-s"]) is False
+        assert _sched_raw(db, "o5-m-c")["status"] == "cancelled"
+        assert _sched_raw(db, "o5-m-f")["status"] == "failed"
+        assert _sched_raw(db, "o5-m-s")["status"] == "sent"
+        assert db.claim_due_scheduled_messages(now=due) == []
+
+    def test_release_retries_then_failed(self, db):
+        """release 三次（每次重新领取）后 failed；failed 不再被领取。"""
+        db.add_scheduled_message("o5-rel-1", "alice", "重试",
+                                 time.time() - 1, receiver="bob")
+        claimed = db.claim_due_scheduled_messages()[0]
+        assert db.release_scheduled_message(claimed["id"]) == "pending"
+        raw = _sched_raw(db, "o5-rel-1")
+        assert raw["status"] == "pending" and raw["attempts"] == 1
+        assert raw["claimed_at"] is None
+        for expect_attempts in (2, 3):
+            claimed = db.claim_due_scheduled_messages()[0]
+            status = db.release_scheduled_message(claimed["id"])
+            assert status == ("pending" if expect_attempts < 3 else "failed")
+        raw = _sched_raw(db, "o5-rel-1")
+        assert raw["status"] == "failed"
+        assert raw["attempts"] == 3
+        assert raw["fail_reason"]
+        assert db.claim_due_scheduled_messages() == []
+        assert db.get_due_scheduled_messages() == []
+
+    def test_recover_stale_claim_requeues(self, db):
+        """超时 sending 恢复 pending（claimed_at 清空），恢复后可再领取。"""
+        db.add_scheduled_message("o5-rec-1", "alice", "崩溃恢复",
+                                 900.0, receiver="bob")
+        db.claim_due_scheduled_messages(now=1000.0)
+        raw = _sched_raw(db, "o5-rec-1")
+        assert raw["status"] == "sending"
+        assert raw["claimed_at"] == 1000.0
+        assert db.recover_stale_scheduled_claims(
+            now=1301.0, stale_seconds=300) == 1
+        raw = _sched_raw(db, "o5-rec-1")
+        assert raw["status"] == "pending"
+        assert raw["claimed_at"] is None
+        assert len(db.get_due_scheduled_messages(now=1000.0)) == 1
+
+    def test_fresh_claim_not_recovered(self, db):
+        """claimed_at 较新的 sending 不被恢复。"""
+        db.add_scheduled_message("o5-rec-2", "alice", "新鲜领取",
+                                 time.time() - 1, receiver="bob")
+        claim_now = time.time()
+        db.claim_due_scheduled_messages(now=claim_now)
+        assert db.recover_stale_scheduled_claims(now=claim_now + 10) == 0
+        assert _sched_raw(db, "o5-rec-2")["status"] == "sending"
+
+    def test_fail_scheduled_message_terminal(self, db):
+        """fail 置 failed + fail_reason + claimed_at 清空；终态不再领取。"""
+        db.add_scheduled_message("o5-fail-1", "alice", "权限失败",
+                                 time.time() - 1, receiver="bob")
+        claimed = db.claim_due_scheduled_messages()[0]
+        assert db.fail_scheduled_message(claimed["id"], "对方已将您拉黑") is True
+        raw = _sched_raw(db, "o5-fail-1")
+        assert raw["status"] == "failed"
+        assert raw["fail_reason"] == "对方已将您拉黑"
+        assert raw["claimed_at"] is None
+        assert db.claim_due_scheduled_messages() == []
+        assert db.mark_scheduled_message_sent(claimed["id"]) is False
+
+    def test_concurrent_claim_no_overlap(self, db):
+        """两线程并发领取：不重不漏（BEGIN IMMEDIATE 串行化）。"""
+        due = time.time() - 1
+        for i in range(20):
+            db.add_scheduled_message(f"o5-cc-{i}", "alice", f"m{i}", due,
+                                     receiver="bob")
+        results = []
+        barrier = threading.Barrier(2)
+
+        def worker():
+            barrier.wait()
+            results.append(db.claim_due_scheduled_messages(now=due))
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        ids = [r["message_id"] for batch in results for r in batch]
+        assert len(ids) == 20 and len(set(ids)) == 20
+
+    def test_old_database_with_legacy_table_migrates(self, tmp_path):
+        """旧形态 scheduled_messages（无新列）打开后补列且旧数据保留。"""
+        old_path = str(tmp_path / "legacy_sched.db")
+        conn = sqlite3.connect(old_path)
+        try:
+            conn.execute(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT)")
+            conn.execute("INSERT INTO users (username) VALUES ('alice')")
+            conn.execute('''
+                CREATE TABLE scheduled_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT UNIQUE NOT NULL,
+                    sender TEXT NOT NULL,
+                    receiver TEXT NOT NULL DEFAULT '',
+                    group_id INTEGER,
+                    content BLOB NOT NULL,
+                    schedule_at REAL NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.execute(
+                "INSERT INTO scheduled_messages (message_id, sender, receiver,"
+                " content, schedule_at, status) VALUES (?, ?, ?, ?, ?, ?)",
+                ("legacy-1", "alice", "bob", "旧消息".encode("utf-8"), 123.0,
+                 "pending"))
+            conn.commit()
+        finally:
+            conn.close()
+        reopened = Database(old_path)
+        with reopened._get_connection() as conn:
+            cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(scheduled_messages)").fetchall()}
+        assert {"attempts", "claimed_at", "fail_reason"} <= cols, \
+            f"旧库迁移未补齐新列: {cols}"
+        row = reopened.list_scheduled_messages("alice")[0]
+        assert row["message_id"] == "legacy-1"
+        assert row["content"] == "旧消息"
+        raw = _sched_raw(reopened, "legacy-1")
+        assert raw["status"] == "pending"
+        assert raw["attempts"] == 0
+        assert raw["fail_reason"] == ""

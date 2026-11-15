@@ -297,7 +297,19 @@ class LinuxNotificationCapability implements NotificationCapability {
   void clearUrgency() => TaskbarNotifier.setUrgencyImpl(false);
 }
 
+/// 进程执行器（opt8 #11：提示音播放可注入替身，测试不真跑 paplay/aplay）
+typedef ProcessRunner = Future<ProcessResult> Function(
+    String executable, List<String> arguments);
+
 class LinuxSoundCapability implements SoundCapability {
+  LinuxSoundCapability({ProcessRunner? processRunner})
+      : _run = processRunner ?? Process.run;
+
+  final ProcessRunner _run;
+
+  /// 最近一次播放的失败原因（双通道都失败时含两者；成功后清空）
+  String? lastError;
+
   @override
   Future<void> playNotifySound() async => TaskbarNotifier.playSoundImpl();
 
@@ -314,12 +326,29 @@ class LinuxSoundCapability implements SoundCapability {
 
   Future<void> _playCallWav(String? path, String tag) async {
     if (path == null) return;
+    final errors = <String>[];
     try {
-      final paplay = await Process.run('paplay', [path]);
-      if (paplay.exitCode != 0) {
-        await Process.run('aplay', ['-q', path]);
+      final paplay = await _run('paplay', [path]);
+      if (paplay.exitCode == 0) {
+        lastError = null;
+        return;
       }
-    } catch (_) {}
+      errors.add('paplay exit ${paplay.exitCode}');
+    } catch (e) {
+      errors.add('paplay: $e');
+    }
+    try {
+      final aplay = await _run('aplay', ['-q', path]);
+      if (aplay.exitCode == 0) {
+        lastError = errors.isEmpty ? null : errors.join('; ');
+        return;
+      }
+      errors.add('aplay exit ${aplay.exitCode}');
+    } catch (e) {
+      errors.add('aplay: $e');
+    }
+    lastError = errors.join('; ');
+    debugPrint('[call-sound] $tag failed: $lastError');
   }
 }
 
@@ -405,8 +434,15 @@ final class _Flashwinfo extends Struct {
 
 typedef _FlashWindowExNative = Int32 Function(Pointer<_Flashwinfo>);
 typedef _FlashWindowExDart = int Function(Pointer<_Flashwinfo>);
-typedef _FindWindowNative = IntPtr Function(Pointer<Utf16>, Pointer<Utf16>);
-typedef _FindWindowDart = int Function(Pointer<Utf16>, Pointer<Utf16>);
+typedef _FindWindowExNative = IntPtr Function(
+    IntPtr, IntPtr, Pointer<Utf16>, Pointer<Utf16>);
+typedef _FindWindowExDart = int Function(
+    int, int, Pointer<Utf16>, Pointer<Utf16>);
+typedef _GetWindowThreadProcessIdNative = Uint32 Function(
+    IntPtr, Pointer<Uint32>);
+typedef _GetWindowThreadProcessIdDart = int Function(int, Pointer<Uint32>);
+typedef _GetCurrentProcessIdNative = Uint32 Function();
+typedef _GetCurrentProcessIdDart = int Function();
 typedef _PlaySoundNative = Int32 Function(Pointer<Utf16>, IntPtr, Uint32);
 typedef _PlaySoundDart = int Function(Pointer<Utf16>, int, int);
 typedef _IsIconicNative = Int32 Function(IntPtr);
@@ -422,14 +458,47 @@ typedef _SetForegroundWindowDart = int Function(int);
 
 /// 标准 runner 窗口类名（win32_window.cpp kWindowClassName）解析主窗口
 /// 句柄；共享 helper（WindowsNotificationCapability 闪烁与 opt8 窗口唤起
-/// 共用）。解析失败返回 0，调用方静默降级。
+/// 共用）。同类名窗口按 PID 过滤——只命中本进程窗口（桌面上可能有多个
+/// Flutter Windows 应用共用该类名，FindWindowW 只取首个会闪烁/唤起到
+/// 别的应用）。解析失败返回 0，调用方静默降级；不缓存（窗口重建后旧
+/// 句柄失效）。
 int _resolveRunnerWindowHwnd(DynamicLibrary lib) {
-  final findWindow =
-      lib.lookupFunction<_FindWindowNative, _FindWindowDart>('FindWindowW');
+  final findWindowEx =
+      lib.lookupFunction<_FindWindowExNative, _FindWindowExDart>(
+          'FindWindowExW');
+  final getWindowThreadProcessId = lib
+      .lookupFunction<_GetWindowThreadProcessIdNative,
+          _GetWindowThreadProcessIdDart>('GetWindowThreadProcessId');
+  // GetCurrentProcessId 位于 kernel32（user32 句柄查不到——真机
+  // integration_test 实锤）；kernel32 恒已加载，经 process() 解析
+  final getCurrentProcessId = DynamicLibrary.process()
+      .lookupFunction<_GetCurrentProcessIdNative, _GetCurrentProcessIdDart>(
+          'GetCurrentProcessId');
   final className = 'FLUTTER_RUNNER_WIN32_WINDOW'.toNativeUtf16();
-  final hwnd = findWindow(className, nullptr);
-  calloc.free(className);
-  return hwnd;
+  final pid = calloc<Uint32>();
+  try {
+    final currentPid = getCurrentProcessId();
+    var hwnd = findWindowEx(0, 0, className, nullptr);
+    while (hwnd != 0) {
+      getWindowThreadProcessId(hwnd, pid);
+      if (pid.value == currentPid) {
+        return hwnd;
+      }
+      hwnd = findWindowEx(0, hwnd, className, nullptr);
+    }
+    return 0;
+  } finally {
+    calloc.free(className);
+    calloc.free(pid);
+  }
+}
+
+/// Windows 设备端 integration_test 钩子：真实解析路径的只读出口
+/// （桌面运行时验证多实例同类名下 PID 过滤只命中本进程窗口）。
+@visibleForTesting
+int runnerWindowHwndForTest() {
+  final lib = DynamicLibrary.open('user32.dll');
+  return _resolveRunnerWindowHwnd(lib);
 }
 
 /// Windows 任务栏闪烁（win32 FlashWindowEx）。

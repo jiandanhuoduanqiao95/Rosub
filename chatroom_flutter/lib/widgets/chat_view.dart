@@ -12,9 +12,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../config.dart';
-import '../services/app_paths.dart';
 import '../models/chat_models.dart';
 import '../platform/capabilities.dart';
+import '../services/message_attachment.dart';
 import '../services/theme_settings.dart';
 import 'adaptive_text_field.dart';
 import 'responsive_layout.dart';
@@ -1187,15 +1187,10 @@ class _MessageBubble extends StatelessWidget {
     return path != null && File(path).existsSync();
   }
 
-  /// 解析图片的本地磁盘路径（filePath 优先，否则按文件名回推 received_files）
-  String? get _resolvedImagePath {
-    final fp = message.filePath;
-    if (fp != null) return fp;
-    final name = message.filename;
-    if (name == null) return null;
-    final base = name.split(RegExp(r'[/\\]')).last;
-    return '${AppPaths.receivedFilesDir}/$base';
-  }
+  /// 解析图片的本地磁盘路径（统一解析器：filePath → SentFileStore →
+  /// 唯一接收路径 → 旧版按文件名路径；自己发送不回退旧接收目录）
+  String? get _resolvedImagePath =>
+      resolveMessageAttachmentPath(message, isSelf: isSelf);
 
   /// 阶段 P1：是否为可内嵌展示的视频文件消息（未撤回 + 视频扩展名 +
   /// 传输完成——同 N3b 破图门控）

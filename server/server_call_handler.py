@@ -25,6 +25,7 @@ class CallHandler:
 
     CALL_INVITE_TIMEOUT = 60.0
     GROUP_CALL_MAX_PARTICIPANTS = 6
+    CALL_RECONNECT_GRACE = 30.0
 
     _FAIL_TEXTS = {
         "invalid": "呼叫参数无效",
@@ -77,7 +78,8 @@ class CallHandler:
             self._handle_accept(username, header)
         elif msg_type in ("call_reject", "call_cancel", "call_hangup"):
             self._handle_terminal(username, header, msg_type)
-        elif msg_type in ("call_offer", "call_answer", "call_ice"):
+        elif msg_type in ("call_offer", "call_answer", "call_ice",
+                          "call_resume_request"):
             self._handle_relay(username, header, msg_type, data)
         elif msg_type == "group_call_invite":
             self._handle_group_invite(username, header)
@@ -118,6 +120,8 @@ class CallHandler:
                 "call_type": call_type,
                 "accepted": False,
                 "created": time.time(),
+                "suspended": set(),
+                "suspended_at": {},
             }
         delivered = self.server.broadcast_to_user(
             target, "call_invite", "",
@@ -189,6 +193,11 @@ class CallHandler:
                     logging.warning(f"通话信令目标异常被丢弃: 用户={username}, "
                                     f"目标={target}, 呼叫ID={call_id}")
                     return
+                if msg_type in ("call_offer", "call_answer", "call_ice",
+                                "call_resume_request"):
+                    if username in call["suspended"]:
+                        call["suspended"].discard(username)
+                        call["suspended_at"].pop(username, None)
             else:
                 room = self.rooms.get(call_id)
                 if room is None:
@@ -352,14 +361,27 @@ class CallHandler:
 
     def cleanup_user(self, username):
         """用户全部会话下线后的通话清理（client_handler finally 调用，
-        须在 client_map_lock 之外）：1:1 主叫断开 → 被叫收 call_cancel；
-        1:1 被叫断开 → 主叫收 call_hangup。群房间参与者断开 → 群广播
-        group_call_left(reason=disconnect)，房间空则删除并 ended 通知
-        振铃者；振铃者断开 → 静默移出 ringing。"""
+        须在 client_map_lock 之外）：1:1 主叫断开 → 按接听状态分流——
+        已接听（accepted）→ 进入重连宽限期（suspended 集合 + suspended_at
+        记录，不删通话），在线对端收 call_suspended(reason=disconnect)；
+        未接听（振铃中）→ 立即删除，被叫收 call_cancel；1:1 被叫断开且
+        未接听 → 立即删除，主叫收 call_hangup。对端同样断开时静默（其
+        不在线收不到）。宽限期内任一方重新登录（user_online）清 suspended
+        并通知对端 call_peer_back；超宽限期由 expire_calls 删除整场。
+        群房间参与者断开 → 群广播 group_call_left(reason=disconnect)，
+        房间空则删除并 ended 通知振铃者；振铃者断开 → 静默移出 ringing。"""
         with self._lock:
             affected = []
+            suspended_events = []
             for call_id, call in list(self.calls.items()):
                 if username not in (call["caller"], call["callee"]):
+                    continue
+                if call["accepted"]:
+                    call["suspended"].add(username)
+                    call["suspended_at"][username] = time.time()
+                    peer = (call["callee"] if username == call["caller"]
+                            else call["caller"])
+                    suspended_events.append((call_id, peer))
                     continue
                 del self.calls[call_id]
                 if username == call["caller"]:
@@ -382,9 +404,19 @@ class CallHandler:
             try:
                 self.server.broadcast_to_user(
                     target, msg_type, "",
-                    extra_headers={"from": username, "call_id": call_id})
+                    extra_headers={"from": username, "call_id": call_id,
+                                   "reason": "disconnect"})
             except Exception as e:
                 logging.warning(f"通话断开通知失败: 用户={username}, "
+                                f"呼叫ID={call_id}, 错误={e}")
+        for call_id, peer in suspended_events:
+            try:
+                self.server.broadcast_to_user(
+                    peer, "call_suspended", "",
+                    extra_headers={"from": username, "call_id": call_id,
+                                   "reason": "disconnect"})
+            except Exception as e:
+                logging.warning(f"通话挂起通知失败: 用户={username}, "
                                 f"呼叫ID={call_id}, 错误={e}")
         for room_id, group_id, participants, ended in room_events:
             try:
@@ -400,12 +432,45 @@ class CallHandler:
                 logging.warning(f"群通话断开清理通知失败: 用户={username}, "
                                 f"房间ID={room_id}, 错误={e}")
 
+    def user_online(self, username):
+        """用户重新上线（首个主会话登录路径调用）：清除其挂起状态并通知
+        在线对端 call_peer_back（header role=返回方的 caller/callee 角色，
+        客户端据此决定由谁发起重协商——caller 恒为 offer 发起方）。
+        未挂起时为 no-op（多会话并存/常规登录零影响）。"""
+        resumed = []
+        with self._lock:
+            for call_id, call in self.calls.items():
+                if username not in call["suspended"]:
+                    continue
+                call["suspended"].discard(username)
+                call["suspended_at"].pop(username, None)
+                role = ("caller" if username == call["caller"]
+                        else "callee")
+                peer = (call["callee"] if role == "caller"
+                        else call["caller"])
+                resumed.append((call_id, peer, role))
+        for call_id, peer, role in resumed:
+            try:
+                self.server.broadcast_to_user(
+                    peer, "call_peer_back", "",
+                    extra_headers={"from": username, "call_id": call_id,
+                                   "role": role})
+            except Exception as e:
+                logging.warning(f"通话返回通知失败: 用户={username}, "
+                                f"呼叫ID={call_id}, 错误={e}")
+            logging.info(f"挂起通话方重新上线: 用户={username}, "
+                         f"角色={role}, 呼叫ID={call_id}")
+
     def expire_calls(self, now=None):
-        """清理超时未接听的邀请与群房间振铃（scheduler_scan 周期调用，
-        可测试直驱）：1:1 主叫收 call_failed(reason=expired)，被叫全部
-        会话收 call_cancel；群房间超时振铃成员移出并向全体群成员广播
-        group_call_left(reason=timeout)（多端收敛）。已接听通话与房间
-        参与者不受影响。返回被清理的 1:1 call_id 列表。"""
+        """清理超时未接听的邀请、重连宽限期超时的已接听通话与群房间振铃
+        （scheduler_scan 周期调用，可测试直驱）：1:1 未接听超时 → 主叫收
+        call_failed(reason=expired)，被叫全部会话收 call_cancel；1:1 已
+        接听且任一方 suspended 超宽限期（CALL_RECONNECT_GRACE）→ 删除
+        整场通话，在线且非 suspended 的对端收 call_hangup
+        (reason=reconnect_timeout)，双方均 suspended 静默删除；群房间
+        超时振铃成员移出并向全体群成员广播 group_call_left(reason=timeout)
+        （多端收敛）。正常通话中的参与者不受影响。返回被清理的 1:1
+        call_id 列表。"""
         now = now if now is not None else time.time()
         with self._lock:
             expired = [(call_id, call)
@@ -414,6 +479,20 @@ class CallHandler:
                        and now - call["created"] >= self.CALL_INVITE_TIMEOUT]
             for call_id, _ in expired:
                 del self.calls[call_id]
+            grace_expired = []
+            for call_id, call in list(self.calls.items()):
+                suspended = call["suspended"]
+                if not suspended:
+                    continue
+                suspended_at = call["suspended_at"]
+                over = [u for u in suspended
+                        if now - suspended_at.get(u, now)
+                        >= self.CALL_RECONNECT_GRACE]
+                if not over:
+                    continue
+                del self.calls[call_id]
+                waiting = {call["caller"], call["callee"]} - suspended
+                grace_expired.append((call_id, call, waiting))
             expired_ringers = []
             for room_id, room in list(self.rooms.items()):
                 for member, started in list(room["ringing"].items()):
@@ -434,6 +513,21 @@ class CallHandler:
             except Exception as e:
                 logging.warning(f"通话过期清理通知失败: 呼叫ID={call_id}, "
                                 f"错误={e}")
+        for call_id, call, waiting in grace_expired:
+            for peer in waiting:
+                try:
+                    self.server.broadcast_to_user(
+                        peer, "call_hangup", "",
+                        extra_headers={
+                            "from": (call["callee"] if peer == call["caller"]
+                                     else call["caller"]),
+                            "call_id": call_id,
+                            "reason": "reconnect_timeout"})
+                except Exception as e:
+                    logging.warning(f"重连宽限期清理通知失败: "
+                                    f"呼叫ID={call_id}, 对端={peer}, "
+                                    f"错误={e}")
+            logging.info(f"重连宽限期超时删除通话: 呼叫ID={call_id}")
         for room_id, member, group_id, participants in expired_ringers:
             try:
                 for m in self.server.db.get_group_members(group_id):
@@ -446,4 +540,5 @@ class CallHandler:
             except Exception as e:
                 logging.warning(f"群通话振铃过期清理通知失败: "
                                 f"房间ID={room_id}, 成员={member}, 错误={e}")
-        return [call_id for call_id, _ in expired]
+        return ([call_id for call_id, _ in expired]
+                + [call_id for call_id, _, _ in grace_expired])

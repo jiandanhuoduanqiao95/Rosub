@@ -24,6 +24,8 @@ import 'app_paths.dart';
 import 'call_engine.dart';
 import 'call_service.dart';
 import 'certificate_trust.dart';
+import 'file_names.dart' as file_names;
+import 'message_attachment.dart';
 import 'message_cache.dart';
 import 'sent_file_store.dart';
 import 'sticker_store.dart';
@@ -599,6 +601,12 @@ class SocketService implements CallSignaling {
         _startListening();
         _startKeepalive();
         state.log('重连成功，已恢复连接');
+        // opt9 断线恢复：信令恢复后通知通话服务——媒体存活则跳过，
+        // 否则 1:1 按角色重协商（caller offer / callee resume），
+        // 群通话重入房间重建 mesh
+        if (callService.isInLiveCall) {
+          callService.onSignalingReconnected();
+        }
         // 阶段 I1：重连成功后自动补发本地 pending 队列（断线期间的消息）
         unawaited(flushPendingQueue());
         return;
@@ -715,9 +723,9 @@ class SocketService implements CallSignaling {
         if (type == 'file' && bodyLen > 0) {
           // 接收大文件：流式落盘（气泡 + 进度条宿主）
           final filename = header['filename'] as String? ?? 'received_file';
-          final target = _prepareReceiveTarget(filename);
           final fileId =
               header['message_id'] as String? ?? _generateMessageId();
+          final target = _prepareReceiveTarget(fileId, filename);
           _handleFileMessage(header, target);
           state.updateTransfer(fileId, 0, bodyLen);
           final written = await readFileBody(
@@ -935,9 +943,13 @@ class SocketService implements CallSignaling {
       final replyPreview = header['reply_preview'] as String?;
       // file 消息体流式落盘（阶段 G 大文件支持），其余读入内存
       final dynamic body;
+      String? streamReceiveId;
       if (type == 'file' && bodyLen > 0) {
         final filename = header['filename'] as String? ?? 'file';
-        final target = _prepareReceiveTarget(filename);
+        final receiveId =
+            initMsgId.isNotEmpty ? initMsgId : _generateMessageId();
+        streamReceiveId = receiveId;
+        final target = _prepareReceiveTarget(receiveId, filename);
         // 先添加历史消息气泡（进度条宿主），再流式接收
         if (isHistory && from != null) {
           final to = header['to'] as String?;
@@ -950,8 +962,9 @@ class SocketService implements CallSignaling {
             sender: from,
             content: '[文件] $filename',
             type: 'file',
-            messageId: initMsgId,
+            messageId: receiveId,
             filename: filename,
+            filePath: target,
             groupId: gid,
             filesize: bodyLen,
             timestamp: msgTimestamp,
@@ -966,17 +979,17 @@ class SocketService implements CallSignaling {
         _pingOutstanding = false;
         _pongWatchdog?.cancel();
         _pongWatchdog = null;
-        state.updateTransfer(initMsgId, 0, bodyLen);
+        state.updateTransfer(receiveId, 0, bodyLen);
         final written = await readFileBody(
           _reader!,
           bodyLen,
           target,
           onProgress: (received, total) {
-            _updateTransferThrottled(initMsgId, received, total);
+            _updateTransferThrottled(receiveId, received, total);
           },
         );
         _receivingFile = false;
-        state.removeTransfer(initMsgId);
+        state.removeTransfer(receiveId);
         if (written != bodyLen) break;
         body = target;
       } else {
@@ -984,7 +997,8 @@ class SocketService implements CallSignaling {
         if (body == null) break;
       }
 
-      final messageId = header['message_id'] as String? ?? _generateMessageId();
+      final messageId = header['message_id'] as String? ??
+          (streamReceiveId ?? _generateMessageId());
 
       switch (type) {
         case 'chat':
@@ -1068,7 +1082,7 @@ class SocketService implements CallSignaling {
             final chatKey = gid != null
                 ? 'group_$gid'
                 : ((from == state.username && to != null) ? to : from);
-            _saveReceivedFile(filename, body);
+            final savedPath = _saveReceivedFile(messageId, filename, body);
             state.addMessage(
               chatKey,
               ChatMessage(
@@ -1077,6 +1091,7 @@ class SocketService implements CallSignaling {
                 type: 'file',
                 messageId: messageId,
                 filename: filename,
+                filePath: savedPath,
                 groupId: gid,
                 filesize: body.lengthInBytes,
                 fileData: body,
@@ -1100,6 +1115,7 @@ class SocketService implements CallSignaling {
               type: 'file',
               messageId: messageId,
               filename: filename,
+              filePath: body is String ? body : null,
               groupId: gid,
               filesize:
                   int.tryParse(header['filesize'] as String? ?? '') ?? bodyLen,
@@ -1327,6 +1343,9 @@ class SocketService implements CallSignaling {
         case 'call_cancel':
         case 'call_hangup':
         case 'call_failed':
+        case 'call_suspended':
+        case 'call_peer_back':
+        case 'call_resume_request':
         case 'call_offer':
         case 'call_answer':
         case 'call_ice':
@@ -1400,9 +1419,9 @@ class SocketService implements CallSignaling {
         }
         if (type == 'file' && bodyLen > 0) {
           final filename = header['filename'] as String? ?? 'received_file';
-          final target = _prepareReceiveTarget(filename);
           final fileId =
               header['message_id'] as String? ?? _generateMessageId();
+          final target = _prepareReceiveTarget(fileId, filename);
           // 先添加消息气泡（进度条宿主），再流式接收
           _handleFileMessage(header, target);
           _receivingFile = true;
@@ -1481,6 +1500,7 @@ class SocketService implements CallSignaling {
       timestamp: _parseTimestamp(header['timestamp'] as String?),
       isHistory: false,
       status: header['status'] as String? ?? 'delivered',
+      isFileMeta: true,
     );
     state.addMessage(chatKey, msg);
   }
@@ -1723,7 +1743,7 @@ class SocketService implements CallSignaling {
         final gid = int.tryParse(header['group_id'] as String? ?? '');
         final chatKey = gid != null ? 'group_$gid' : sender;
         // 保存文件到本地（阶段 N3b：返回路径供内联图片展示）
-        final savedPath = _saveReceivedFile(filename, body);
+        final savedPath = _saveReceivedFile(messageId, filename, body);
         final msg = ChatMessage(
           sender: sender,
           content: '[收到文件] $filename',
@@ -1787,11 +1807,8 @@ class SocketService implements CallSignaling {
           if (annGid != null) {
             final removed = state.syncGroupAnnouncements(
                 int.tryParse(annGid) ?? 0, announcements);
-            final store = MessageCache.store;
             for (final mid in removed) {
-              if (store != null && store.isOpen) {
-                unawaited(store.removeMessage('group_$annGid', mid));
-              }
+              unawaited(MessageCache.removeMessage('group_$annGid', mid));
             }
           } else {
             state.setGroupAnnouncements(announcements);
@@ -1809,10 +1826,7 @@ class SocketService implements CallSignaling {
           state.removeGroupAnnouncement(delMid);
           final chatKey = 'group_$delGid';
           state.removeMessageLocally(chatKey, delMid);
-          final store = MessageCache.store;
-          if (store != null && store.isOpen) {
-            unawaited(store.removeMessage(chatKey, delMid));
-          }
+          unawaited(MessageCache.removeMessage(chatKey, delMid));
         }
         break;
 
@@ -1970,7 +1984,7 @@ class SocketService implements CallSignaling {
       case 'status_update':
         final newStatus = header['status'] as String?;
         if (newStatus != null) {
-          state.updateMessageStatus(messageId, newStatus);
+          state.applyServerStatus(messageId, newStatus);
         }
         break;
 
@@ -2349,6 +2363,9 @@ class SocketService implements CallSignaling {
       case 'call_cancel':
       case 'call_hangup':
       case 'call_failed':
+      case 'call_suspended':
+      case 'call_peer_back':
+      case 'call_resume_request':
       case 'call_offer':
       case 'call_answer':
       case 'call_ice':
@@ -3424,13 +3441,10 @@ class SocketService implements CallSignaling {
   Future<void> permanentlyDeleteMessage(
       String chatKey, String messageId) async {
     state.removeMessageLocally(chatKey, messageId);
-    final store = MessageCache.store;
-    if (store != null && store.isOpen) {
-      try {
-        await store.removeMessage(chatKey, messageId);
-      } catch (_) {
-        // 缓存删除失败不影响内存侧删除（尽力而为）
-      }
+    try {
+      await MessageCache.removeMessage(chatKey, messageId);
+    } catch (_) {
+      // 缓存删除失败不影响内存侧删除（尽力而为）
     }
   }
 
@@ -3444,8 +3458,9 @@ class SocketService implements CallSignaling {
       String to, Uint8List bytes, String filename) async {
     if (_socket == null) return false;
     final messageId = _generateMessageId();
+    String? sentPath;
     try {
-      final sentPath = _persistSentCopy(messageId, filename, bytes);
+      sentPath = _persistSentCopy(messageId, filename, bytes);
       if (sentPath != null) {
         unawaited(SentFileStore.record(messageId, sentPath));
       }
@@ -3467,6 +3482,7 @@ class SocketService implements CallSignaling {
           type: 'file',
           messageId: messageId,
           filename: filename,
+          filePath: sentPath,
           fileData: bytes,
           filesize: size,
           status: 'sent',
@@ -3498,20 +3514,15 @@ class SocketService implements CallSignaling {
 
   /// 文件名安全过滤（阶段 G5）：去除路径分隔符，防止路径穿越。
   /// 返回 basename；空 / "." / ".." 时回退为 received_file。
-  static String sanitizeFilename(String filename) {
-    final base = filename.split(RegExp(r'[/\\]')).last;
-    if (base.isEmpty || base == '.' || base == '..') {
-      return 'received_file';
-    }
-    return base;
-  }
+  static String sanitizeFilename(String filename) =>
+      file_names.sanitizeFilename(filename);
 
-  /// 准备接收文件的目标路径（安全文件名 + 确保目录存在）
-  String _prepareReceiveTarget(String filename) {
-    final safeName = sanitizeFilename(filename);
+  /// 准备接收文件的目标路径（messageId 唯一前缀 + 安全文件名 + 确保目录存在）
+  String _prepareReceiveTarget(String messageId, String filename) {
+    final target = receivedAttachmentPath(messageId, filename);
     final dir = Directory(AppPaths.receivedFilesDir);
     if (!dir.existsSync()) dir.createSync(recursive: true);
-    return '${dir.path}/$safeName';
+    return target;
   }
 
   /// 字节直发副本落盘（Q1 五轮问题2）：sent_files/<messageId>_<safeName>
@@ -3529,13 +3540,12 @@ class SocketService implements CallSignaling {
     }
   }
 
-  /// 保存接收到的文件，返回落盘路径（失败返回 null）。
-  String? _saveReceivedFile(String filename, Uint8List data) {
+  /// 保存接收到的文件到 messageId 唯一路径，返回落盘路径（失败返回 null）。
+  String? _saveReceivedFile(
+      String messageId, String filename, Uint8List data) {
     try {
-      final safeName = sanitizeFilename(filename);
-      final dir = Directory(AppPaths.receivedFilesDir);
-      if (!dir.existsSync()) dir.createSync(recursive: true);
-      final file = File('${dir.path}/$safeName');
+      final target = _prepareReceiveTarget(messageId, filename);
+      final file = File(target);
       file.writeAsBytesSync(data);
       state.log('文件已保存: ${file.path}');
       return file.path;

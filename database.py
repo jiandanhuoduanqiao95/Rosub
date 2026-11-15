@@ -11,6 +11,7 @@ class Database:
             from config import config
             db_name = config.get("database.path", "users.db")
         self.db_name = db_name
+        os.makedirs(os.path.dirname(os.path.abspath(self.db_name)), exist_ok=True)
         print(f"数据库路径: {os.path.abspath(self.db_name)}")
         self._init_db()
 
@@ -427,9 +428,30 @@ class Database:
                     content BLOB NOT NULL,
                     schedule_at REAL NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    claimed_at REAL,
+                    fail_reason TEXT NOT NULL DEFAULT '',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            cursor.execute("PRAGMA table_info(scheduled_messages)")
+            sched_cols = {row[1] for row in cursor.fetchall()}
+            sched_column_migrations = (
+                ("attempts",
+                 "ALTER TABLE scheduled_messages "
+                 "ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"),
+                ("claimed_at",
+                 "ALTER TABLE scheduled_messages ADD COLUMN claimed_at REAL"),
+                ("fail_reason",
+                 "ALTER TABLE scheduled_messages "
+                 "ADD COLUMN fail_reason TEXT NOT NULL DEFAULT ''"),
+            )
+            for col, ddl in sched_column_migrations:
+                if col not in sched_cols:
+                    cursor.execute(ddl)
+                    logging.info(
+                        f"scheduled_messages 表已迁移：新增 {col} 列")
 
             conn.commit()
 
@@ -2704,14 +2726,98 @@ class Database:
             rows = cursor.fetchall()
         return [self._scheduled_row_dict(row) for row in rows]
 
+    def claim_due_scheduled_messages(self, now=None, limit=100):
+        if now is None:
+            now = time.time()
+        conn = sqlite3.connect(self.db_name, check_same_thread=False,
+                               isolation_level=None, timeout=30.0)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute(f'''
+                SELECT {self._SCHEDULED_COLUMNS} FROM scheduled_messages
+                WHERE status = 'pending' AND schedule_at <= ?
+                ORDER BY schedule_at ASC, id ASC
+                LIMIT ?
+            ''', (now, limit))
+            rows = cursor.fetchall()
+            claimed = []
+            for row in rows:
+                cursor.execute('''
+                    UPDATE scheduled_messages
+                    SET status = 'sending', claimed_at = ?
+                    WHERE id = ? AND status = 'pending'
+                ''', (now, row[0]))
+                if cursor.rowcount > 0:
+                    claimed.append(self._scheduled_row_dict(row))
+            cursor.execute("COMMIT")
+            return claimed
+        except sqlite3.Error:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            conn.close()
+
     def mark_scheduled_message_sent(self, scheduled_id):
-        """标记定时消息已投递（O5，幂等）。"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE scheduled_messages SET status = 'sent' WHERE id = ?",
-                (scheduled_id,))
+            cursor.execute('''
+                UPDATE scheduled_messages
+                SET status = 'sent', claimed_at = NULL
+                WHERE id = ? AND status IN ('pending', 'sending')
+            ''', (scheduled_id,))
             conn.commit()
+            return cursor.rowcount > 0
+
+    def recover_stale_scheduled_claims(self, now=None, stale_seconds=300):
+        if now is None:
+            now = time.time()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE scheduled_messages
+                SET status = 'pending', claimed_at = NULL
+                WHERE status = 'sending' AND claimed_at IS NOT NULL
+                  AND claimed_at < ?
+            ''', (now - stale_seconds,))
+            conn.commit()
+            return cursor.rowcount
+
+    def release_scheduled_message(self, scheduled_id, max_attempts=3):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE scheduled_messages
+                SET attempts = attempts + 1,
+                    claimed_at = NULL,
+                    status = CASE WHEN attempts + 1 >= ?
+                                  THEN 'failed' ELSE 'pending' END,
+                    fail_reason = CASE WHEN attempts + 1 >= ?
+                                       THEN ? ELSE '' END
+                WHERE id = ? AND status = 'sending'
+            ''', (max_attempts, max_attempts,
+                  f"投递重试 {max_attempts} 次后仍失败", scheduled_id))
+            conn.commit()
+            if cursor.rowcount <= 0:
+                return None
+            cursor.execute(
+                "SELECT status FROM scheduled_messages WHERE id = ?",
+                (scheduled_id,))
+            return cursor.fetchone()[0]
+
+    def fail_scheduled_message(self, scheduled_id, reason):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE scheduled_messages
+                SET status = 'failed', fail_reason = ?, claimed_at = NULL
+                WHERE id = ? AND status = 'sending'
+            ''', (reason or "", scheduled_id))
+            conn.commit()
+            return cursor.rowcount > 0
 
     def cancel_scheduled_message(self, message_id, sender):
         """取消定时消息（O5）：仅本人可取消，仅 pending 可取消。"""

@@ -1,15 +1,17 @@
 # ============================================================
 # 聊天室服务端 —— Docker Compose 编排（阶段 M5：P1-20）
 # ============================================================
-# 用法：docker compose -f deploy/docker-compose.yml up -d
+# 用法：docker compose -f deploy/docker-compose.yml up -d --build
 # 管理员密钥：编辑下方环境变量（或使用 .env 文件）
+# 数据持久化：CHATROOM_DATA_DIR=/app/data 使数据库与 file_store 落数据卷
+#   （config.py _apply_env_overrides 读取，优先级：环境变量 > config.yaml > 默认值）
 # ============================================================
 
 services:
   chatroom:
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: deploy/Dockerfile
     image: chatroom:latest
     container_name: chatroom
     restart: on-failure
@@ -20,7 +22,7 @@ services:
       - CHATROOM_DATA_DIR=/app/data
     volumes:
       - chatroom-data:/app/data
-      - ./SSL:/app/SSL:ro
+      - ../SSL:/app/SSL:ro
 
 volumes:
   chatroom-data:

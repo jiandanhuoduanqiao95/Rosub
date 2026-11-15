@@ -40,6 +40,16 @@ abstract class CallPeerSession {
   Future<void> close();
 }
 
+/// 断线恢复能力（可选接口，不给 CallEngine 加必选方法）：1:1 通话
+/// ICE 连接失败/信令断线重连后的 ICE restart。一对一 WebRtcCallEngine
+/// 与群通话单边 _WebRtcPeerSession 实现；假引擎（单测）不实现则走
+/// resume 信令恢复路径。
+abstract class IceRestartCapable {
+  /// 触发 ICE restart（后续需重新 createOffer/answer 协商）；
+  /// 会话不存在或已关闭返回 false。
+  Future<bool> restartIce();
+}
+
 abstract class CallEngineListener {
   void onLocalCandidate(Map<String, Object?> candidate);
   void onRemoteStream();
@@ -89,7 +99,7 @@ abstract class CallEngine {
   Future<void> close();
 }
 
-class WebRtcCallEngine implements CallEngine {
+class WebRtcCallEngine implements CallEngine, IceRestartCapable {
   WebRtcCallEngine();
 
   static const _iceServers = {
@@ -457,6 +467,18 @@ class WebRtcCallEngine implements CallEngine {
   }
 
   @override
+  Future<bool> restartIce() async {
+    final pc = _pc;
+    if (pc == null) return false;
+    try {
+      await pc.restartIce();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
   Future<void> setRemoteOffer(Map<String, Object?> description) async {
     await _pc!.setRemoteDescription(RTCSessionDescription(
       description['sdp'] as String?,
@@ -686,7 +708,7 @@ class WebRtcCallEngine implements CallEngine {
 }
 
 /// 群通话单条 mesh 边的真实现：独立 PC + 共享本地轨道
-class _WebRtcPeerSession implements CallPeerSession {
+class _WebRtcPeerSession implements CallPeerSession, IceRestartCapable {
   _WebRtcPeerSession(
       this.peerId, RTCPeerConnection pc, this._listener, MediaStream? local)
       : _pc = pc {
@@ -768,6 +790,16 @@ class _WebRtcPeerSession implements CallPeerSession {
       description['sdp'] as String?,
       description['type'] as String?,
     ));
+  }
+
+  @override
+  Future<bool> restartIce() async {
+    try {
+      await _pc.restartIce();
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   @override

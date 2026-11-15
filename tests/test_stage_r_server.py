@@ -322,6 +322,54 @@ class TestDisconnectCleanup:
         h, _ = alice.expect("call_hangup")
         assert h["from"] == "bob"
 
+    def test_accepted_caller_disconnect_suspends_call(self, harness):
+        """opt9：已接听通话主叫断线 → 被叫收 call_suspended（reason=disconnect），
+        通话进入宽限期不删除（旧语义为立即 call_hangup，已按恢复语义更新）。"""
+        alice = _login(harness, "alice")
+        bob = _login(harness, "bob")
+        _invite(alice, "bob", "call-1")
+        bob.expect("call_invite")
+        bob.send("call_accept", "", to="alice", call_id="call-1")
+        alice.expect("call_accept")
+        bob.expect("call_active")
+        alice.close()
+        h, _ = bob.expect("call_suspended")
+        assert h["type"] == "call_suspended"
+        assert h["from"] == "alice"
+        assert h["reason"] == "disconnect"
+        assert "call-1" in harness.server.call_handler.calls
+        assert harness.server.call_handler.calls["call-1"]["suspended"] == {"alice"}
+
+    def test_unaccepted_caller_disconnect_cancel_carries_reason(
+            self, harness):
+        """opt8 #4：振铃中主叫断线 → 被叫收 call_cancel（reason=disconnect）。"""
+        alice = _login(harness, "alice")
+        bob = _login(harness, "bob")
+        _invite(alice, "bob", "call-1")
+        bob.expect("call_invite")
+        alice.close()
+        h, _ = bob.expect("call_cancel")
+        assert h["type"] == "call_cancel"
+        assert h["reason"] == "disconnect"
+        assert not harness.server.call_handler.calls
+
+    def test_accepted_callee_disconnect_suspends_call(self, harness):
+        """opt9：已接听通话被叫断线 → 主叫收 call_suspended，通话挂起
+        （旧语义为立即 call_hangup，已按恢复语义更新）。"""
+        alice = _login(harness, "alice")
+        bob = _login(harness, "bob")
+        _invite(alice, "bob", "call-1")
+        bob.expect("call_invite")
+        bob.send("call_accept", "", to="alice", call_id="call-1")
+        alice.expect("call_accept")
+        bob.expect("call_active")
+        bob.close()
+        h, _ = alice.expect("call_suspended")
+        assert h["type"] == "call_suspended"
+        assert h["reason"] == "disconnect"
+        assert "call-1" in harness.server.call_handler.calls
+        assert harness.server.call_handler.calls["call-1"]["suspended"] == {"bob"}
+
     def test_disconnect_clears_busy(self, harness):
         alice = _login(harness, "alice")
         bob = _login(harness, "bob")
@@ -382,3 +430,170 @@ class TestExceptionIsolation:
         assert h["reason"] == "invalid"
         _invite(alice, "bob", "call-ok")
         bob.expect("call_invite")
+
+
+class TestReconnectGrace:
+
+    def _accepted_call(self, harness):
+        alice = _login(harness, "alice")
+        bob = _login(harness, "bob")
+        _invite(alice, "bob", "call-1")
+        bob.expect("call_invite")
+        bob.send("call_accept", "", to="alice", call_id="call-1")
+        alice.expect("call_accept")
+        bob.expect("call_active")
+        return alice, bob
+
+    def test_user_online_clears_suspension_and_notifies_peer_back(
+            self, harness):
+        alice, bob = self._accepted_call(harness)
+        alice.close()
+        h, _ = bob.expect("call_suspended")
+        assert h["from"] == "alice"
+        alice2 = _login(harness, "alice")
+        h2, _ = bob.expect("call_peer_back")
+        assert h2["type"] == "call_peer_back"
+        assert h2["from"] == "alice"
+        assert h2["call_id"] == "call-1"
+        assert h2["role"] == "caller"
+        call = harness.server.call_handler.calls["call-1"]
+        assert call["suspended"] == set()
+
+    def test_callee_back_carries_role_callee(self, harness):
+        alice, bob = self._accepted_call(harness)
+        bob.close()
+        h, _ = alice.expect("call_suspended")
+        assert h["from"] == "bob"
+        bob2 = _login(harness, "bob")
+        h2, _ = alice.expect("call_peer_back")
+        assert h2["role"] == "callee"
+        assert harness.server.call_handler.calls["call-1"]["suspended"] == set()
+
+    def test_resume_request_relayed_and_clears_suspension(self, harness):
+        alice, bob = self._accepted_call(harness)
+        alice.close()
+        bob.expect("call_suspended")
+        alice2 = _login(harness, "alice")
+        bob.expect("call_peer_back")
+        handler = harness.server.call_handler
+        handler.calls["call-1"]["suspended"].add("alice")
+        handler.calls["call-1"]["suspended_at"]["alice"] = time.time()
+        alice2.send("call_resume_request", "", to="bob", call_id="call-1")
+        h, _ = bob.expect("call_resume_request")
+        assert h["type"] == "call_resume_request"
+        assert h["from"] == "alice"
+        assert h["call_id"] == "call-1"
+        assert handler.calls["call-1"]["suspended"] == set()
+
+    def test_resume_request_by_non_participant_dropped(self, harness):
+        alice, bob = self._accepted_call(harness)
+        harness.add_user("carol", "password789")
+        carol = _login(harness, "carol")
+        carol.send("call_resume_request", "", to="bob", call_id="call-1")
+        _assert_no_type(bob, "call_resume_request")
+
+    def test_grace_expiry_notifies_waiting_peer(self, harness):
+        alice, bob = self._accepted_call(harness)
+        handler = harness.server.call_handler
+        handler.CALL_RECONNECT_GRACE = 0.2
+        alice.close()
+        bob.expect("call_suspended")
+        time.sleep(0.3)
+        expired = handler.expire_calls()
+        assert expired == ["call-1"]
+        h, _ = bob.expect("call_hangup")
+        assert h["type"] == "call_hangup"
+        assert h["from"] == "alice"
+        assert h["reason"] == "reconnect_timeout"
+        assert not handler.calls
+
+    def test_grace_expiry_both_suspended_silent(self, harness):
+        alice, bob = self._accepted_call(harness)
+        handler = harness.server.call_handler
+        handler.CALL_RECONNECT_GRACE = 0.2
+        alice.close()
+        bob.close()
+        time.sleep(0.5)
+        expired = handler.expire_calls()
+        assert expired == ["call-1"]
+        assert not handler.calls
+
+    def test_within_grace_call_kept_and_no_hangup(self, harness):
+        alice, bob = self._accepted_call(harness)
+        handler = harness.server.call_handler
+        alice.close()
+        bob.expect("call_suspended")
+        expired = handler.expire_calls()
+        assert expired == []
+        assert "call-1" in handler.calls
+        _assert_no_type(bob, "call_hangup")
+
+    def test_suspended_call_still_counts_busy(self, call_env):
+        harness, alice, bob = call_env
+        _invite(alice, "bob", "call-1")
+        bob.expect("call_invite")
+        bob.send("call_accept", "", to="alice", call_id="call-1")
+        alice.expect("call_accept")
+        bob.expect("call_active")
+        carol = _login(harness, "carol")
+        alice.close()
+        bob.expect("call_suspended")
+        _invite(carol, "bob", "call-2")
+        h, _ = carol.expect("call_failed")
+        assert h["reason"] == "busy"
+
+    def test_unaccepted_disconnect_unchanged_by_grace(self, harness):
+        alice = _login(harness, "alice")
+        bob = _login(harness, "bob")
+        _invite(alice, "bob", "call-1")
+        bob.expect("call_invite")
+        alice.close()
+        h, _ = bob.expect("call_cancel")
+        assert h["reason"] == "disconnect"
+        assert not harness.server.call_handler.calls
+
+    def test_group_room_disconnect_cleanup_unchanged(self, harness):
+        handler = harness.server.call_handler
+        gid = harness.db.create_group("研发群", "alice")
+        with harness.db._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO group_members (group_id, username) VALUES (?, ?)",
+                (gid, "bob"))
+            conn.commit()
+        alice = _login(harness, "alice")
+        bob = _login(harness, "bob")
+        alice.send("group_call_invite", "", group_id=gid, call_id="room-9",
+                   call_type="audio")
+        bob.expect("group_call_invite")
+        bob.send("group_call_join", "", call_id="room-9")
+        alice.expect("group_call_joined")
+        bob.close()
+        h, _ = alice.expect("group_call_left")
+        assert h["reason"] == "disconnect"
+        assert handler.rooms["room-9"]["participants"] == {"alice"}
+
+    @pytest.mark.parametrize("msg_type,body", [
+        ("call_offer", json.dumps({"sdp": "re-offer", "type": "offer"})),
+        ("call_answer", json.dumps({"sdp": "re-answer", "type": "answer"})),
+        ("call_ice", json.dumps({"candidate": "c-recovery"})),
+        ("call_resume_request", ""),
+    ])
+    def test_relay_media_signals_clear_suspension(self, harness, msg_type,
+                                                  body):
+        """opt9 修订：任何来自挂起参与者的 relay 信令都应清除其挂起态
+        （否则 user_online 异常/时序差异时宽限期到期会误删已恢复通话）。"""
+        alice, bob = self._accepted_call(harness)
+        alice.close()
+        h, _ = bob.expect("call_suspended")
+        assert h["type"] == "call_suspended"
+        alice2 = _login(harness, "alice")
+        h2, _ = bob.expect("call_peer_back")
+        assert h2["type"] == "call_peer_back"
+        handler = harness.server.call_handler
+        handler.calls["call-1"]["suspended"].add("alice")
+        handler.calls["call-1"]["suspended_at"]["alice"] = time.time()
+        alice2.send(msg_type, body, to="bob", call_id="call-1")
+        h3, _ = bob.expect(msg_type)
+        assert h3["type"] == msg_type
+        assert h3["from"] == "alice"
+        assert handler.calls["call-1"]["suspended"] == set()

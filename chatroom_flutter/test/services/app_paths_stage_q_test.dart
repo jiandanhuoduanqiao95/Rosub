@@ -177,22 +177,30 @@ void main() {
       expect(countOf(src, 'AppConfig.receivedFilesDir'), 0,
           reason: '_prepareReceiveTarget/_saveReceivedFile 改走 AppPaths');
       expect(
-          countOf(src, 'AppPaths.receivedFilesDir'), greaterThanOrEqualTo(2));
+          countOf(src, 'AppPaths.receivedFilesDir'), greaterThanOrEqualTo(1));
+      expect(
+          countOf(srcOf('services/message_attachment.dart'),
+              'AppPaths.receivedFilesDir'),
+          greaterThanOrEqualTo(2),
+          reason: 'opt8 #13 收敛：唯一接收路径/旧路径解析走 AppPaths 平台目录');
     });
 
     test('chat_screen.dart 不再直接引用 AppConfig.receivedFilesDir', () {
       final src = srcOf('screens/chat_screen.dart');
       expect(countOf(src, 'AppConfig.receivedFilesDir'), 0,
           reason: '4 处接收路径改走 AppPaths');
-      expect(
-          countOf(src, 'AppPaths.receivedFilesDir'), greaterThanOrEqualTo(4));
+      expect(countOf(src, 'AppPaths.receivedFilesDir'), 0,
+          reason: 'opt8 #13 收敛：附件路径统一走 message_attachment 解析器');
+      expect(countOf(src, 'resolveMessageAttachmentPath'),
+          greaterThanOrEqualTo(4), reason: '调用点收敛到统一解析器');
     });
 
     test('chat_view.dart 不再直接引用 AppConfig.receivedFilesDir', () {
       final src = srcOf('widgets/chat_view.dart');
       expect(countOf(src, 'AppConfig.receivedFilesDir'), 0);
-      expect(
-          countOf(src, 'AppPaths.receivedFilesDir'), greaterThanOrEqualTo(1));
+      expect(countOf(src, 'AppPaths.receivedFilesDir'), 0,
+          reason: 'opt8 #13 收敛：缩略图解析走 message_attachment');
+      expect(countOf(src, 'resolveMessageAttachmentPath'), 1);
     });
 
     test('app_paths.dart 确实使用 path_provider（迁移本体锁定）', () {

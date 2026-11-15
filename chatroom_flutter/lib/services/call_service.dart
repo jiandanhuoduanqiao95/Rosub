@@ -145,6 +145,16 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   /// 信令让主叫即刻知晓）
   static const incomingRingTimeout = Duration(seconds: 30);
 
+  /// opt9 断线恢复：本地重连兜底超时（服务端宽限期 30s + 对端回线信令
+  /// 到达余量；超时本地挂断收场，不无限等待）
+  static const reconnectTimeout = Duration(seconds: 35);
+
+  /// opt9 断线恢复：ICE 连接 failed 后的自动恢复次数上限
+  static const maxIceRestartAttempts = 2;
+
+  /// 群通话重入的 joined[self] 兜底窗口（超时直接对既有远端发 offer）
+  static const groupRejoinFallback = Duration(seconds: 2);
+
   final CallSignaling _signaling;
   final CallEngine _engine;
   final String? Function() _selfUsername;
@@ -170,6 +180,41 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   /// 当前摄像头朝向（默认前置自拍；切换镜头后翻转——本地小窗镜像跟随，
   /// 后置不镜像）
   bool isFrontCamera = true;
+
+  // ---- opt9 断线恢复状态 ----
+  /// 本端/对端连接异常等待恢复中（UI 显示提示条）
+  bool reconnecting = false;
+
+  /// 恢复提示文案（CallScreen 顶部提示条数据源）
+  String? hint;
+
+  /// 本场 1:1 通话中是否为主叫（恢复协商方向判定：caller 恒为 offer
+  /// 发起方，callee 发 resume 请求，避免 offer 碰撞）
+  bool isCaller = false;
+
+  /// 重新协商进行中（offer 已发未 answer；resume/peer_back 重复触发去重）
+  bool renegotiating = false;
+
+  /// 群通话重入流程进行中（重连后 group_call_join 重入去重）
+  bool rejoinInProgress = false;
+
+  /// ICE failed 后已执行的恢复次数（超过 maxIceRestartAttempts 收场）
+  int iceRestartAttempts = 0;
+
+  /// 恢复兜底定时器（35s 超时挂断收场；connected/teardown 清除）
+  Timer? reconnectTimer;
+
+  /// 群重入 joined[self] 兜底定时器（2s；独立于 35s 恢复兜底——二者
+  /// 并存，35s 恒兜底收场，2s 只补发缺失 mesh 边的 offer）
+  Timer? groupFallbackTimer;
+
+  /// mesh 重建进行中标记（joined[self] 的 _startGroupOffers 在途时
+  /// 置位）：fallback 与重建完成前的并发入口据此让路，防止同一 peer
+  /// 被重复 createPeerSession/offer
+  bool _groupMeshSyncing = false;
+
+  /// 最近一次 1:1 PeerConnection 状态（信令断线重连后判定媒体是否存活）
+  String _lastPcState = '';
 
   // ---- R2 群通话状态 ----
   bool _isGroup = false;
@@ -361,6 +406,8 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     activeSince = null;
     _remoteDescSet = false;
     _pendingCandidates.clear();
+    _resetRecoveryState();
+    isCaller = true;
     _resetToggles(type);
     _setPhase(CallPhase.calling);
     try {
@@ -393,6 +440,8 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     _callId = _genCallId();
     endReason = null;
     activeSince = null;
+    _resetRecoveryState();
+    isCaller = false;
     _resetGroupSessionState({
       if (_self != null) _self!,
     });
@@ -493,6 +542,8 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     _callId = info.callId;
     endReason = null;
     activeSince = null;
+    _resetRecoveryState();
+    isCaller = false;
     _resetGroupSessionState({...info.participants, if (_self != null) _self!});
     _resetToggles(info.callType);
     await _beginGroupJoin();
@@ -549,6 +600,232 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   }
 
   // ============================================================
+  // 断线恢复（opt9：信令断线宽限期 + ICE 自愈 + 群重入）
+  // ============================================================
+
+  void _resetRecoveryState() {
+    reconnecting = false;
+    hint = null;
+    renegotiating = false;
+    rejoinInProgress = false;
+    _groupMeshSyncing = false;
+    iceRestartAttempts = 0;
+    reconnectTimer?.cancel();
+    reconnectTimer = null;
+    groupFallbackTimer?.cancel();
+    groupFallbackTimer = null;
+    _lastPcState = '';
+  }
+
+  void _startReconnectTimer() {
+    reconnectTimer?.cancel();
+    reconnectTimer = Timer(reconnectTimeout, () {
+      if (_phase != CallPhase.connecting && _phase != CallPhase.active) {
+        return;
+      }
+      if (_callId == null) return;
+      if (_isGroup) {
+        _safeSendGroup('group_call_leave');
+      } else if (_peer != null) {
+        _safeSend('call_hangup', _peer!, _callId!);
+      }
+      _teardown('重连超时，通话结束');
+    });
+  }
+
+  void _markReconnecting(String message) {
+    if (_phase != CallPhase.connecting && _phase != CallPhase.active) return;
+    reconnecting = true;
+    hint = message;
+    _startReconnectTimer();
+    notifyListeners();
+  }
+
+  void _clearRecovery({bool notify = false}) {
+    reconnectTimer?.cancel();
+    reconnectTimer = null;
+    groupFallbackTimer?.cancel();
+    groupFallbackTimer = null;
+    reconnecting = false;
+    hint = null;
+    renegotiating = false;
+    rejoinInProgress = false;
+    _groupMeshSyncing = false;
+    iceRestartAttempts = 0;
+    if (notify) notifyListeners();
+  }
+
+  /// 新恢复触发源（call_peer_back / call_resume_request / 信令重连）：
+  /// 清空上一轮恢复预算与在途协商标记——旧预算不应让对端回线触发的新
+  /// 恢复直接挂断。connected/成功 answer 的既有清零逻辑不受影响。
+  void _beginNewRecoveryTrigger() {
+    iceRestartAttempts = 0;
+    renegotiating = false;
+  }
+
+  /// 信令断线重连成功（SocketService._reconnectLoop 在 _relogin 成功后
+  /// 调用）：媒体 P2P 直连不依赖信令——PC 存活（connected）时无需恢复；
+  /// 否则 1:1 按角色分流恢复（caller 重协商 offer / callee 请求 resume），
+  /// 群通话重新加入房间并重建 mesh。phase 门控前置：ringing/calling
+  /// （未接听/等待接听）不重入、不收场。
+  void onSignalingReconnected() {
+    if (!isInLiveCall) return;
+    if (_phase != CallPhase.connecting && _phase != CallPhase.active) return;
+    _beginNewRecoveryTrigger();
+    if (_isGroup) {
+      unawaited(_rejoinGroupCall());
+      return;
+    }
+    if (_lastPcState == 'connected') {
+      _clearRecovery(notify: true);
+      return;
+    }
+    if (isCaller) {
+      unawaited(_recoverAsCaller());
+    } else {
+      unawaited(_requestResume());
+      _markReconnecting('正在请求恢复通话…');
+    }
+  }
+
+  /// caller 侧恢复：ICE restart + 重新发起 offer（防 glare：全场只有
+  /// caller 发 offer；renegotiating 去重并发触发）。恢复次数超限 →
+  /// hangup 收场。
+  Future<void> _recoverAsCaller() async {
+    if (_phase != CallPhase.connecting && _phase != CallPhase.active) return;
+    if (renegotiating) return;
+    if (iceRestartAttempts >= maxIceRestartAttempts) {
+      if (_peer != null && _callId != null) {
+        await _safeSend('call_hangup', _peer!, _callId!);
+      }
+      _teardown('连接恢复失败');
+      return;
+    }
+    renegotiating = true;
+    iceRestartAttempts++;
+    reconnecting = true;
+    hint = '正在恢复连接…';
+    _startReconnectTimer();
+    notifyListeners();
+    try {
+      final capable =
+          _engine is IceRestartCapable ? _engine as IceRestartCapable : null;
+      if (capable != null) {
+        await capable.restartIce();
+      }
+      // 重协商候选缓冲重置：初次协商后 _remoteDescSet=true，ICE restart
+      // 的新候选若直接 addRemoteCandidate 会打到旧 remote description
+      // （异常被吞导致恢复失败）——answer 前缓冲，answer 后冲刷
+      _remoteDescSet = false;
+      _pendingCandidates.clear();
+      final offer = await _engine.createOffer();
+      await _signaling.sendCall('call_offer', _peer!, _callId!,
+          body: jsonEncode(offer));
+    } catch (_) {
+      renegotiating = false;
+      notifyListeners();
+    }
+  }
+
+  /// callee 侧恢复：请求 caller 重新协商（caller 收到后发新 offer，
+  /// 本端以既有 PC answer——不发起 offer，避免 offer 碰撞）
+  Future<void> _requestResume() async {
+    if (_peer == null || _callId == null) return;
+    try {
+      await _signaling.sendCall('call_resume_request', _peer!, _callId!);
+    } catch (_) {}
+  }
+
+  /// ICE failed 恢复入口：最多 maxIceRestartAttempts 次恢复，超限 hangup
+  /// 收场（旧实现 failed 立即挂断——更新为恢复语义）。重复 failed 表示
+  /// 上一轮协商已死，重置 renegotiating 守卫允许再次发起。
+  Future<void> _recoverAfterFailure() async {
+    if (iceRestartAttempts >= maxIceRestartAttempts) {
+      if (_callId != null && _peer != null) {
+        await _safeSend('call_hangup', _peer!, _callId!);
+      }
+      _teardown('连接失败');
+      return;
+    }
+    renegotiating = false;
+    if (isCaller) {
+      await _recoverAsCaller();
+    } else {
+      await _requestResume();
+      _markReconnecting('连接失败，正在请求恢复…');
+    }
+  }
+
+  /// 群通话重入：knownGroupCalls 校验房间仍在 → group_call_join 重入 →
+  /// joined[self] 广播触发既有 _startGroupOffers 逐边重建 mesh；2 秒
+  /// fallback 对尚无会话的远端直接发 offer；房间已结束 → teardown。
+  /// 35s 恢复兜底定时器全程保留（join 后无任何 peer 连上时收场，不永久
+  /// connecting）；rejoinInProgress 保持到 mesh 重建完成/超时收场，期间
+  /// 重复的 onSignalingReconnected 不再重入。
+  Future<void> _rejoinGroupCall() async {
+    if (rejoinInProgress) return;
+    rejoinInProgress = true;
+    final gid = _groupId;
+    final id = _callId;
+    if (gid == null || id == null) {
+      rejoinInProgress = false;
+      _teardown('通话已结束');
+      return;
+    }
+    final info = knownGroupCalls[gid];
+    if (info == null || info.callId != id) {
+      _teardown('通话已结束');
+      return;
+    }
+    for (final peerState in _groupPeers.values) {
+      final session = peerState.session;
+      if (session != null) {
+        try {
+          // 逐个 await（1s 超时防卡死）：确保旧 PC 关闭完成后才 clear
+          // 并重建 mesh——旧 session 的迟到来回调不得命中新 session
+          await session.close().timeout(const Duration(seconds: 1));
+        } catch (_) {}
+      }
+    }
+    _groupPeers.clear();
+    _calleeMediaReady =
+        _engine.hasLocalMedia ? Future<void>.value() : _prepareGroupMedia();
+    _reachedConnecting = true;
+    _setPhase(CallPhase.connecting);
+    reconnecting = true;
+    hint = '正在重新加入群通话…';
+    _startReconnectTimer();
+    notifyListeners();
+    await _safeSendGroup('group_call_join');
+    groupFallbackTimer?.cancel();
+    groupFallbackTimer = Timer(groupRejoinFallback, () {
+      groupFallbackTimer = null;
+      if (_phase != CallPhase.connecting) return;
+      unawaited(_offerMissingGroupPeers());
+    });
+  }
+
+  /// 重入 fallback：仅对尚无 mesh 边会话的远端发 offer（joined[self]
+  /// 已触发的边不重复协商，避免打断在途 answer）；mesh 重建在途时让路
+  /// （_startGroupOffers 负责本轮建边）；完成即复位重入 guard
+  Future<void> _offerMissingGroupPeers() async {
+    try {
+      if (_groupMeshSyncing) return;
+      await (_calleeMediaReady ?? Future<void>.value());
+      if (_phase != CallPhase.connecting || !_isGroup) return;
+      if (!_engine.hasLocalMedia) return;
+      for (final p in remotePeers) {
+        if (_groupPeers[p]?.session == null) {
+          await _createPeerAndOffer(p);
+        }
+      }
+      notifyListeners();
+    } catch (_) {} finally {
+      rejoinInProgress = false;
+    }
+  }
+
+  // ============================================================
   // 信令入站（SocketService 分发）
   // ============================================================
 
@@ -564,19 +841,21 @@ class CallService extends ChangeNotifier implements CallEngineListener {
           }
           return;
         }
-        _isGroup = false;
-        _groupId = null;
-        _groupName = null;
-        _peer = from;
-        _callId = id;
-        _type = (header['call_type'] as String?) == 'video'
-            ? CallType.video
-            : CallType.audio;
-        endReason = null;
-        activeSince = null;
-        _remoteDescSet = false;
-        _pendingCandidates.clear();
-        _resetToggles(_type!);
+    _isGroup = false;
+    _groupId = null;
+    _groupName = null;
+    _peer = from;
+    _callId = id;
+    _type = (header['call_type'] as String?) == 'video'
+        ? CallType.video
+        : CallType.audio;
+    endReason = null;
+    activeSince = null;
+    _remoteDescSet = false;
+    _pendingCandidates.clear();
+    _resetRecoveryState();
+    isCaller = false;
+    _resetToggles(_type!);
         _setPhase(CallPhase.ringing);
         _startRingtone();
         _startIncomingRingTimer();
@@ -599,23 +878,62 @@ class CallService extends ChangeNotifier implements CallEngineListener {
         _teardown('对方已拒绝');
         break;
       case 'call_cancel':
-        if (id != _callId || _phase != CallPhase.ringing) return;
-        _teardown('对方已取消');
+        if (id != _callId ||
+            _phase == CallPhase.idle ||
+            _phase == CallPhase.ended) {
+          return;
+        }
+        _teardown(_phase == CallPhase.ringing ? '对方已取消' : '对方已断开');
         break;
       case 'call_hangup':
         if (id != _callId || _phase == CallPhase.idle) return;
-        _teardown('通话已结束');
+        _teardown(header['reason'] == 'reconnect_timeout'
+            ? '对方重连超时，通话结束'
+            : '通话已结束');
         break;
       case 'call_failed':
         if (id != _callId) return;
         _teardown(_failText(header['reason'] as String?));
+        break;
+      case 'call_suspended':
+        if (id != _callId || _isGroup) return;
+        if (_phase == CallPhase.connecting || _phase == CallPhase.active) {
+          _markReconnecting('对方连接断开，等待重连…');
+        }
+        break;
+      case 'call_peer_back':
+        if (id != _callId || _isGroup) return;
+        if (_phase != CallPhase.connecting && _phase != CallPhase.active) {
+          return;
+        }
+        if (_lastPcState == 'connected') {
+          _clearRecovery(notify: true);
+          return;
+        }
+        _beginNewRecoveryTrigger();
+        if (isCaller) {
+          unawaited(_recoverAsCaller());
+        } else {
+          _markReconnecting('对方已恢复连接，正在同步…');
+        }
+        break;
+      case 'call_resume_request':
+        if (id != _callId || _isGroup || !isCaller) return;
+        if (_phase != CallPhase.connecting && _phase != CallPhase.active) {
+          return;
+        }
+        _beginNewRecoveryTrigger();
+        unawaited(_recoverAsCaller());
         break;
       case 'call_offer':
         if (_isGroup) {
           _handleGroupOffer(header, body);
           break;
         }
-        if (id != _callId || _phase != CallPhase.connecting) return;
+        if (id != _callId) return;
+        if (_phase != CallPhase.connecting && _phase != CallPhase.active) {
+          return;
+        }
         _handleOffer(body);
         break;
       case 'call_answer':
@@ -623,7 +941,10 @@ class CallService extends ChangeNotifier implements CallEngineListener {
           _handleGroupAnswer(header, body);
           break;
         }
-        if (id != _callId || _phase != CallPhase.connecting) return;
+        if (id != _callId) return;
+        if (_phase != CallPhase.connecting && _phase != CallPhase.active) {
+          return;
+        }
         _handleAnswer(body);
         break;
       case 'call_ice':
@@ -641,7 +962,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
         _handleGroupInvite(header);
         break;
       case 'group_call_joined':
-        _handleGroupJoined(header);
+        unawaited(_handleGroupJoined(header));
         break;
       case 'group_call_left':
         _handleGroupLeft(header);
@@ -699,13 +1020,20 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     final peer = _peer!;
     try {
       await (_calleeMediaReady ?? Future<void>.value());
-      if (_phase != CallPhase.connecting) return;
+      if (_phase != CallPhase.connecting && _phase != CallPhase.active) {
+        return;
+      }
       final offer = jsonDecode(utf8.decode(body)) as Map<String, dynamic>;
+      if (_remoteDescSet) {
+        _pendingCandidates.clear();
+      }
+      _remoteDescSet = false;
       await _engine.setRemoteOffer(offer);
       final answer = await _engine.createAnswer();
       await _signaling.sendCall('call_answer', peer, id,
           body: jsonEncode(answer));
       await _flushCandidates();
+      _clearRecovery(notify: true);
     } catch (e) {
       await _safeSend('call_hangup', peer, id);
       _teardown('无法建立通话');
@@ -717,7 +1045,12 @@ class CallService extends ChangeNotifier implements CallEngineListener {
       final answer = jsonDecode(utf8.decode(body)) as Map<String, dynamic>;
       await _engine.setRemoteAnswer(answer);
       await _flushCandidates();
-      activeSince = DateTime.now();
+      // 仅首次进入 active 记时——active 态重协商恢复的 answer 不得把
+      // 通话时长归零
+      if (activeSince == null || _phase != CallPhase.active) {
+        activeSince = DateTime.now();
+      }
+      _clearRecovery(notify: false);
       _setPhase(CallPhase.active);
     } catch (e) {
       _teardown('无法建立通话');
@@ -792,6 +1125,8 @@ class CallService extends ChangeNotifier implements CallEngineListener {
         : CallType.audio;
     endReason = null;
     activeSince = null;
+    _resetRecoveryState();
+    isCaller = false;
     _resetGroupSessionState({from});
     _resetToggles(_type!);
     _updateGroupRegistry(gid, id,
@@ -804,7 +1139,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     _startIncomingRingTimer();
   }
 
-  void _handleGroupJoined(Map<String, dynamic> header) {
+  Future<void> _handleGroupJoined(Map<String, dynamic> header) async {
     final from = header['from'] as String?;
     final id = header['call_id'] as String?;
     final gid = int.tryParse('${header['group_id']}');
@@ -840,9 +1175,35 @@ class CallService extends ChangeNotifier implements CallEngineListener {
         return;
       }
       // 本机加入确认：向既有成员逐对发起 offer（mesh 规则：新加入者
-      // 发起协商，避免 offer 碰撞）
-      if (_phase != CallPhase.connecting) return;
-      _startGroupOffers();
+      // 发起协商，避免 offer 碰撞）。断线重入场景先清理已不在房间的
+      // 陈旧 mesh 边（逐个 await close，旧 session 的回调不得命中
+      // 新 session）
+      final stale = _groupPeers.keys
+          .where((p) => !_participants.contains(p))
+          .toList();
+      for (final p in stale) {
+        final old = _groupPeers.remove(p);
+        final session = old?.session;
+        if (session != null) {
+          try {
+            await session.close().timeout(const Duration(seconds: 1));
+          } catch (_) {}
+        }
+      }
+      if (_phase != CallPhase.connecting) {
+        rejoinInProgress = false;
+        return;
+      }
+      // joined[self] 即 mesh 重建开工——取消 2s fallback（媒体准备或
+      // 逐边建会话超过 2s 时，fallback 与本流程会在同一 peer 上重复
+      // createPeerSession/offer）
+      groupFallbackTimer?.cancel();
+      groupFallbackTimer = null;
+      // mesh 重建完成（或 teardown）后复位重入 guard——期间重复的
+      // onSignalingReconnected 不再进入重入流程
+      unawaited(_startGroupOffers().whenComplete(() {
+        rejoinInProgress = false;
+      }));
       return;
     }
     if (_phase == CallPhase.calling) {
@@ -866,6 +1227,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   }
 
   Future<void> _startGroupOffers() async {
+    _groupMeshSyncing = true;
     try {
       await (_calleeMediaReady ?? Future<void>.value());
       if (_phase != CallPhase.connecting || !_isGroup) return;
@@ -884,6 +1246,8 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     } catch (e) {
       await _safeSendGroup('group_call_leave');
       _teardown('无法建立通话');
+    } finally {
+      _groupMeshSyncing = false;
     }
   }
 
@@ -1061,18 +1425,24 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   @override
   void onConnectionState(String state) {
     if (_isGroup) return;
+    _lastPcState = state;
     // ICE 连通：被叫（无 answer 回执驱动）据此从接通中转通话中
-    if (state == 'connected' && _phase == CallPhase.connecting) {
-      activeSince ??= DateTime.now();
-      _setPhase(CallPhase.active);
+    if (state == 'connected') {
+      _clearRecovery(notify: _phase != CallPhase.connecting);
+      if (_phase == CallPhase.connecting) {
+        activeSince ??= DateTime.now();
+        _setPhase(CallPhase.active);
+      }
+      return;
+    }
+    if (state == 'disconnected' &&
+        (_phase == CallPhase.connecting || _phase == CallPhase.active)) {
+      _markReconnecting('网络波动，正在重连…');
       return;
     }
     if (state == 'failed' &&
         (_phase == CallPhase.connecting || _phase == CallPhase.active)) {
-      if (_callId != null && _peer != null) {
-        _safeSend('call_hangup', _peer!, _callId!);
-      }
-      _teardown('连接失败');
+      unawaited(_recoverAfterFailure());
     }
   }
 
@@ -1096,11 +1466,11 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   void onPeerConnectionState(String peerId, String state) {
     if (!_isGroup) return;
     if (state == 'connected') {
-      if (_phase == CallPhase.connecting) {
+      final wasConnecting = _phase == CallPhase.connecting;
+      _clearRecovery(notify: !wasConnecting);
+      if (wasConnecting) {
         activeSince ??= DateTime.now();
         _setPhase(CallPhase.active);
-      } else {
-        notifyListeners();
       }
       return;
     }
@@ -1151,6 +1521,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     _ringTimer = null;
     _incomingRingTimer?.cancel();
     _incomingRingTimer = null;
+    _resetRecoveryState();
     _stopRingtone();
     // 曾接通的通话结束播挂断音（ringing 未接通阶段只停铃）
     if (_reachedConnecting) unawaited(_callSound.playHangup());
@@ -1206,6 +1577,10 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   void dispose() {
     _ringTimer?.cancel();
     _endedTimer?.cancel();
+    _incomingRingTimer?.cancel();
+    reconnectTimer?.cancel();
+    groupFallbackTimer?.cancel();
+    _groupMeshSyncing = false;
     _engine.close();
     super.dispose();
   }

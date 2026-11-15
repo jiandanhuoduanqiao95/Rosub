@@ -19,11 +19,10 @@ import 'app_feedback.dart';
 import 'responsive_layout.dart';
 import '../platform/android_system.dart';
 import '../platform/capabilities.dart';
-import '../services/app_paths.dart';
 import '../services/doc_preview.dart';
 import '../services/export_saver.dart';
 import '../services/quick_reply_store.dart';
-import '../services/sent_file_store.dart';
+import '../services/message_attachment.dart';
 import '../services/socket_service.dart';
 import '../services/sticker_store.dart';
 import '../services/state_manager.dart';
@@ -2738,19 +2737,10 @@ class _FileListDialogState extends State<_FileListDialog> {
   }
 }
 
-/// 文件记录对应的本机路径解析（Q1 五轮问题2 扩展）：
-/// ① 接收目录 + 安全文件名（收发双方记录同名，仅接收方实际落盘）；
-/// ② 自己发送的文件 → SentFileStore 的 messageId 路径映射
-///    （路径直发=源路径；字节直发=sent_files 副本）
+/// 文件记录对应的本机路径解析（opt8 #13 收敛到统一解析器）：
+/// 唯一接收路径 → 旧版按文件名路径（仅接收方）→ SentFileStore 发送映射
 String? _localPathOfRecord(FileRecord f) {
-  if (f.filename.isEmpty) return null;
-  final safe = SocketService.sanitizeFilename(f.filename);
-  if (safe.isNotEmpty) {
-    final received = '${AppPaths.receivedFilesDir}/$safe';
-    if (File(received).existsSync()) return received;
-  }
-  final sent = SentFileStore.pathOf(f.messageId);
-  return (sent != null && File(sent).existsSync()) ? sent : null;
+  return resolveFileRecordPath(f, currentUser: AppState.instance.username);
 }
 
 // ============================================================

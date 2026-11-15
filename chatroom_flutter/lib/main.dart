@@ -19,6 +19,7 @@ import 'services/session_lifecycle.dart';
 import 'services/sticker_store.dart';
 import 'services/taskbar_notifier.dart';
 import 'services/theme_settings.dart';
+import 'platform/android_audio_policy.dart';
 import 'platform/android_system.dart';
 import 'platform/capabilities.dart';
 
@@ -45,13 +46,31 @@ void main() async {
   } catch (_) {}
   // R1 真机六轮（r1s8→r1s9 修正生效顺序）：vivo OriginOS 上默认
   // VOICE_COMMUNICATION 音频源 + 硬件 AEC/NS 采到纯底噪（REC level 0——
-  // 电脑端听不到手机的根因）。bypassVoiceProcessing 改用 MIC 源并关闭
-  // 硬件语音处理（软件 APM 兜底）。必须先于任何 WebRTC.invokeMethod
+  // 电脑端听不到手机的根因）。必须先于任何 WebRTC.invokeMethod
   // 调用（否则无参 initialize 先行并置位 initialized 标志，带参初始化
   // 被跳过——r1s8 教训）。
+  // opt9 批次 #3：初始化选项改按设备分流（android_audio_policy.dart）——
+  // vivo/iQOO（OriginOS）维持 bypass（已确认回归红线，勿删）；其他设备
+  // 走硬件音频处理（保留厂商 AEC）；编译期 CHATROOM_ANDROID_AUDIO_
+  // PROFILE=default|software|bypass 可强制覆盖（A/B 对比验证用）。
   if (Platform.isAndroid) {
     try {
-      await WebRTC.initialize(options: {'bypassVoiceProcessing': true});
+      final info = await AndroidSystem.getAudioDeviceInfo();
+      final profile = resolveAndroidAudioProfile(
+        info,
+        override:
+            const String.fromEnvironment('CHATROOM_ANDROID_AUDIO_PROFILE'),
+      );
+      debugPrint('[chatroom] android audio profile=$profile '
+          'device=${info?.summary() ?? 'unknown'}');
+      final options = switch (profile) {
+        AndroidAudioProfile.defaultProcessing =>
+          {'androidUseHardwareAudioProcessing': true},
+        AndroidAudioProfile.softwareApm =>
+          {'androidUseHardwareAudioProcessing': false},
+        AndroidAudioProfile.bypass => {'bypassVoiceProcessing': true},
+      };
+      await WebRTC.initialize(options: options);
     } catch (_) {}
   }
   // R-P11（贴纸添加无反应修复）：生产入口注入贴纸落盘目录

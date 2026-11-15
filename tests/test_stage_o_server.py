@@ -141,6 +141,7 @@
 import json
 import os
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -896,6 +897,312 @@ class TestScheduledMessageO5:
                    schedule_at=f"{due:.6f}", message_id="o5-dup")
         rows = harness.db.list_scheduled_messages("alice")
         assert len(rows) == 1 and rows[0]["content"] == "第一次"
+
+
+# ============================================================
+# O5 修订（opt8 #7/#12）—— 原子领取 / 取消边界 / 投递前权限复核 / 失败通知
+# ============================================================
+
+def _sched_status(harness, message_id):
+    with harness.db._get_connection() as conn:
+        row = conn.execute(
+            "SELECT status, attempts, fail_reason FROM scheduled_messages "
+            "WHERE message_id = ?", (message_id,)).fetchone()
+    assert row is not None, f"定时消息行不存在: {message_id}"
+    return {"status": row[0], "attempts": row[1], "fail_reason": row[2]}
+
+
+def _schedule_due(harness, alice, bob, message_id, text="到点的定时消息",
+                  delay=1.0):
+    due = time.time() + delay
+    alice.send("schedule_message", text, to="bob",
+               schedule_at=f"{due:.6f}", message_id=message_id)
+    h, d = alice.expect("chat", timeout=3)
+    assert h.get("type") == "chat"
+    assert "定时消息已设置" in d.decode()
+
+
+class TestScheduledScanGuardO5:
+
+    def test_cancel_before_scan_never_delivered(self, harness):
+        """取消成功（领取前）→ scan 返回空、接收方无消息、状态保持 cancelled。"""
+        alice, bob, _ = _group_setup(harness)
+        alice.drain(timeout=0.5)
+        bob.drain(timeout=0.5)
+        _schedule_due(harness, alice, bob, "o5-fix-1", "会被取消的")
+
+        alice.send("cancel_scheduled", "", message_id="o5-fix-1")
+        h, d = alice.expect("chat", timeout=3)
+        assert h.get("type") == "chat"
+        assert "已取消定时消息" in d.decode()
+
+        assert harness.server.scheduler_scan() == []
+        assert harness.server.scheduler_scan() == []
+        bob.drain(timeout=0.4)
+        hh, _ = bob.recv(timeout=0.6)
+        assert hh is None, "取消后接收方不应收到任何 chat"
+        assert _sched_status(harness, "o5-fix-1")["status"] == "cancelled"
+        assert harness.db.get_history_message("o5-fix-1") is None
+        offline_ids = [m[4] for m in harness.db.get_offline_messages("bob")]
+        assert "o5-fix-1" not in offline_ids
+
+    def test_cancel_after_claim_rejected_delivery_still_completes(self, harness):
+        """并发边界：领取后取消必失败（error），scan 继续完成投递（不丢消息）。"""
+        alice, bob, _ = _group_setup(harness)
+        alice.drain(timeout=0.5)
+        bob.drain(timeout=0.5)
+        _schedule_due(harness, alice, bob, "o5-fix-2", "领取后仍投递")
+        time.sleep(1.2)
+
+        claimed_event = threading.Event()
+        release_event = threading.Event()
+        orig_broadcast = harness.server.broadcast_to_user
+
+        def gated_broadcast(username, msg_type, content, extra_headers=None):
+            claimed_event.set()
+            release_event.wait(timeout=5)
+            return orig_broadcast(username, msg_type, content,
+                                  extra_headers=extra_headers)
+
+        harness.server.broadcast_to_user = gated_broadcast
+        scan_result = {}
+
+        def run_scan():
+            scan_result["delivered"] = harness.server.scheduler_scan()
+
+        scan_thread = threading.Thread(target=run_scan, daemon=True)
+        try:
+            scan_thread.start()
+            assert claimed_event.wait(timeout=5), "scan 未进入投递阶段"
+            alice.send("cancel_scheduled", "", message_id="o5-fix-2")
+            h, d = alice.expect("error", timeout=3)
+            assert h.get("type") == "error"
+            assert d.decode(), "领取后取消应收到 error"
+            release_event.set()
+        finally:
+            release_event.set()
+            scan_thread.join(timeout=5)
+            harness.server.broadcast_to_user = orig_broadcast
+
+        assert scan_result.get("delivered") == ["o5-fix-2"]
+        h, d = bob.expect("chat", timeout=3)
+        assert h.get("type") == "chat"
+        assert h.get("from") == "alice"
+        assert h.get("message_id") == "o5-fix-2"
+        assert d.decode() == "领取后仍投递"
+        assert _sched_status(harness, "o5-fix-2")["status"] == "sent"
+
+    def test_blocked_receiver_not_delivered_sender_notified(self, harness):
+        """登记后接收方拉黑发送者 → 不投递，failed + 系统通知发送者。"""
+        alice, bob, _ = _group_setup(harness)
+        alice.drain(timeout=0.5)
+        bob.drain(timeout=0.5)
+        _schedule_due(harness, alice, bob, "o5-blk-1", "拉黑后不发")
+        assert harness.db.block_user("bob", "alice") is True
+        bob.drain(timeout=0.5)
+        time.sleep(1.2)
+
+        assert harness.server.scheduler_scan() == []
+        assert _sched_status(harness, "o5-blk-1")["status"] == "failed"
+
+        h, d = alice.expect("chat", timeout=3)
+        assert h.get("type") == "chat"
+        assert h.get("from") == "系统"
+        assert h.get("message_id") == "schedfail_o5-blk-1"
+        assert "定时消息未能发送" in d.decode()
+        assert "拉黑" in d.decode()
+        assert _sched_status(harness, "o5-blk-1")["fail_reason"]
+
+        bob.drain(timeout=0.4)
+        hh, _ = bob.recv(timeout=0.6)
+        assert hh is None, "被拉黑场景接收方不应收到消息"
+        assert harness.db.get_history_message("o5-blk-1") is None
+        offline_ids = [m[4] for m in harness.db.get_offline_messages("bob")]
+        assert "o5-blk-1" not in offline_ids
+
+    def test_unfriended_receiver_not_delivered_sender_notified(self, harness):
+        """登记后删好友 → 不投递，failed + 系统通知发送者。"""
+        alice, bob, _ = _group_setup(harness)
+        alice.drain(timeout=0.5)
+        bob.drain(timeout=0.5)
+        _schedule_due(harness, alice, bob, "o5-unfriend-1", "删好友后不发")
+        harness.db.remove_friend("alice", "bob")
+        time.sleep(1.2)
+
+        assert harness.server.scheduler_scan() == []
+        assert _sched_status(harness, "o5-unfriend-1")["status"] == "failed"
+
+        h, d = alice.expect("chat", timeout=3)
+        assert h.get("type") == "chat"
+        assert h.get("from") == "系统"
+        assert h.get("message_id") == "schedfail_o5-unfriend-1"
+        assert "定时消息未能发送" in d.decode()
+        assert "不是您的好友" in d.decode()
+
+        bob.drain(timeout=0.4)
+        hh, _ = bob.recv(timeout=0.6)
+        assert hh is None
+        assert harness.db.get_history_message("o5-unfriend-1") is None
+
+    def test_receiver_left_group_not_delivered_to_them(self, harness):
+        """接收者退群（现量成员枚举锁定）：退群者收不到，其余成员照常。"""
+        alice, bob, gid = _group_setup(harness, name="定时退群组")
+        alice.drain(timeout=0.5)
+        bob.drain(timeout=0.5)
+
+        due = time.time() + 1.0
+        alice.send("schedule_message", "群定时", group_id=str(gid),
+                   schedule_at=f"{due:.6f}", message_id="o5-leave-r")
+        h, d = alice.expect("chat", timeout=3)
+        assert h.get("type") == "chat"
+        assert "定时消息已设置" in d.decode()
+        assert harness.db.leave_group(gid, "bob") is True
+        bob.drain(timeout=0.5)
+        time.sleep(1.2)
+
+        delivered = harness.server.scheduler_scan()
+        assert delivered == ["o5-leave-r"]
+
+        h, d = alice.expect("group_chat", timeout=3)
+        assert h.get("type") == "group_chat"
+        assert h.get("group_id") == str(gid)
+        assert h.get("message_id") == "o5-leave-r"
+        assert d.decode() == "群定时"
+
+        hh, _ = bob.recv(timeout=0.6)
+        assert hh is None, "已退群成员不应收到群定时消息"
+        offline_ids = [m[4] for m in harness.db.get_offline_messages("bob")]
+        assert "o5-leave-r_bob" not in offline_ids
+        assert _sched_status(harness, "o5-leave-r")["status"] == "sent"
+
+    def test_sender_left_group_failed_and_notified(self, harness):
+        """发送者退群 → 权限复核失败：不投递，failed + 通知发送者。"""
+        alice, bob, gid = _group_setup(harness, name="定时退群组")
+        alice.drain(timeout=0.5)
+        bob.drain(timeout=0.5)
+
+        due = time.time() + 1.0
+        bob.send("schedule_message", "我退群后的定时", group_id=str(gid),
+                 schedule_at=f"{due:.6f}", message_id="o5-leave-s")
+        h, d = bob.expect("chat", timeout=3)
+        assert h.get("type") == "chat"
+        assert "定时消息已设置" in d.decode()
+        assert harness.db.leave_group(gid, "bob") is True
+        time.sleep(1.2)
+
+        assert harness.server.scheduler_scan() == []
+        assert _sched_status(harness, "o5-leave-s")["status"] == "failed"
+
+        h, d = bob.expect("chat", timeout=3)
+        assert h.get("type") == "chat"
+        assert h.get("from") == "系统"
+        assert h.get("message_id") == "schedfail_o5-leave-s"
+        assert "定时消息未能发送" in d.decode()
+
+        alice.drain(timeout=0.4)
+        hh, _ = alice.recv(timeout=0.6)
+        assert hh is None, "发送者已退群不应向剩余成员投递"
+        assert harness.db.get_history_message("o5-leave-s") is None
+
+    def test_group_missing_fails_offline_sender_notified(self, harness):
+        """群不存在（协议层登记不到，DB 直造）→ failed；离线发送者落系统离线通知。"""
+        alice, bob, _ = _group_setup(harness, name="定时组")
+        alice.drain(timeout=0.5)
+        bob.drain(timeout=0.5)
+        bob.close()
+        time.sleep(0.3)
+        assert harness.db.add_scheduled_message(
+            "o5-gone", "bob", "幽灵群定时", time.time() - 1,
+            group_id=99999) is True
+
+        assert harness.server.scheduler_scan() == []
+        assert _sched_status(harness, "o5-gone")["status"] == "failed"
+        assert _sched_status(harness, "o5-gone")["fail_reason"]
+
+        offline = harness.db.get_offline_messages("bob")
+        sys_ids = [m[4] for m in offline]
+        assert "schedfail_o5-gone" in sys_ids
+        sys_rows = [(m[0], m[2]) for m in offline if m[4] == "schedfail_o5-gone"]
+        assert sys_rows and sys_rows[0][0] == "系统"
+        assert "定时消息未能发送" in sys_rows[0][1].decode()
+
+        alice.drain(timeout=0.4)
+        hh, _ = alice.recv(timeout=0.5)
+        assert hh is None, "失败通知只发发送者，不波及群内他人"
+
+    def test_member_joined_after_schedule_receives_current_behavior(self, harness):
+        """登记后入群者到点收到群定时消息（现量成员枚举行为记录，非语义承诺）。
+
+        投递时按 get_group_members 现量枚举：登记后加入的成员包含在
+        投递名单内。当前产品语义如此，本测试仅锁定行为基线；若未来
+        改为"仅登记时在群者可收"，需同步修改本测试。
+        """
+        alice, bob, gid = _group_setup(harness, name="定时入群组")
+        alice.drain(timeout=0.5)
+        bob.drain(timeout=0.5)
+
+        due = time.time() + 1.0
+        bob.send("schedule_message", "后入群也能看到", group_id=str(gid),
+                 schedule_at=f"{due:.6f}", message_id="o5-late-join")
+        h, d = bob.expect("chat", timeout=3)
+        assert h.get("type") == "chat"
+        assert "定时消息已设置" in d.decode()
+
+        harness.db.join_group(gid, "carol")
+        carol = _login(harness, "carol", "password789")
+        carol.drain(timeout=0.5)
+        time.sleep(1.2)
+
+        delivered = harness.server.scheduler_scan()
+        assert delivered == ["o5-late-join"]
+
+        h, d = carol.expect("group_chat", timeout=3)
+        assert h.get("type") == "group_chat"
+        assert h.get("group_id") == str(gid)
+        assert h.get("message_id") == "o5-late-join"
+        assert d.decode() == "后入群也能看到"
+        assert _sched_status(harness, "o5-late-join")["status"] == "sent"
+
+    def test_delivery_exception_released_then_retry_succeeds(self, harness):
+        """投递异常一次 → 释放回 pending（attempts=1）；恢复后二次 scan 成功。"""
+        alice, bob, _ = _group_setup(harness)
+        alice.drain(timeout=0.5)
+        bob.drain(timeout=0.5)
+        _schedule_due(harness, alice, bob, "o5-retry-1", "会重试的")
+        time.sleep(1.2)
+
+        orig_save = harness.db.save_message_history
+        calls = {"n": 0}
+
+        def flaky_save(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("模拟落库瞬时异常")
+            return orig_save(*args, **kwargs)
+
+        harness.db.save_message_history = flaky_save
+        try:
+            assert harness.server.scheduler_scan() == []
+        finally:
+            harness.db.save_message_history = orig_save
+
+        raw = _sched_status(harness, "o5-retry-1")
+        assert raw["status"] == "pending"
+        assert raw["attempts"] == 1
+
+        delivered = harness.server.scheduler_scan()
+        assert delivered == ["o5-retry-1"]
+        assert _sched_status(harness, "o5-retry-1")["status"] == "sent"
+
+        h, d = bob.expect("chat", timeout=3)
+        assert h.get("type") == "chat"
+        assert h.get("message_id") == "o5-retry-1"
+        assert d.decode() == "会重试的"
+        h, d = alice.expect("chat", timeout=3)
+        assert h.get("type") == "chat"
+        assert h.get("message_id") == "o5-retry-1"
+        row = harness.db.get_history_message("o5-retry-1")
+        assert row is not None and row["content"] == "会重试的"
 
 
 # ============================================================

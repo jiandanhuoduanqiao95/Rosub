@@ -199,11 +199,12 @@ void main() {
   });
 
   group('opt8 F3 —— Windows 窗口唤起 FFI 契约', () {
-    test('user32 唤起链：FindWindowW/IsIconic/ShowWindow/SetWindowPos/'
+    test('user32 唤起链：FindWindowExW(PID 过滤)/IsIconic/ShowWindow/SetWindowPos/'
         'SetForegroundWindow/FlashWindowEx 兜底', () {
       final src = srcOf('lib/platform/capabilities.dart');
       expect(src, contains('WindowActivationCapability'));
-      expect(src, contains("'FindWindowW'"));
+      expect(src, contains("'FindWindowExW'"),
+          reason: '同类名多 Flutter 应用，FindWindowExW + PID 过滤只命中本进程');
       expect(src, contains("'IsIconic'"));
       expect(src, contains("'ShowWindow'"));
       expect(src, contains("'SetWindowPos'"));

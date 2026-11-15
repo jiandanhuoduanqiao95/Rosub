@@ -21,7 +21,7 @@ import '../screens/call_screen.dart';
 import '../services/call_service.dart';
 import '../services/call_presentation.dart';
 import '../services/chat_exporter.dart';
-import '../services/app_paths.dart';
+import '../services/message_attachment.dart';
 import '../services/export_saver.dart';
 import '../services/ime_bridge.dart';
 import '../services/session_lifecycle.dart';
@@ -931,11 +931,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// （如 50MP）全分辨率解码常驻数百 MB，低端机易被 LMK 查杀（闪退）。
   void _openImageViewer(ChatMessage message) {
     final bytes = message.fileData;
-    String? path = message.filePath;
-    if (path == null && message.filename != null) {
-      final base = message.filename!.split(RegExp(r'[/\\]')).last;
-      path = '${AppPaths.receivedFilesDir}/$base';
-    }
+    final path = resolveMessageAttachmentPath(
+        message, isSelf: message.sender == _state.username);
     if (bytes == null && (path == null || !File(path).existsSync())) return;
     showResponsiveDialog<void>(
       context: context,
@@ -1023,11 +1020,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _saveMessageSticker(ChatMessage message) async {
     Uint8List? bytes = message.fileData;
     if (bytes == null) {
-      var path = message.filePath;
-      if (path == null && message.filename != null) {
-        final base = message.filename!.split(RegExp(r'[/\\]')).last;
-        path = '${AppPaths.receivedFilesDir}/$base';
-      }
+      final path = resolveMessageAttachmentPath(
+          message, isSelf: message.sender == _state.username);
       if (path != null && File(path).existsSync()) {
         bytes = await File(path).readAsBytes();
       }
@@ -1047,11 +1041,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   /// R-P2：文件卡片点击 → 文件预览（信息 + 文本预览 + 系统打开）
   void _openFilePreview(ChatMessage message) {
-    var path = message.filePath;
-    if (path == null && message.filename != null) {
-      final base = message.filename!.split(RegExp(r'[/\\]')).last;
-      path = '${AppPaths.receivedFilesDir}/$base';
-    }
+    final path = resolveMessageAttachmentPath(
+        message, isSelf: message.sender == _state.username);
     showFilePreviewDialog(
       context,
       filename: message.filename ?? message.content,
@@ -1114,13 +1105,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   /// 阶段 P1（R-P1 修订）：视频气泡点击 → 全屏播放器。
   /// media_kit（mpv）内嵌播放；初始化失败（缺库/测试环境）回退为
-  /// "使用系统播放器打开"。
+  /// "使用系统播放器打开"。path 恒非 null（解析 miss 时回退唯一路径
+  /// 推导值，存在性判定交给查看器——回退按钮依赖 path 非空）。
   void _openVideoViewer(ChatMessage message) {
-    var path = message.filePath;
-    if (path == null && message.filename != null) {
-      final base = message.filename!.split(RegExp(r'[/\\]')).last;
-      path = '${AppPaths.receivedFilesDir}/$base';
-    }
+    var path = resolveMessageAttachmentPath(
+        message, isSelf: message.sender == _state.username);
+    path ??= receivedAttachmentPath(message.messageId, message.filename ?? '');
     showResponsiveDialog<void>(
       context: context,
       barrierColor: Colors.black,
@@ -1276,11 +1266,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// 服务端视为一次普通文件发送（以转发人为第一手，语义一致）。
   /// 未下载（file_meta 元数据气泡/已清缓存）时提示并中止。
   void _forwardFile(ChatMessage message) {
-    var path = message.filePath;
-    if (path == null && message.filename != null) {
-      final base = message.filename!.split(RegExp(r'[/\\]')).last;
-      path = '${AppPaths.receivedFilesDir}/$base';
-    }
+    final path = resolveMessageAttachmentPath(
+        message, isSelf: message.sender == _state.username);
     if (path == null || !File(path).existsSync()) {
       _state.showNotice('文件尚未下载到本机，无法转发');
       return;
@@ -1973,11 +1960,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     final key = _state.currentChat;
     if (key == null || key == '服务器') return;
-    var path = msg.filePath;
-    if (path == null && msg.filename != null) {
-      final base = msg.filename!.split(RegExp(r'[/\\]')).last;
-      path = '${AppPaths.receivedFilesDir}/$base';
-    }
+    final path = resolveMessageAttachmentPath(
+        msg, isSelf: msg.sender == _state.username);
     if (path == null || !File(path).existsSync() || msg.filename == null) {
       _state.showNotice('源文件不在本机，无法重新发送');
       return;

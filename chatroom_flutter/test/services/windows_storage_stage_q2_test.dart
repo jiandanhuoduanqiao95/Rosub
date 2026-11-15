@@ -89,11 +89,17 @@ void main() {
     test('接收文件目录自动创建职责保留（Windows 文档目录首收建目录）', () {
       final src = srcOf('lib/services/socket_service.dart');
       expect(countOf(src, 'Directory(AppPaths.receivedFilesDir)'),
-          greaterThanOrEqualTo(2),
-          reason: '_prepareReceiveTarget / _saveReceivedFile 经 AppPaths 取目录');
+          greaterThanOrEqualTo(1),
+          reason: '_prepareReceiveTarget 经 AppPaths 取目录'
+              '（opt8 #13 收敛后唯一建目录点）');
       expect(
           countOf(src, 'createSync(recursive: true)'), greaterThanOrEqualTo(2),
           reason: '首收文件自动建目录（Windows 文档目录下 received_files 不会预存在）');
+      expect(
+          countOf(srcOf('lib/services/message_attachment.dart'),
+              'AppPaths.receivedFilesDir'),
+          greaterThanOrEqualTo(1),
+          reason: '唯一接收路径/旧路径解析仍走 AppPaths 平台目录');
     });
   });
 
