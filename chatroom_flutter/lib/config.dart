@@ -62,7 +62,7 @@ class AppConfig {
   /// 硬校验 RECORD_AUDIO（vivo"仅本次允许"回收后必炸）——权限感知动态
   /// 选型（未授予降级 specialUse，授妥后随通话阶段变更升级回），
   /// SecurityException 双层兜底 stopSelf，任何路径不崩。
-  static const String buildStamp = '1.1.0';
+  static const String buildStamp = '1.1.1';
 
   /// 彩色 emoji 字体栈（R-P26 硬化）：首选内置 COLRv1 字体，第二兜底
   /// 系统 Noto Color Emoji（CBDT 彩色位图，Ubuntu 默认安装、覆盖全部
