@@ -62,6 +62,7 @@ dist/
 AGENTS.md
 TESTING_GUIDE.md
 TESTING_GUIDE_FLUTTER.md
+opt*_*.md
 .zcodeignore
 promo_video_prompt.md
 promo-video/

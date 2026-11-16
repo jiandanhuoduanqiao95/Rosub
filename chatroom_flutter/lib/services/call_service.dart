@@ -222,6 +222,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   String? _groupName;
   final Set<String> _participants = {};
   final Map<String, _GroupPeer> _groupPeers = {};
+  final Map<String, Future<void>> _peerOfferInFlight = {};
   final Map<String, bool> _peerMicMuted = {};
   final Map<String, bool> _peerCamOff = {};
 
@@ -614,6 +615,7 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     reconnectTimer = null;
     groupFallbackTimer?.cancel();
     groupFallbackTimer = null;
+    _peerOfferInFlight.clear();
     _lastPcState = '';
   }
 
@@ -812,16 +814,19 @@ class CallService extends ChangeNotifier implements CallEngineListener {
     try {
       if (_groupMeshSyncing) return;
       await (_calleeMediaReady ?? Future<void>.value());
+      if (_groupMeshSyncing) return;
       if (_phase != CallPhase.connecting || !_isGroup) return;
       if (!_engine.hasLocalMedia) return;
       for (final p in remotePeers) {
+        if (_groupMeshSyncing) return;
         if (_groupPeers[p]?.session == null) {
           await _createPeerAndOffer(p);
         }
       }
       notifyListeners();
-    } catch (_) {} finally {
-      rejoinInProgress = false;
+    } catch (_) {
+    } finally {
+      if (!_groupMeshSyncing) rejoinInProgress = false;
     }
   }
 
@@ -841,21 +846,21 @@ class CallService extends ChangeNotifier implements CallEngineListener {
           }
           return;
         }
-    _isGroup = false;
-    _groupId = null;
-    _groupName = null;
-    _peer = from;
-    _callId = id;
-    _type = (header['call_type'] as String?) == 'video'
-        ? CallType.video
-        : CallType.audio;
-    endReason = null;
-    activeSince = null;
-    _remoteDescSet = false;
-    _pendingCandidates.clear();
-    _resetRecoveryState();
-    isCaller = false;
-    _resetToggles(_type!);
+        _isGroup = false;
+        _groupId = null;
+        _groupName = null;
+        _peer = from;
+        _callId = id;
+        _type = (header['call_type'] as String?) == 'video'
+            ? CallType.video
+            : CallType.audio;
+        endReason = null;
+        activeSince = null;
+        _remoteDescSet = false;
+        _pendingCandidates.clear();
+        _resetRecoveryState();
+        isCaller = false;
+        _resetToggles(_type!);
         _setPhase(CallPhase.ringing);
         _startRingtone();
         _startIncomingRingTimer();
@@ -887,9 +892,8 @@ class CallService extends ChangeNotifier implements CallEngineListener {
         break;
       case 'call_hangup':
         if (id != _callId || _phase == CallPhase.idle) return;
-        _teardown(header['reason'] == 'reconnect_timeout'
-            ? '对方重连超时，通话结束'
-            : '通话已结束');
+        _teardown(
+            header['reason'] == 'reconnect_timeout' ? '对方重连超时，通话结束' : '通话已结束');
         break;
       case 'call_failed':
         if (id != _callId) return;
@@ -1178,9 +1182,8 @@ class CallService extends ChangeNotifier implements CallEngineListener {
       // 发起协商，避免 offer 碰撞）。断线重入场景先清理已不在房间的
       // 陈旧 mesh 边（逐个 await close，旧 session 的回调不得命中
       // 新 session）
-      final stale = _groupPeers.keys
-          .where((p) => !_participants.contains(p))
-          .toList();
+      final stale =
+          _groupPeers.keys.where((p) => !_participants.contains(p)).toList();
       for (final p in stale) {
         final old = _groupPeers.remove(p);
         final session = old?.session;
@@ -1252,6 +1255,24 @@ class CallService extends ChangeNotifier implements CallEngineListener {
   }
 
   Future<void> _createPeerAndOffer(String peerId) async {
+    final inFlight = _peerOfferInFlight[peerId];
+    if (inFlight != null) {
+      await inFlight;
+      return;
+    }
+    final future = _doCreatePeerAndOffer(peerId);
+    _peerOfferInFlight[peerId] = future;
+    try {
+      await future;
+    } finally {
+      if (identical(_peerOfferInFlight[peerId], future)) {
+        _peerOfferInFlight.remove(peerId);
+      }
+    }
+  }
+
+  Future<void> _doCreatePeerAndOffer(String peerId) async {
+    final callId = _callId;
     final old = _groupPeers.remove(peerId);
     if (old != null) {
       try {
@@ -1259,9 +1280,31 @@ class CallService extends ChangeNotifier implements CallEngineListener {
       } catch (_) {}
     }
     final session = await _engine.createPeerSession(peerId);
+    if (!_isGroup ||
+        callId == null ||
+        _callId != callId ||
+        _phase == CallPhase.ended ||
+        _phase == CallPhase.idle) {
+      try {
+        await session.close();
+      } catch (_) {}
+      return;
+    }
     _groupPeers[peerId] = _GroupPeer(session: session);
     final offer = await session.createOffer();
-    await _signaling.sendCall('call_offer', peerId, _callId!,
+    if (!_isGroup ||
+        _callId != callId ||
+        _phase == CallPhase.ended ||
+        _phase == CallPhase.idle) {
+      if (identical(_groupPeers[peerId]?.session, session)) {
+        _groupPeers.remove(peerId);
+      }
+      try {
+        await session.close();
+      } catch (_) {}
+      return;
+    }
+    await _signaling.sendCall('call_offer', peerId, callId,
         body: jsonEncode(offer));
   }
 

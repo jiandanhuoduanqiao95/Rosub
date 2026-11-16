@@ -662,19 +662,25 @@ class TestMultiDeviceFileResolve:
         msg_id = "L1_group_file_resolve_1"
         alice.send("file", b"data", to=f"group_{gid}", filename="g.txt",
                    filesize=4, message_id=msg_id)
-        bob1.expect("group_file_request", timeout=3)
-        bob2.expect("group_file_request", timeout=3)
+        bob1.expect("group_file_request", timeout=5)
+        bob2.expect("group_file_request", timeout=5)
 
         # 设备 1 接受 → 两设备都收到文件数据
         bob1.send("group_file_response", "", response="accept",
                   message_id=msg_id, group_id=str(gid))
-        bob1.expect("file", timeout=3)
-        bob2.expect("file", timeout=3)
+        bob1.expect("file", timeout=5)
+        bob2.expect("file", timeout=5)
+
+        deadline = time.time() + 2
+        while time.time() < deadline and \
+                harness.db.get_file_resolution(msg_id, "bob") is None:
+            time.sleep(0.05)
+        assert harness.db.get_file_resolution(msg_id, "bob") is not None
 
         # 设备 2 再接受 → 提示已在设备 1 被接受
         bob2.send("group_file_response", "", response="accept",
                   message_id=msg_id, group_id=str(gid))
-        h, d = bob2.expect("error", timeout=3)
+        h, d = bob2.expect("error", timeout=5)
         assert d.decode() == f"该文件已在{DEV1}被接受", \
             f"应提示已在设备 {DEV1} 被接受，实际: {d.decode()}"
 

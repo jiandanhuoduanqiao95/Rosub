@@ -109,6 +109,7 @@ class WebRtcCallEngine implements CallEngine, IceRestartCapable {
   };
 
   RTCPeerConnection? _pc;
+  int _pcGeneration = 0;
   MediaStream? _local;
   MediaStream? _remote;
   // opt7 采集死亡看门狗状态（仅 Windows 生效，见 _startCaptureWatchdog）
@@ -152,6 +153,7 @@ class WebRtcCallEngine implements CallEngine, IceRestartCapable {
     await _acquireMedia(video: video);
     final pc = await createPeerConnection(_iceServers);
     _pc = pc;
+    final generation = ++_pcGeneration;
     // gc4：addTrack 必须 await——fire-and-forget 与 createOffer 竞态时
     // 视频轨道的原生注册未完成，offer 会缺失视频 m-line（群会话实测，
     // 1:1 同型隐患一并封死）
@@ -159,15 +161,18 @@ class WebRtcCallEngine implements CallEngine, IceRestartCapable {
       await pc.addTrack(track, _local!);
     }
     pc.onIceCandidate = (candidate) {
+      if (generation != _pcGeneration) return;
       _listener?.onLocalCandidate(candidate.toMap());
     };
     pc.onTrack = (event) {
+      if (generation != _pcGeneration) return;
       if (event.streams.isEmpty) return;
       _remote = event.streams.first;
       _remoteRenderer?.srcObject = _remote;
       _listener?.onRemoteStream();
     };
     pc.onConnectionState = (state) {
+      if (generation != _pcGeneration) return;
       _listener?.onConnectionState(normalizeConnectionState(state.name));
     };
   }
@@ -673,6 +678,7 @@ class WebRtcCallEngine implements CallEngine, IceRestartCapable {
 
   @override
   Future<void> close() async {
+    _pcGeneration++;
     final pc = _pc;
     _pc = null;
     final local = _local;
@@ -719,9 +725,11 @@ class _WebRtcPeerSession implements CallPeerSession, IceRestartCapable {
     // offer/answer 前等待。
     _tracksReady = _addLocalTracks(local);
     pc.onIceCandidate = (candidate) {
+      if (_closed) return;
       _listener?.onPeerLocalCandidate(peerId, candidate.toMap());
     };
     pc.onTrack = (event) {
+      if (_closed) return;
       // R2 gc3 排障仪器化：streams=0 说明远端流映射缺失（渲染挂不上）
       if (event.streams.isEmpty) return;
       _remote = event.streams.first;
@@ -729,6 +737,7 @@ class _WebRtcPeerSession implements CallPeerSession, IceRestartCapable {
       _listener?.onPeerRemoteStream(peerId);
     };
     pc.onConnectionState = (state) {
+      if (_closed) return;
       _listener?.onPeerConnectionState(
           peerId, normalizeConnectionState(state.name));
     };
@@ -740,6 +749,7 @@ class _WebRtcPeerSession implements CallPeerSession, IceRestartCapable {
   final CallEngineListener? _listener;
   MediaStream? _remote;
   RTCVideoRenderer? _renderer;
+  bool _closed = false;
 
   /// 本地轨道原生注册完成门（构造器启动，offer/answer 前必须 await）
   Future<void> _tracksReady = Future.value();
@@ -880,6 +890,8 @@ class _WebRtcPeerSession implements CallPeerSession, IceRestartCapable {
 
   @override
   Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
     _renderer?.srcObject = null;
     _renderer = null;
     _remote = null;

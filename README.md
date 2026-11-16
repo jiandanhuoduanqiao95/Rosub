@@ -73,6 +73,8 @@ flutter build linux --release --dart-define=CHATROOM_SERVER_HOST=<你的服务�
 flutter build windows --release --dart-define=CHATROOM_SERVER_HOST=<你的服务器IP>
 ```
 
+> versionCode 策略：`--split-per-abi` 会在 pubspec 的 `+NNNN` 基础上叠加 ABI 偏移（arm64 实测 +2000）。后续若改回非 split 单包，pubspec 基础构建号必须高于上一 split 包实际 versionCode（v1.1.1 arm64 为 4017），否则会报 `INSTALL_FAILED_VERSION_DOWNGRADE`。
+
 服务端发行包（零测试/零数据/零密钥）：`scripts/package_server_release.sh <版本号>`。
 
 ## 构建要求

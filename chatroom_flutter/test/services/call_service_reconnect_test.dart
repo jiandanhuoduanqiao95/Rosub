@@ -305,8 +305,8 @@ void main() {
       _signal(svc, 'call_offer', {'from': 'bob', 'call_id': id},
           body: {'sdp': 're-offer', 'type': 'offer'});
       await _drain();
-      verify(() => h.engine
-              .setRemoteOffer({'sdp': 're-offer', 'type': 'offer'}))
+      verify(() =>
+              h.engine.setRemoteOffer({'sdp': 're-offer', 'type': 'offer'}))
           .called(1);
       expect(h.sent('call_answer'), isTrue);
       expect(svc.phase, CallPhase.active);
@@ -331,8 +331,7 @@ void main() {
       h2.listener!.onConnectionState('connected');
       svc2.onSignalingReconnected();
       await _drain();
-      expect(h2.all('call_offer').length, 1,
-          reason: '媒体存活（connected）不重协商');
+      expect(h2.all('call_offer').length, 1, reason: '媒体存活（connected）不重协商');
     });
 
     test('callee：发 resume 请求', () async {
@@ -354,8 +353,7 @@ void main() {
       expect(svc.iceRestartAttempts, 2);
       svc.onSignalingReconnected();
       await _drain();
-      expect(svc.iceRestartAttempts, 1,
-          reason: '信令恢复重置预算并立即重新恢复一次');
+      expect(svc.iceRestartAttempts, 1, reason: '信令恢复重置预算并立即重新恢复一次');
     });
 
     test('idle 不触发恢复', () async {
@@ -459,8 +457,8 @@ void main() {
       final id = h.last('call_invite').callId;
       h.listener!.onConnectionState('failed');
       await _drain();
-      _signal(svc, 'call_failed', {'from': 'bob', 'call_id': id,
-          'reason': 'expired'});
+      _signal(svc, 'call_failed',
+          {'from': 'bob', 'call_id': id, 'reason': 'expired'});
       expect(svc.phase, CallPhase.ended);
       expect(svc.iceRestartAttempts, 0);
       expect(svc.renegotiating, isFalse);
@@ -482,8 +480,7 @@ void main() {
           body: {'sdp': 're-answer', 'type': 'answer'});
       await _drain();
       expect(svc.phase, CallPhase.active);
-      expect(svc.reconnectTimer, isNull,
-          reason: '恢复成功必须取消 35s 兜底定时器（否则误挂断）');
+      expect(svc.reconnectTimer, isNull, reason: '恢复成功必须取消 35s 兜底定时器（否则误挂断）');
       expect(svc.reconnecting, isFalse);
       expect(svc.hint, isNull);
     });
@@ -518,8 +515,7 @@ void main() {
       expect(svc.phase, CallPhase.ringing);
       svc.onSignalingReconnected();
       await _drain();
-      expect(svc.phase, CallPhase.ringing,
-          reason: '信令重连不得把来电自动接听');
+      expect(svc.phase, CallPhase.ringing, reason: '信令重连不得把来电自动接听');
       expect(h.sent('group_call_join'), isFalse);
     });
 
@@ -531,8 +527,7 @@ void main() {
       expect(svc.phase, CallPhase.calling);
       svc.onSignalingReconnected();
       await _drain();
-      expect(svc.phase, CallPhase.calling,
-          reason: '外呼等待接听阶段不得重入/不得 teardown');
+      expect(svc.phase, CallPhase.calling, reason: '外呼等待接听阶段不得重入/不得 teardown');
       expect(h.sent('group_call_join'), isFalse);
       expect(svc.endReason, isNull);
     });
@@ -692,6 +687,41 @@ void main() {
       });
     });
 
+    test('P2b fallback 已触发且等待媒体时 joined 到达：同一 peer 只重建一次', () {
+      fakeAsync((async) {
+        final h = _Harness();
+        final svc = h.build();
+        _signal(svc, 'group_call_invite', inviteHeader('room-p2b'));
+        svc.acceptIncoming();
+        async.flushMicrotasks();
+        _signal(svc, 'group_call_joined', joinedHeader('room-p2b'));
+        async.flushMicrotasks();
+        expect(h.sessions['bob']!.length, 1);
+
+        final mediaGate = Completer<void>();
+        when(() => h.engine.hasLocalMedia).thenReturn(false);
+        when(() => h.engine.ensureMedia(video: any(named: 'video')))
+            .thenAnswer((_) => mediaGate.future);
+
+        svc.onSignalingReconnected();
+        async.flushMicrotasks();
+        expect(h.sent('group_call_join'), isTrue);
+
+        async.elapse(const Duration(seconds: 3));
+        _signal(svc, 'group_call_joined', joinedHeader('room-p2b'));
+        async.flushMicrotasks();
+
+        when(() => h.engine.hasLocalMedia).thenReturn(true);
+        mediaGate.complete();
+        async.flushMicrotasks();
+        async.elapse(const Duration(seconds: 1));
+
+        expect(h.sessions['bob']!.length, 2,
+            reason: '初始 1 次 + 重入重建 1 次；fallback 与 joined 不得各建一次');
+        expect(h.all('call_offer').length, 2);
+      });
+    });
+
     test('P3 重入等待旧 session 关闭完成后再发送 join', () {
       fakeAsync((async) {
         final h = _Harness();
@@ -725,8 +755,7 @@ void main() {
       expect(svc.iceRestartAttempts, 2);
       _signal(svc, 'call_peer_back', {'from': 'bob', 'call_id': id});
       await _drain();
-      expect(h.sent('call_hangup'), isFalse,
-          reason: '对端回线触发的新恢复不得因旧预算直接挂断');
+      expect(h.sent('call_hangup'), isFalse, reason: '对端回线触发的新恢复不得因旧预算直接挂断');
       expect(svc.phase, CallPhase.active);
       expect(h.all('call_offer').length, 4,
           reason: '初始 + 2 次 failed 恢复 + peer_back 恢复');
@@ -759,8 +788,7 @@ void main() {
           body: {'sdp': 're-answer', 'type': 'answer'});
       await _drain();
       expect(svc.phase, CallPhase.active);
-      expect(svc.activeSince, same(startedAt),
-          reason: 'active 态恢复成功不得把通话时长归零');
+      expect(svc.activeSince, same(startedAt), reason: 'active 态恢复成功不得把通话时长归零');
     });
   });
 }

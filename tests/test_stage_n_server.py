@@ -314,6 +314,14 @@ class TestKickSessionProtocol:
         alice_linux.expect("chat", timeout=3)
         alice_android.drain(timeout=0.5)
 
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            devices = [s["device_id"] for s in _sessions(harness, alice_linux)]
+            if "android" not in devices:
+                break
+            time.sleep(0.05)
+        assert "android" not in devices, f"被踢会话应已清理: {devices}"
+
         alice_linux.send("kick_session", "", device_id="android")
         h, d = alice_linux.expect("error", timeout=3)
         assert "不在线" in d.decode(), f"重复下线应报不在线: {d.decode()}"
