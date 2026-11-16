@@ -476,12 +476,21 @@ class TestFdReuseGuard:
         """长发送引用：引用期间 close 延迟，释放后真正关闭（fd 不被提前复用）。"""
         dev1 = _alice_dev1(harness)
         sock = harness.server.client_map[("alice", DEV1)]
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            with harness.server.client_map_lock:
+                if harness.server.sock_refs.get(sock, 0) == 0:
+                    break
+            time.sleep(0.01)
+        with harness.server.client_map_lock:
+            assert harness.server.sock_refs.get(sock, 0) == 0, \
+                f"登录初始数据发送应已结束: refs={harness.server.sock_refs.get(sock)}"
         assert harness.server.acquire_send_sock(sock) is True, "活跃会话可被引用"
         harness.server.close_sock(sock)
         with harness.server.client_map_lock:
             assert sock in harness.server.sock_pending_close, \
                 "引用未清零时关闭应延迟"
-            assert sock not in harness.server.sock_refs or True
+            assert harness.server.sock_refs.get(sock) == 1
         # 引用未释放 → fd 仍可用（未关闭）
         sock.sendall(b"x" * 4)
         harness.server.release_send_sock(sock)
