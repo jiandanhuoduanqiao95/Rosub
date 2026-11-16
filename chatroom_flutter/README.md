@@ -15,7 +15,7 @@ flutter run -d linux          # 或 -d windows
 服务器地址在编译期注入，缺省 `127.0.0.1`（连本机服务端零配置）：
 
 ```bash
-flutter build apk --release --split-per-abi --dart-define=CHATROOM_SERVER_HOST=<服务器IP>
+flutter build apk --release --target-platform android-arm64 --dart-define=CHATROOM_SERVER_HOST=<服务器IP>
 flutter build linux --release --dart-define=CHATROOM_SERVER_HOST=<服务器IP>
 flutter build windows --release --dart-define=CHATROOM_SERVER_HOST=<服务器IP>
 ```
